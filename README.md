@@ -50,6 +50,13 @@ x = torch.tensor([[1.0, -2.0]])
 torch.nn.functional.linear(x, torch.ones(3, 2))
 ```
 
+To load a safetensors checkpoint (see `docs/inference.md`):
+
+```python
+from grilly.infer.safetensors import load_file   # safetensors.torch's API
+model.load_state_dict(load_file("model.safetensors"))
+```
+
 Only float32 tensors on the default GPU exist so far. Anything torch supports
 that grilly does not yet raises `NotImplementedError` or fails to resolve;
 nothing silently behaves differently.

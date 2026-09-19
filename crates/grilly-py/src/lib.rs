@@ -6,6 +6,7 @@
 // `_C` mirrors torch's native module name.
 #![allow(non_snake_case)]
 
+mod infer;
 mod ops;
 
 use std::cell::RefCell;
@@ -347,5 +348,6 @@ fn _C(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(device_name, m)?)?;
     m.add_function(wrap_pyfunction!(generated_kernel_count, m)?)?;
     ops::register(m)?;
+    infer::register(m)?;
     Ok(())
 }

@@ -1,0 +1,13 @@
+[package]
+name = "grilly-infer"
+version = "0.1.0"
+description = "Inference machinery for grilly2: weight loading, and later quantization, GPU sampling and the decode loop (CLAUDE.md §11)"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+grilly-core = { path = "../grilly-core" }
+half = "2.7"
+memmap2 = "0.9"
+# alloc, not the default std: std only adds tempfile, for writing files
+safetensors = { version = "0.8", default-features = false, features = ["alloc"] }
