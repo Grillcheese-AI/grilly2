@@ -16,9 +16,10 @@ from . import _C
 
 __all__ = [
     "Generator", "Size", "Tensor", "add", "default_generator", "dtype", "empty",
-    "float32", "from_numpy", "initial_seed", "is_tensor", "manual_seed", "ones",
-    "rand", "rand_like", "randint", "randn", "randn_like", "relu", "seed",
-    "tensor", "zeros",
+    "enable_grad", "float32", "from_numpy", "full", "initial_seed",
+    "is_grad_enabled", "is_tensor", "manual_seed", "no_grad", "ones", "rand",
+    "rand_like", "randint", "randn", "randn_like", "relu", "seed",
+    "set_grad_enabled", "tensor", "zeros",
 ]
 
 
@@ -63,13 +64,32 @@ def _not_yet(what: str) -> NotImplementedError:
     return NotImplementedError(f"grilly: {what} is not implemented yet")
 
 
-def _check_factory_args(dtype_, device, requires_grad) -> None:
+def _check_factory_args(dtype_, device, requires_grad=False) -> None:
     if dtype_ is not None and dtype_ not in _SUPPORTED:
         raise _not_yet(f"dtype {dtype_!r} (only grilly.float32 so far)")
     if device is not None:
         raise _not_yet(f"device={device!r} (tensors always live on the default GPU)")
+
+
+def _leaf(t: "Tensor", requires_grad) -> "Tensor":
     if requires_grad:
-        raise _not_yet("autograd (requires_grad=True)")
+        t._t.set_requires_grad(True)
+    return t
+
+
+class _GradFn:
+    """The node that produced a tensor, as torch exposes ``grad_fn``."""
+
+    __slots__ = ("_name",)
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def name(self) -> str:
+        return self._name
+
+    def __repr__(self) -> str:
+        return f"<{self._name} object>"
 
 
 # ── Size ─────────────────────────────────────────────────────────────────
@@ -113,7 +133,7 @@ def _resolve_shape(shape: tuple[_builtins.int, ...], numel: _builtins.int) -> li
 class Tensor:
     """A float32 tensor on the GPU, like ``torch.Tensor``."""
 
-    __slots__ = ("_t",)
+    __slots__ = ("_t", "_grad")
 
     def __init__(self, *args, **kwargs) -> None:
         raise _not_yet("the legacy grilly.Tensor(...) constructor; use grilly.tensor(...)")
@@ -122,6 +142,7 @@ class Tensor:
     def _wrap(cls, handle) -> "Tensor":
         t = object.__new__(cls)
         t._t = handle
+        t._grad = None
         return t
 
     # shape and type
@@ -147,9 +168,98 @@ class Tensor:
     def dtype(self) -> dtype:
         return float32
 
+    # autograd
     @property
     def requires_grad(self) -> _builtins.bool:
-        return False
+        return self._t.requires_grad
+
+    @requires_grad.setter
+    def requires_grad(self, value) -> None:
+        self._t.set_requires_grad(_builtins.bool(value))
+
+    def requires_grad_(self, requires_grad: _builtins.bool = True) -> "Tensor":
+        self._t.set_requires_grad(_builtins.bool(requires_grad))
+        return self
+
+    @property
+    def is_leaf(self) -> _builtins.bool:
+        return self._t.is_leaf
+
+    @property
+    def grad_fn(self):
+        name = self._t.grad_fn_name
+        return None if name is None else _GradFn(name)
+
+    @property
+    def grad(self):
+        handle = self._t.grad
+        if handle is None:
+            self._grad = None
+            return None
+        # Hand back the same object while it is the same tensor, as torch does.
+        if self._grad is None or not self._grad._t.same_tensor(handle):
+            self._grad = Tensor._wrap(handle)
+        return self._grad
+
+    @grad.setter
+    def grad(self, value) -> None:
+        if value is not None:
+            _require_tensor("grad", value)
+        self._t.set_grad(None if value is None else value._t)
+        self._grad = value
+
+    def backward(self, gradient=None, retain_graph=None, create_graph=False, inputs=None) -> None:
+        if create_graph:
+            raise _not_yet("backward(create_graph=True)")
+        if inputs is not None:
+            raise _not_yet("backward(inputs=...)")
+        g = None if gradient is None else _require_tensor("gradient", gradient)._t
+        self._t.backward(g, _builtins.bool(retain_graph) if retain_graph is not None else create_graph)
+
+    def detach(self) -> "Tensor":
+        return Tensor._wrap(self._t.detach())
+
+    def clone(self) -> "Tensor":
+        return Tensor._wrap(self._t.clone_data())
+
+    @property
+    def _version(self) -> _builtins.int:
+        return self._t.version
+
+    # in place
+    def add_(self, other, *, alpha=1) -> "Tensor":
+        if alpha != 1:
+            raise _not_yet("add_ with alpha != 1")
+        other = _require_tensor("other", other)
+        if other.shape != self.shape:
+            raise _not_yet(f"broadcasting in add_ ({list(self.shape)} vs {list(other.shape)})")
+        self._t.add_(other._t)
+        return self
+
+    def fill_(self, value) -> "Tensor":
+        self._t.fill_(_builtins.float(value))
+        return self
+
+    def zero_(self) -> "Tensor":
+        return self.fill_(0.0)
+
+    def copy_(self, src) -> "Tensor":
+        self._t.copy_(_require_tensor("src", src)._t)
+        return self
+
+    def mul_(self, other) -> "Tensor":
+        if not isinstance(other, (_builtins.int, _builtins.float)):
+            raise _not_yet("mul_ by a tensor")
+        self._t.mul_(_builtins.float(other))
+        return self
+
+    def normal_(self, mean=0.0, std=1.0, *, generator=None) -> "Tensor":
+        self._t.normal_(_builtins.float(mean), _builtins.float(std), _generator(generator)._g)
+        return self
+
+    def uniform_(self, from_=0.0, to=1.0, *, generator=None) -> "Tensor":
+        self._t.uniform_(_builtins.float(from_), _builtins.float(to), _generator(generator)._g)
+        return self
 
     def _dim_index(self, dim: _builtins.int) -> _builtins.int:
         n = self.dim()
@@ -161,18 +271,26 @@ class Tensor:
 
     # host conversion
     def numpy(self) -> _np.ndarray:
+        if self.requires_grad:
+            raise RuntimeError(
+                "Can't call numpy() on Tensor that requires grad. "
+                "Use tensor.detach().numpy() instead."
+            )
+        return self._host()
+
+    def _host(self) -> _np.ndarray:
         data = _np.frombuffer(self._t.to_bytes(), dtype="<f4")
         return data.reshape(self._t.shape).copy()
 
     def tolist(self):
-        return self.numpy().tolist()
+        return self._host().tolist()
 
     def item(self) -> _builtins.float:
         if self.numel() != 1:
             raise RuntimeError(
                 f"a Tensor with {self.numel()} elements cannot be converted to Scalar"
             )
-        return _builtins.float(self.numpy().reshape(()))
+        return _builtins.float(self._host().reshape(()))
 
     def __len__(self) -> _builtins.int:
         if self.dim() == 0:
@@ -181,9 +299,14 @@ class Tensor:
 
     def __repr__(self) -> str:
         body = _np.array2string(
-            self.numpy(), separator=", ", prefix="tensor(",
+            self._host(), separator=", ", prefix="tensor(",
             formatter={"float_kind": lambda v: f"{v:.4f}"},
         )
+        name = self._t.grad_fn_name
+        if name is not None:
+            return f"tensor({body}, grad_fn=<{name}>)"
+        if self.requires_grad:
+            return f"tensor({body}, requires_grad=True)"
         return f"tensor({body})"
 
     # views
@@ -229,17 +352,17 @@ def _from_array(arr: _np.ndarray) -> Tensor:
 
 def tensor(data, *, dtype=None, device=None, requires_grad=False) -> Tensor:
     """Copy ``data`` (nested sequences, a scalar, or an ndarray) to a tensor."""
-    _check_factory_args(dtype, device, requires_grad)
-    if isinstance(data, Tensor):  # torch copies here too
-        return _from_array(data.numpy())
+    _check_factory_args(dtype, device)
+    if isinstance(data, Tensor):  # torch copies here too, detached
+        return _leaf(_from_array(data._host()), requires_grad)
     if isinstance(data, _np.ndarray):
         if data.dtype != _np.float32 and dtype is None:
             raise _not_yet(f"tensors of numpy dtype {data.dtype} (only float32 so far)")
-        return _from_array(data)
+        return _leaf(_from_array(data), requires_grad)
     arr = _np.asarray(data)
     # torch infers float32 from Python floats and int64/bool from ints/bools.
     if arr.dtype.kind == "f" or (dtype is float32 and arr.dtype.kind in "iub"):
-        return _from_array(arr.astype(_np.float32))
+        return _leaf(_from_array(arr.astype(_np.float32)), requires_grad)
     raise _not_yet(f"tensors of inferred dtype {arr.dtype} (only float32 so far)")
 
 
@@ -254,18 +377,28 @@ def from_numpy(ndarray: _np.ndarray) -> Tensor:
 
 
 def empty(*size, dtype=None, device=None, requires_grad=False) -> Tensor:
-    _check_factory_args(dtype, device, requires_grad)
-    return Tensor._wrap(_C.Tensor.empty(list(_size_args(size))))
+    _check_factory_args(dtype, device)
+    return _leaf(Tensor._wrap(_C.Tensor.empty(list(_size_args(size)))), requires_grad)
+
+
+def full(size, fill_value, *, dtype=None, device=None, requires_grad=False) -> Tensor:
+    _check_factory_args(dtype, device)
+    if isinstance(fill_value, _builtins.bool) or not isinstance(fill_value, (_builtins.int, _builtins.float)):
+        raise _not_yet(f"full with a {type(fill_value).__name__} fill value (only float32 tensors so far)")
+    if isinstance(fill_value, _builtins.int) and dtype is None:
+        raise _not_yet("full with an int fill value (torch makes an int64 tensor)")
+    t = Tensor._wrap(_C.Tensor.full(list(_size_args((size,))), _builtins.float(fill_value)))
+    return _leaf(t, requires_grad)
 
 
 def zeros(*size, dtype=None, device=None, requires_grad=False) -> Tensor:
-    _check_factory_args(dtype, device, requires_grad)
-    return _from_array(_np.zeros(_size_args(size), dtype=_np.float32))
+    _check_factory_args(dtype, device)
+    return _leaf(Tensor._wrap(_C.Tensor.full(list(_size_args(size)), 0.0)), requires_grad)
 
 
 def ones(*size, dtype=None, device=None, requires_grad=False) -> Tensor:
-    _check_factory_args(dtype, device, requires_grad)
-    return _from_array(_np.ones(_size_args(size), dtype=_np.float32))
+    _check_factory_args(dtype, device)
+    return _leaf(Tensor._wrap(_C.Tensor.full(list(_size_args(size)), 1.0)), requires_grad)
 
 
 # ── ops ──────────────────────────────────────────────────────────────────
@@ -289,14 +422,19 @@ def add(input, other, *, alpha=1) -> Tensor:
 from .random import Generator, default_generator, initial_seed, manual_seed, seed  # noqa: E402
 
 
-def _random(kind: str, size, generator, dtype_, device, requires_grad, out) -> Tensor:
-    if out is not None:
-        raise _not_yet("the out= argument")
-    _check_factory_args(dtype_, device, requires_grad)
+def _generator(generator) -> Generator:
     g = default_generator if generator is None else generator
     if not isinstance(g, Generator):
         raise TypeError(f"generator must be a grilly.Generator, not {type(g).__name__}")
-    return Tensor._wrap(getattr(g._g, kind)(list(_size_args(size))))
+    return g
+
+
+def _random(kind: str, size, generator, dtype_, device, requires_grad, out) -> Tensor:
+    if out is not None:
+        raise _not_yet("the out= argument")
+    _check_factory_args(dtype_, device)
+    t = Tensor._wrap(getattr(_generator(generator)._g, kind)(list(_size_args(size))))
+    return _leaf(t, requires_grad)
 
 
 def randn(*size, generator=None, out=None, dtype=None, layout=None, device=None,
@@ -329,5 +467,9 @@ def randint(*args, **kwargs):
         "and integer dtypes are not implemented yet)"
     )
 
+
+# ── autograd ─────────────────────────────────────────────────────────────
+
+from .autograd import enable_grad, is_grad_enabled, no_grad, set_grad_enabled  # noqa: E402
 
 from . import nn  # noqa: E402  (needs Tensor defined)

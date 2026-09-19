@@ -103,7 +103,6 @@ def test_distributions():
     lambda: grilly.Generator(device="cuda"),
     lambda: grilly.Generator().get_state(),
     lambda: grilly.randn(3, out=grilly.zeros(3)),
-    lambda: grilly.randn(3, requires_grad=True),
 ])
 def test_unimplemented_raises(call):
     with pytest.raises(NotImplementedError):

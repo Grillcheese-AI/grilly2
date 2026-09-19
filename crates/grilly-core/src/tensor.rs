@@ -106,6 +106,11 @@ impl Tensor {
         Ok(out)
     }
 
+    /// Whether `other` is a handle to this same tensor (not just equal data).
+    pub fn same_tensor(&self, other: &Tensor) -> bool {
+        Arc::ptr_eq(&self.meta, &other.meta)
+    }
+
     /// The same data, cut off from the graph (torch's `detach()`).
     pub fn detach(&self) -> Tensor {
         Tensor::from_parts(self.storage.clone(), self.shape.clone(), self.offset)

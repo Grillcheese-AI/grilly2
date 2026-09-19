@@ -53,6 +53,13 @@ pub fn no_grad() -> GradModeGuard {
     set_grad_enabled(false)
 }
 
+/// Set grad mode on this thread and return the previous mode, without a
+/// guard. For language bindings whose scoping is their own (Python's
+/// `with`); Rust code should use [`set_grad_enabled`] or [`no_grad`].
+pub fn swap_grad_mode(enabled: bool) -> bool {
+    GRAD_ENABLED.with(|g| g.replace(enabled))
+}
+
 // ── graph ────────────────────────────────────────────────────────────────
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {

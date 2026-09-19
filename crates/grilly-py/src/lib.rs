@@ -1,17 +1,22 @@
 //! `grilly._C`: the native half of the Python package. Deliberately small —
-//! a tensor handle and the ops. The torch-shaped surface (argument parsing,
-//! dtypes, reprs) lives in the Python package above it.
+//! a tensor handle, the ops, autograd entry points and the generator. The
+//! torch-shaped surface (argument parsing, dtypes, reprs) lives in the
+//! Python package above it.
 
 // `_C` mirrors torch's native module name.
 #![allow(non_snake_case)]
 
-use grilly_core::{rng, Device, Error, Tensor};
-use pyo3::exceptions::PyRuntimeError;
+use grilly_core::{autograd, rng, Device, Error, Tensor};
+use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 fn err(e: Error) -> PyErr {
-    PyRuntimeError::new_err(e.to_string())
+    match e {
+        Error::NotImplemented(_) => PyNotImplementedError::new_err(e.to_string()),
+        // torch raises RuntimeError for shape, argument and device failures.
+        _ => PyRuntimeError::new_err(e.to_string()),
+    }
 }
 
 fn device() -> PyResult<Device> {
@@ -50,6 +55,12 @@ impl PyTensor {
         py.detach(|| Tensor::empty(&dev, &shape)).map(wrap).map_err(err)
     }
 
+    #[staticmethod]
+    fn full(py: Python<'_>, shape: Vec<usize>, value: f32) -> PyResult<PyTensor> {
+        let dev = device()?;
+        py.detach(|| Tensor::full(&dev, &shape, value)).map(wrap).map_err(err)
+    }
+
     /// The elements as little-endian float32 bytes, row-major. Waits for
     /// pending GPU work.
     fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
@@ -65,6 +76,87 @@ impl PyTensor {
 
     fn reshape(&self, shape: Vec<usize>) -> PyResult<PyTensor> {
         self.inner.reshape(&shape).map(wrap).map_err(err)
+    }
+
+    fn clone_data(&self, py: Python<'_>) -> PyResult<PyTensor> {
+        py.detach(|| self.inner.clone_data()).map(wrap).map_err(err)
+    }
+
+    fn detach(&self) -> PyTensor {
+        wrap(self.inner.detach())
+    }
+
+    /// Whether two handles are the same tensor (share autograd state).
+    fn same_tensor(&self, other: &PyTensor) -> bool {
+        self.inner.same_tensor(&other.inner)
+    }
+
+    // autograd
+    #[getter]
+    fn requires_grad(&self) -> bool {
+        self.inner.requires_grad()
+    }
+
+    fn set_requires_grad(&self, value: bool) -> PyResult<()> {
+        self.inner.set_requires_grad(value).map_err(err)
+    }
+
+    #[getter]
+    fn is_leaf(&self) -> bool {
+        self.inner.is_leaf()
+    }
+
+    #[getter]
+    fn grad_fn_name(&self) -> Option<&'static str> {
+        self.inner.grad_fn_name()
+    }
+
+    #[getter]
+    fn grad(&self) -> Option<PyTensor> {
+        self.inner.grad().map(wrap)
+    }
+
+    fn set_grad(&self, grad: Option<&PyTensor>) -> PyResult<()> {
+        self.inner.set_grad(grad.map(|g| g.inner.clone())).map_err(err)
+    }
+
+    #[pyo3(signature = (gradient=None, retain_graph=false))]
+    fn backward(&self, py: Python<'_>, gradient: Option<&PyTensor>, retain_graph: bool) -> PyResult<()> {
+        py.detach(|| self.inner.backward(gradient.map(|g| &g.inner), retain_graph)).map_err(err)
+    }
+
+    #[getter]
+    fn version(&self) -> u64 {
+        self.inner.version()
+    }
+
+    // in place
+    fn add_(&self, py: Python<'_>, other: &PyTensor) -> PyResult<()> {
+        py.detach(|| self.inner.add_(&other.inner).map(|_| ())).map_err(err)
+    }
+
+    fn fill_(&self, py: Python<'_>, value: f32) -> PyResult<()> {
+        py.detach(|| self.inner.fill_(value).map(|_| ())).map_err(err)
+    }
+
+    fn copy_(&self, py: Python<'_>, src: &PyTensor) -> PyResult<()> {
+        py.detach(|| self.inner.copy_(&src.inner).map(|_| ())).map_err(err)
+    }
+
+    fn mul_(&self, value: f32) -> PyResult<()> {
+        self.inner.mul_(value).map(|_| ()).map_err(err)
+    }
+
+    fn normal_(&self, py: Python<'_>, mean: f32, std: f32, generator: &Bound<'_, PyGenerator>) -> PyResult<()> {
+        let mut g = generator.borrow_mut();
+        let (inner, gen) = (&self.inner, &mut g.inner);
+        py.detach(|| inner.normal_(mean, std, gen).map(|_| ())).map_err(err)
+    }
+
+    fn uniform_(&self, py: Python<'_>, low: f32, high: f32, generator: &Bound<'_, PyGenerator>) -> PyResult<()> {
+        let mut g = generator.borrow_mut();
+        let (inner, gen) = (&self.inner, &mut g.inner);
+        py.detach(|| inner.uniform_(low, high, gen).map(|_| ())).map_err(err)
     }
 }
 
@@ -124,6 +216,18 @@ fn linear(py: Python<'_>, input: &PyTensor, weight: &PyTensor, bias: Option<&PyT
         .map_err(err)
 }
 
+/// Grad mode of the calling thread (`torch.is_grad_enabled`).
+#[pyfunction]
+fn is_grad_enabled() -> bool {
+    autograd::is_grad_enabled()
+}
+
+/// Set this thread's grad mode; returns the previous mode.
+#[pyfunction]
+fn swap_grad_mode(enabled: bool) -> bool {
+    autograd::swap_grad_mode(enabled)
+}
+
 /// Name of the GPU the default device opened.
 #[pyfunction]
 fn device_name() -> PyResult<String> {
@@ -138,6 +242,8 @@ fn _C(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(relu, m)?)?;
     m.add_function(wrap_pyfunction!(add, m)?)?;
     m.add_function(wrap_pyfunction!(linear, m)?)?;
+    m.add_function(wrap_pyfunction!(is_grad_enabled, m)?)?;
+    m.add_function(wrap_pyfunction!(swap_grad_mode, m)?)?;
     m.add_function(wrap_pyfunction!(device_name, m)?)?;
     Ok(())
 }

@@ -94,7 +94,6 @@ def test_size_out_of_range_matches_torch_error_type():
     lambda: grilly.from_numpy(np.zeros(3)),             # torch: float64
     lambda: grilly.zeros(3, dtype=grilly.int64),
     lambda: grilly.zeros(3, device="cpu"),
-    lambda: grilly.zeros(3, requires_grad=True),
     lambda: g(rand(3)) + 1.0,
     lambda: grilly.add(g(rand(3)), g(rand(3)), alpha=2),
     lambda: g(rand(2, 3)) + g(rand(3)),                 # broadcasting
