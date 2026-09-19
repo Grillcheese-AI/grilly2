@@ -10,8 +10,11 @@
 #include <algorithm>
 #include <cstring>
 #include <exception>
+#include <cstdlib>
 #include <filesystem>
+#include <iostream>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -149,10 +152,30 @@ extern "C" {
 
 const char* gc_last_error(void) { return g_last_error.c_str(); }
 
+// v1 logs device bring-up to stdout. A library should not, so the log is
+// discarded unless GRILLY_VERBOSE is set; warnings on stderr are untouched.
+// std::cout's buffer is process-global, so creations are serialised: two
+// overlapping swaps would restore each other's (destroyed) sinks.
+std::mutex g_create_mutex;
+
+struct QuietStdout {
+    std::ostringstream sink;
+    std::streambuf* saved = nullptr;
+    QuietStdout() {
+        const char* v = std::getenv("GRILLY_VERBOSE");
+        if (!v || !*v || std::string(v) == "0") saved = std::cout.rdbuf(sink.rdbuf());
+    }
+    ~QuietStdout() {
+        if (saved) std::cout.rdbuf(saved);
+    }
+};
+
 int32_t gc_create(gc_ctx** out) {
     return guarded([&] {
         require(out != nullptr, "null out pointer");
         *out = nullptr;
+        std::lock_guard<std::mutex> lock(g_create_mutex);
+        QuietStdout quiet;
         *out = new gc_ctx();
     });
 }
