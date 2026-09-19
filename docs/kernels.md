@@ -41,6 +41,7 @@ applies to v1's modules.
 | `g2-rope` | rotary embedding of `heads` heads read from one projection's columns, written as (batch, heads, T, dim) | `grilly.infer` decode and prefill; also straight into the KV cache |
 | `g2-swiglu` | `silu(gate) * up`, each read from its own source and column (two projections, or the halves of a fused one) | the SwiGLU MLP of `grilly.infer.models` |
 | `g2-attn-decode` | one query token against a KV cache's filled positions, a workgroup per (batch, head), grouped-query attention by index | `grilly.infer.cache.KVCache.attend` |
+| `g2-attn-decode-split`, `g2-attn-decode-merge` | the same over a slice of the cache per workgroup, returning each slice's (max, sum, unnormalized output), then combining them ("flash decoding") | `KVCache.attend` once the cache is long enough to split |
 | `g2-sample` | next-token sampling, a workgroup of 1024 per row: repetition penalty, temperature, top-k (radix select), top-p (binary search over values), inverse-CDF draw; no sort; candidates in shared memory when they fit | `grilly.infer.sampling`, `torch.multinomial` |
 
 All are prefixed `g2-` so they cannot shadow a v1 kernel. Every tensor is

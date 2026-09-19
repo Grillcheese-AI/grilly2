@@ -120,3 +120,74 @@ fn refusals() {
     cache.append(0, &kv(4), &kv(4)).unwrap();
     assert_eq!(cache.len(0), 4);
 }
+
+/// Splitting the positions across workgroups must not change the answer:
+/// each slice sums as the single-workgroup kernel does, and the merge
+/// rescales by exp(m_s - max m_s). Against the same float64 reference and
+/// the same bound as the unsplit path.
+#[test]
+fn split_decode_attention_matches_float64_at_every_split() {
+    let dev = dev();
+    let (batch, heads, kv_heads, dim, len) = (1, 14, 2, 64, 1000);
+    let mut cache = KvCache::new(&dev, 1, batch, kv_heads, dim, len).unwrap();
+    let n = batch * kv_heads * len * dim;
+    let (kn, vn) = (data(n, 5), data(n, 6));
+    let shape = [batch, kv_heads, len, dim];
+    cache
+        .append(0, &Tensor::from_slice(&dev, &kn, &shape).unwrap(), &Tensor::from_slice(&dev, &vn, &shape).unwrap())
+        .unwrap();
+    let q = data(batch * heads * dim, 7);
+    let qt = Tensor::from_slice(&dev, &q, &[batch, heads, 1, dim]).unwrap();
+    let want = reference(&q, &kn, &vn, batch, heads, kv_heads, len, dim);
+    let vmax = vn.iter().fold(0.0f64, |m, x| m.max(x.abs() as f64));
+
+    let mut worst = 0.0f64;
+    for splits in [1usize, 2, 3, 7, 16, 64, 256] {
+        let got = cache.attend_splits(0, &qt, None, splits).unwrap().to_vec().unwrap();
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            let bound = 1e-5 * w.abs() + 1e-6 * vmax;
+            let err = (*g as f64 - w).abs();
+            worst = worst.max(err / bound);
+            assert!(err <= bound, "{splits} splits [{i}]: {g} vs {w}");
+        }
+    }
+    println!("split decode attention: worst error / bound = {worst:.3}");
+    assert!(cache.attend_splits(0, &qt, None, 0).is_err());
+    assert!(cache.attend_splits(0, &qt, None, 257).is_err());
+}
+
+/// How long a decode step's attention takes against a growing cache, for
+/// each number of slices. Sets MIN_CHUNK and TARGET_GROUPS in kv_cache.rs.
+///     cargo test --release -p grilly-infer --test kv_cache -- --ignored --nocapture split_bench
+#[test]
+#[ignore = "benchmark"]
+fn split_bench() {
+    let dev = dev();
+    let (batch, heads, kv_heads, dim) = (1, 14, 2, 64);
+    let max_len = 16_384;
+    let mut cache = KvCache::new(&dev, 1, batch, kv_heads, dim, max_len).unwrap();
+    let q = Tensor::from_slice(&dev, &data(batch * heads * dim, 7), &[batch, heads, 1, dim]).unwrap();
+    println!("      len |  splits=1       2       4       8      16      32      64     128 (ms)");
+    for (i, len) in [128usize, 256, 512, 1024, 2048, 4096, 8192, 12288, max_len].into_iter().enumerate() {
+        let step = len - cache.len(0);
+        let n = batch * kv_heads * step * dim;
+        let shape = [batch, kv_heads, step, dim];
+        let (kn, vn) = (data(n, i as u64 * 2 + 1), data(n, i as u64 * 2 + 2));
+        cache
+            .append(0, &Tensor::from_slice(&dev, &kn, &shape).unwrap(), &Tensor::from_slice(&dev, &vn, &shape).unwrap())
+            .unwrap();
+        let mut line = format!("{len:9} |");
+        for splits in [1usize, 2, 4, 8, 16, 32, 64, 128] {
+            for _ in 0..3 {
+                cache.attend_splits(0, &q, None, splits).unwrap().to_vec().unwrap();
+            }
+            let runs = 20;
+            let t = std::time::Instant::now();
+            for _ in 0..runs {
+                cache.attend_splits(0, &q, None, splits).unwrap().to_vec().unwrap();
+            }
+            line += &format!(" {:7.3}", t.elapsed().as_secs_f64() * 1e3 / runs as f64);
+        }
+        println!("{line}");
+    }
+}

@@ -127,11 +127,13 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", help="model directory (default: Qwen2.5-0.5B-Instruct from the HF cache)")
     ap.add_argument("--prompt", default="Explain in three sentences why the sky is blue.")
+    ap.add_argument("--repeat-prompt", type=int, default=1, help="repeat the prompt N times, to decode against a long cache")
     ap.add_argument("--max-new-tokens", type=int, default=128)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--check-hf", action="store_true", help="compare greedy float32 tokens with transformers first")
     ap.add_argument("--no-quantize", action="store_true")
     args = ap.parse_args()
+    args.prompt *= args.repeat_prompt
 
     from tokenizers import Tokenizer
     path = model_dir(args.model)
@@ -164,7 +166,7 @@ def main() -> None:
         class Stream:
             """Prints text as it comes, and times the first and last token."""
             def __init__(self):
-                self.tokens, self.times = [], []
+                self.tokens, self.times, self.mid = [], [], None
 
             def put(self, value):
                 if not self.times:  # the prompt
@@ -172,6 +174,8 @@ def main() -> None:
                     return
                 self.tokens.extend(value.tolist())
                 self.times.append(time.perf_counter())
+                if self.mid is None:  # prefill is over: count the decode steps alone
+                    self.mid = grilly._C.submit_stats()
                 print(tokenizer.decode(self.tokens[-1:]), end="", flush=True)
 
             def end(self):
@@ -191,9 +195,13 @@ def main() -> None:
     decode = stream.times[-1] - stream.times[1]
     print(f"\nprompt {len(ids)} tokens, prefill + first token {prefill * 1e3:.0f} ms; "
           f"{n} new tokens, decode {(n - 1) / decode:.1f} tokens/s ({decode / max(n - 1, 1) * 1e3:.1f} ms/token)")
-    print(f"GPU work: {(after['dispatches'] - before['dispatches']) / n:.0f} dispatches and "
-          f"{(after['wait_ns_total'] - before['wait_ns_total']) / n / 1e6:.1f} ms of GPU wait per token, "
-          f"{(after['submits'] - before['submits']) / n:.1f} submits per token")
+    steps = max(n - 1, 1)
+    mid = stream.mid or before
+    print(f"prefill: {mid['dispatches'] - before['dispatches']} dispatches, "
+          f"{(mid['wait_ns_total'] - before['wait_ns_total']) / 1e6:.0f} ms of GPU wait")
+    print(f"per decoded token: {(after['dispatches'] - mid['dispatches']) / steps:.0f} dispatches and "
+          f"{(after['wait_ns_total'] - mid['wait_ns_total']) / steps / 1e6:.1f} ms of GPU wait, "
+          f"{(after['submits'] - mid['submits']) / steps:.1f} submits")
     print(f"weights and cache in persistent memory: {after['persistent_bytes'] / 2**30:.2f} GiB")
     if vram.peak is not None:
         print(f"peak dedicated VRAM: {load_vram.peak / 2**30:.2f} GiB while loading and quantizing (float32 weights first), "

@@ -9,9 +9,12 @@
 //! `(batch, kv_heads, max_len, head_dim)` in persistent memory:
 //! - [`KvCache::append`] writes new keys and values in place at the layer's
 //!   current length (`g2-copy`);
-//! - [`KvCache::attend`] runs one query token against the filled positions
-//!   (`g2-attn-decode`), with grouped-query attention by index, so the cache
-//!   is never copied or read back.
+//! - [`KvCache::attend`] runs one query token against the filled positions,
+//!   with grouped-query attention by index, so the cache is never copied or
+//!   read back. One workgroup per (batch, head) leaves most of the card idle
+//!   at batch 1, so with a long cache the positions are split across
+//!   workgroups and merged ("flash decoding"): `g2-attn-decode` for one
+//!   slice, `g2-attn-decode-split` + `g2-attn-decode-merge` for several.
 //!
 //! No autograd: this is the inference path.
 
@@ -23,7 +26,29 @@ use crate::ops::{rope_into, Heads, Rotary};
 /// Bindings: q, k cache, v cache, scratch, out. Push: heads, kv_heads,
 /// max_len, len, dim, scale, q_off, rows.
 const ATTN_DECODE: Kernel = Kernel { shader: "g2-attn-decode", bindings: 5, push_words: 8, local_size: [256, 1, 1] };
-pub const KERNELS: &[Kernel] = &[ATTN_DECODE];
+/// Bindings: q, k cache, v cache, scratch, (m, l), partial out. Push: heads,
+/// kv_heads, max_len, len, dim, scale, q_off, splits.
+const ATTN_DECODE_SPLIT: Kernel = Kernel { shader: "g2-attn-decode-split", bindings: 6, push_words: 8, local_size: [256, 1, 1] };
+/// Bindings: (m, l), partial out, out. Push: rows, splits, dim.
+const ATTN_DECODE_MERGE: Kernel = Kernel { shader: "g2-attn-decode-merge", bindings: 3, push_words: 3, local_size: [256, 1, 1] };
+pub const KERNELS: &[Kernel] = &[ATTN_DECODE, ATTN_DECODE_SPLIT, ATTN_DECODE_MERGE];
+
+/// Cache positions per slice, at least: with fewer, a workgroup's 256
+/// threads run dry and the split costs more than it wins. Measured: at 256
+/// filled positions one workgroup per row is already the fastest.
+const MIN_CHUNK: usize = 256;
+/// Workgroups to aim for when splitting. Measured on an RX 6750 XT (40
+/// compute units, 14 rows at batch 1); the win is flat from here to four
+/// times as many slices (the table in docs/inference.md).
+const TARGET_GROUPS: usize = 256;
+/// The merge holds one weight per slice in a workgroup's threads.
+const MAX_SPLITS: usize = 256;
+
+/// How many slices to cut `len` positions into for `rows` (batch * head)
+/// queries. 1 means the single-workgroup kernel.
+fn splits_for(rows: usize, len: usize) -> usize {
+    TARGET_GROUPS.div_ceil(rows.max(1)).clamp(1, (len / MIN_CHUNK).clamp(1, MAX_SPLITS))
+}
 
 /// Largest head dimension g2-attn-decode takes (its lanes per group).
 pub const MAX_HEAD_DIM: usize = 256;
@@ -183,6 +208,16 @@ impl KvCache {
     /// positions. `heads` must be a multiple of `kv_heads` (grouped-query
     /// attention). `scale` defaults to `1 / sqrt(head_dim)`.
     pub fn attend(&self, layer: usize, q: &Tensor, scale: Option<f32>) -> Result<Tensor> {
+        self.attend_in(layer, q, scale, None)
+    }
+
+    /// [`KvCache::attend`] with the number of slices forced, for tests and
+    /// the benchmark that set [`splits_for`].
+    pub fn attend_splits(&self, layer: usize, q: &Tensor, scale: Option<f32>, splits: usize) -> Result<Tensor> {
+        self.attend_in(layer, q, scale, Some(splits))
+    }
+
+    fn attend_in(&self, layer: usize, q: &Tensor, scale: Option<f32>, splits: Option<usize>) -> Result<Tensor> {
         self.layer(layer)?;
         require_float("KV cache attention", q.dtype())?;
         let (b, d) = (self.batch, self.head_dim);
@@ -205,8 +240,16 @@ impl KvCache {
         let out = Tensor::empty(dev, &[b, heads, 1, d])?;
         let scratch = Tensor::empty(dev, &[rows, self.max_len])?;
         let scale = scale.unwrap_or(1.0 / (d as f32).sqrt());
+        let splits = match splits {
+            Some(0) => return Err(Error::Invalid("KV cache attention: splits must be at least 1".into())),
+            Some(n) if n > MAX_SPLITS => {
+                return Err(Error::Invalid(format!("KV cache attention: at most {MAX_SPLITS} splits, got {n}")))
+            }
+            Some(n) => n.min(len),
+            None => splits_for(rows, len),
+        };
         let gx = rows.min(65_535);
-        let push = [
+        let mut push = [
             u32_of(heads, "heads")?,
             u32_of(self.kv_heads, "kv_heads")?,
             u32_of(self.max_len, "max_len")?,
@@ -216,11 +259,37 @@ impl KvCache {
             u32_of(q.offset(), "offset")?,
             u32_of(rows, "rows")?,
         ];
-        ATTN_DECODE.launch(
+        if splits == 1 || rows > 65_535 {
+            ATTN_DECODE.launch(
+                dev,
+                &[Arg::Storage(q), Arg::Tensor(&self.k[layer]), Arg::Tensor(&self.v[layer]), Arg::Tensor(&scratch), Arg::Tensor(&out)],
+                [u32_of(gx * 256, "rows")?, u32_of(rows.div_ceil(gx), "rows")?, 1],
+                &push,
+            )?;
+            return Ok(out);
+        }
+        // one workgroup per (row, slice), then one per row to merge them
+        let ml = Tensor::empty(dev, &[rows, splits, 2])?;
+        let partial = Tensor::empty(dev, &[rows, splits, d])?;
+        push[7] = u32_of(splits, "splits")?;
+        ATTN_DECODE_SPLIT.launch(
             dev,
-            &[Arg::Storage(q), Arg::Tensor(&self.k[layer]), Arg::Tensor(&self.v[layer]), Arg::Tensor(&scratch), Arg::Tensor(&out)],
-            [u32_of(gx * 256, "rows")?, u32_of(rows.div_ceil(gx), "rows")?, 1],
+            &[
+                Arg::Storage(q),
+                Arg::Tensor(&self.k[layer]),
+                Arg::Tensor(&self.v[layer]),
+                Arg::Tensor(&scratch),
+                Arg::Tensor(&ml),
+                Arg::Tensor(&partial),
+            ],
+            [u32_of(rows * 256, "rows")?, u32_of(splits, "splits")?, 1],
             &push,
+        )?;
+        ATTN_DECODE_MERGE.launch(
+            dev,
+            &[Arg::Tensor(&ml), Arg::Tensor(&partial), Arg::Tensor(&out)],
+            [u32_of(gx * 256, "rows")?, u32_of(rows.div_ceil(gx), "rows")?, 1],
+            &[u32_of(rows, "rows")?, u32_of(splits, "splits")?, u32_of(d, "head_dim")?],
         )?;
         Ok(out)
     }

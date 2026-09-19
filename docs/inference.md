@@ -397,15 +397,54 @@ ported onto this cache later, as options.
 
 Appending one token's keys and values costs 6 µs.
 
-The time grows linearly with length. Each (batch, head) has one workgroup,
-14 here out of 40 CUs, and each thread reads whole key rows, which does not
-coalesce. At 1,024 positions, 24 layers spend about 3 ms per token on
-attention.
+The time grows linearly with length, and one workgroup per (batch, head)
+is 14 of the card's 40 compute units at batch 1. The rest of the GPU is
+idle no matter how long the cache is, which is what the next section fixes.
 
-A split-K ("flash-decoding") kernel would fix this: several workgroups per
-head over slices of the cache, then a combine step, reading rows
-cooperatively. It is the next attention item once the decode loop shows
-where the time goes.
+### Splitting the cache across workgroups ("flash decoding")
+
+`g2-attn-decode-split` gives a workgroup a *slice* of the positions and
+returns that slice's partial softmax unnormalized — its maximum `m`, its
+`l = sum exp(s - m)` and its `o = sum exp(s - m) v` — and
+`g2-attn-decode-merge` combines the slices per row with the usual online
+softmax rescaling, `w_s = exp(m_s - max_s m_s)`. Inside a slice the
+arithmetic is the single-workgroup kernel's, in the same order, so the
+split changes only how the slices are combined.
+
+`KVCache::attend` picks the number of slices itself: enough workgroups to
+fill the card (256, measured), never fewer than 256 cache positions each,
+at most 256 slices (the merge holds one weight per thread). One slice means
+the original kernel and no extra dispatch, so short caches are untouched.
+
+GPU time per `attend` call, same layout, by number of slices — each number
+includes about 0.12 ms of submit and fence overhead, visible as the floor
+at 256 positions:
+
+| filled positions | 1 slice | 2 | 4 | 8 | 16 | 32 | chosen |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 256 | **0.122** | 0.125 | 0.128 | 0.137 | 0.127 | 0.129 | 1 |
+| 1,024 | 0.270 | 0.230 | **0.172** | 0.194 | 0.203 | 0.193 | 4 |
+| 4,096 | 0.568 | 0.361 | 0.324 | 0.356 | **0.307** | 0.334 | 16 |
+| 16,384 | 1.984 | 1.317 | 1.120 | 1.054 | **0.868** | 0.876 | 19 |
+
+End to end on Qwen2.5-0.5B, int8, sampled, measured by forcing one slice
+and rebuilding:
+
+| prompt | one slice | split | |
+|---|---:|---:|---|
+| 40 tokens | 163.4 tokens/s | 163.4 | unchanged: one slice is chosen |
+| 3,030 tokens | 69.0 | **103.9** | 1.51x (GPU wait 12.4 -> 6.6 ms/token) |
+| 8,030 tokens | 33.8 | **68.0** | 2.01x (27.0 -> 11.8 ms/token) |
+
+The split costs one extra dispatch per layer (273 -> 297 per token), which
+is why it is not used when the cache is short.
+
+**Tests.** `split_decode_attention_matches_float64_at_every_split` runs a
+1,000-position cache at 1, 2, 3, 7, 16, 64 and 256 slices against the same
+float64 reference and the same bound as the unsplit path (worst 0.043 of
+the bound, against 0.393 unsplit — slicing shortens each sum). The
+benchmark that produced the table above is
+`cargo test --release -p grilly-infer --test kv_cache -- --ignored --nocapture split_bench`.
 
 ## 4. The decode loop, and the acceptance run
 
