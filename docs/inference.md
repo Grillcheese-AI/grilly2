@@ -337,3 +337,72 @@ Three changes, each measured on its own:
 A pass over the row now costs about 0.07 ms, which is the limit for one
 workgroup. Going further would mean splitting a row across workgroups in
 extra dispatches.
+
+## 5. The KV cache
+
+```python
+from grilly.infer.cache import KVCache
+
+cache = KVCache(num_layers, batch_size, num_kv_heads, head_dim, max_length)
+cache.append(layer, keys, values)   # (batch, kv_heads, T, head_dim), written in place
+out = cache.attend(layer, query)    # query (batch, heads, 1, head_dim)
+```
+
+**Why not v1's cache.** §11 said to wire v1's nine KV-cache ops, not
+rebuild them. Reading `cpp/src/ops/kv_cache.cpp` showed three problems.
+- **Host round trips.** `kvCacheAppend` takes host arrays: it copies them,
+  uploads, runs a GEMM for its low-rank compression, downloads the result
+  and copies it into a mapped buffer. `kvCacheDecode` uploads, runs a
+  kernel, and downloads the rebuilt keys and values to host memory. In a
+  decode loop, every layer's cache would cross PCIe twice per token.
+- **Lossy storage.** Its storage is lossy by design: MLA projection, FP8
+  keys, INT4/INT2 values.
+- **A second path to the GPU.** Its ops drive v1's pool and command batch
+  directly. Exposing them through the shim would add a second path to the
+  GPU beside the dispatch spine, which §5 forbids.
+
+On the owner's go-ahead (2026-09-19), the cache is built in grilly2 instead. v1 is
+unchanged. v1's eviction policies (H2O, a learned eviction head) could be
+ported onto this cache later, as options.
+
+**What it is.**
+- Keys and values are exact float32, preallocated per layer as
+  `(batch, kv_heads, max_length, head_dim)` in persistent memory.
+- `append` writes the new positions in place, with grilly's strided copy.
+- `attend` runs `g2-attn-decode`: one query token against the filled
+  positions, a workgroup per (batch, head). Grouped-query attention works
+  by index, so the cache is never copied, sliced or read back.
+- A prompt's own attention (prefill) stays ordinary causal
+  `scaled_dot_product_attention` on its keys and values, which are then
+  appended.
+- `get_seq_length(layer)` has Hugging Face's name.
+- Appending past `max_length` raises.
+
+**Tests.**
+- `crates/grilly-infer/tests/kv_cache.rs` runs from Rust only: prefill and
+  decode steps against float64, grouped-query attention, head dims 1, 64,
+  80 and 128 (worst error 0.39 of the bound).
+- `tests/python/test_kv_cache.py` checks the same against float64 (worst
+  0.09) and against torch's `scaled_dot_product_attention(enable_gqa=True)`
+  (rtol 1e-5).
+- One of its tests checks that a prompt's causal SDPA followed by decode
+  steps from the cache equals causal attention over the whole sequence.
+
+**Speed.** GPU time per call, 100 calls per batch, at Qwen2.5-0.5B's layout
+(14 query heads over 2 KV heads, dim 64):
+
+| filled positions | 128 | 1,024 | 4,096 | 16,384 |
+|---|---:|---:|---:|---:|
+| `attend`, one layer | 19 µs | 119 µs | 467 µs | 1,847 µs |
+
+Appending one token's keys and values costs 6 µs.
+
+The time grows linearly with length. Each (batch, head) has one workgroup,
+14 here out of 40 CUs, and each thread reads whole key rows, which does not
+coalesce. At 1,024 positions, 24 layers spend about 3 ms per token on
+attention.
+
+A split-K ("flash-decoding") kernel would fix this: several workgroups per
+head over slices of the cache, then a combine step, reading rows
+cooperatively. It is the next attention item once the decode loop shows
+where the time goes.

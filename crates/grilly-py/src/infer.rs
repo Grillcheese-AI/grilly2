@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use grilly_infer::{sampling, Int8Weight, LoadError, SafeTensorsFile, Sampling};
+use grilly_infer::{sampling, Int8Weight, KvCache, LoadError, SafeTensorsFile, Sampling};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyFileNotFoundError, PyOSError};
 use pyo3::prelude::*;
@@ -177,9 +177,58 @@ fn multinomial(py: Python<'_>, weights: &PyTensor, generator: &Bound<'_, PyGener
     py.detach(|| sampling::multinomial(&weights.inner, gen)).map(wrap).map_err(err)
 }
 
+/// Keys and values of every layer, on the device (grilly_infer::KvCache).
+#[pyclass(name = "KVCache", module = "grilly._C")]
+struct PyKvCache {
+    inner: KvCache,
+}
+
+#[pymethods]
+impl PyKvCache {
+    #[new]
+    fn new(py: Python<'_>, layers: usize, batch: usize, kv_heads: usize, head_dim: usize, max_len: usize) -> PyResult<PyKvCache> {
+        let dev = device()?;
+        py.detach(|| KvCache::new(&dev, layers, batch, kv_heads, head_dim, max_len)).map(|inner| PyKvCache { inner }).map_err(err)
+    }
+
+    fn append(&mut self, py: Python<'_>, layer: usize, keys: &PyTensor, values: &PyTensor) -> PyResult<()> {
+        let inner = &mut self.inner;
+        py.detach(|| inner.append(layer, &keys.inner, &values.inner)).map_err(err)
+    }
+
+    #[pyo3(signature = (layer, query, scale=None))]
+    fn attend(&self, py: Python<'_>, layer: usize, query: &PyTensor, scale: Option<f32>) -> PyResult<PyTensor> {
+        py.detach(|| self.inner.attend(layer, &query.inner, scale)).map(wrap).map_err(err)
+    }
+
+    fn len(&self, layer: usize) -> usize {
+        self.inner.len(layer)
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    #[getter]
+    fn layers(&self) -> usize {
+        self.inner.layers()
+    }
+
+    #[getter]
+    fn max_len(&self) -> usize {
+        self.inner.max_len()
+    }
+
+    #[getter]
+    fn nbytes(&self) -> usize {
+        self.inner.nbytes()
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySafeFile>()?;
     m.add_class::<PyInt8Weight>()?;
+    m.add_class::<PyKvCache>()?;
     m.add_function(wrap_pyfunction!(next_tokens, m)?)?;
     m.add_function(wrap_pyfunction!(processed_scores, m)?)?;
     m.add_function(wrap_pyfunction!(sample_probabilities, m)?)?;
