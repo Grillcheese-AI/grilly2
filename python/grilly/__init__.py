@@ -727,3 +727,4 @@ from . import utils  # noqa: E402
 from . import optim  # noqa: E402
 from . import cuda  # noqa: E402
 from . import return_types  # noqa: E402
+from ._einsum import einsum  # noqa: E402
