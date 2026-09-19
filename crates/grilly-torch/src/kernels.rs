@@ -45,3 +45,14 @@ pub const LINEAR_BACKWARD: Kernel = Kernel {
 };
 
 pub const ALL: &[Kernel] = &[RELU, RELU_BACKWARD, LINEAR, LINEAR_BACKWARD];
+
+/// Block-sparse attention forward (g2-flash-fwd.glsl). Bindings: q, k, v,
+/// bits, kv_count, kv_list, out, lse. Push: {B, H, L, S, D, Dv, scale, mb,
+/// mh, nq, nk, q_off, k_off, v_off}. One workgroup per (query tile, head,
+/// batch).
+pub const FLASH_FWD: Kernel = Kernel {
+    shader: "g2-flash-fwd",
+    bindings: 8,
+    push_words: 14,
+    local_size: [256, 1, 1],
+};

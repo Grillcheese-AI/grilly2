@@ -2,6 +2,7 @@
 //! follow `torch` / `torch.nn.functional`. Every op records its backward
 //! formula for autograd.
 
+pub mod attention;
 pub mod kernels;
 pub mod math;
 pub mod shape;

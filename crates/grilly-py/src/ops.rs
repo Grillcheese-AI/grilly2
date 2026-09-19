@@ -3,7 +3,7 @@
 
 use grilly_core::generic::{Binary, IntBinary, Reduce, Unary};
 use grilly_core::{DType, Tensor};
-use grilly_torch::{math, shape};
+use grilly_torch::{attention, math, shape};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -329,6 +329,29 @@ fn logcumsumexp(py: Python<'_>, x: &PyTensor, dim: usize) -> PyResult<PyTensor> 
     run(py, move || math::logcumsumexp(&x, dim))
 }
 
+/// Fused block-sparse attention forward: (out, lse), not recorded.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn flash_forward(
+    py: Python<'_>,
+    q: &PyTensor,
+    k: &PyTensor,
+    v: &PyTensor,
+    bits: &PyTensor,
+    kv_count: &PyTensor,
+    kv_list: &PyTensor,
+    mb: usize,
+    mh: usize,
+    scale: f32,
+) -> PyResult<(PyTensor, PyTensor)> {
+    let (q, k, v) = (q.inner.clone(), k.inner.clone(), v.inner.clone());
+    let (bits, kv_count, kv_list) = (bits.inner.clone(), kv_count.inner.clone(), kv_list.inner.clone());
+    run2(py, move || {
+        let tiles = attention::Tiles { bits: &bits, kv_count: &kv_count, kv_list: &kv_list, mb, mh };
+        attention::flash_forward(&q, &k, &v, &tiles, scale)
+    })
+}
+
 #[pyfunction]
 fn set_deterministic(on: bool) {
     grilly_core::generic::set_deterministic(on);
@@ -344,6 +367,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(index_select, m)?)?;
     m.add_function(wrap_pyfunction!(index_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(embedding, m)?)?;
+    m.add_function(wrap_pyfunction!(flash_forward, m)?)?;
     m.add_function(wrap_pyfunction!(scatter, m)?)?;
     m.add_function(wrap_pyfunction!(scatter_, m)?)?;
     m.add_function(wrap_pyfunction!(cumsum, m)?)?;

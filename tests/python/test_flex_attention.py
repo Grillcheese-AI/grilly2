@@ -1,8 +1,11 @@
-"""torch.nn.attention.flex_attention (dense) against torch 2.10's own (CPU).
+"""torch.nn.attention.flex_attention against torch 2.10's own (CPU).
 
+Two paths are exercised: the fused block-sparse kernel (no score_mod, head
+dims <= 128) and the dense path (score_mods, larger heads).
 Tolerance: outputs, lse and gradients within rtol 1e-5, atol 1e-6, as for
-scaled_dot_product_attention (the same math: matmuls of depth <= 16 and a
-softmax). Masks are exact.
+scaled_dot_product_attention (matmuls of depth <= 128 and a softmax; the
+fused kernel measured within 7.5e-7 of the dense path). Masks and tile
+lists are exact.
 """
 
 import warnings
@@ -69,8 +72,6 @@ def test_block_masks_match_torch(mod, bh):
 
 
 def test_combined_masks_match_torch():
-    for lib, fa in ((grilly, gfa), (torch, tfa)):
-        pass
     compare(lambda lib: (gfa if lib is grilly else tfa).and_masks(causal, lambda b, h, q, k: q - k < 4))
     compare(lambda lib: (gfa if lib is grilly else tfa).or_masks(window, lambda b, h, q, k: k == 0))
     compare(lambda lib: (gfa if lib is grilly else tfa).noop_mask)
@@ -158,3 +159,83 @@ def test_cubbyllm_flex_path_equals_the_masked_sdpa_path():
     keep = (i[:, None] >= i[None, :]) & (i[:, None] - i[None, :] < 3)
     ref = grilly.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=keep)
     np.testing.assert_allclose(gfa.flex_attention(q, k, v, block_mask=bm).numpy(), ref.numpy(), rtol=0, atol=1e-6)
+
+
+# ── the fused kernel (g2-flash-fwd) ──────────────────────────────────────
+
+@pytest.mark.parametrize("mod,bh,Q,KV", [
+    (window, (None, None), 100, 100), (causal, (None, None), 64, 64),
+    (per_batch_head, (B, H), 50, 77), (lambda b, h, q, k: (q != 5) & (k <= q), (None, None), 33, 33),
+])
+def test_tile_lists_match_the_dense_mask(mod, bh, Q, KV):
+    bm = gfa.create_block_mask(mod, *bh, Q, KV)
+    t, dense = bm.tiles(), bm.mask.numpy()
+    mb, mh, nq, nk = t.shape
+    padded = np.zeros((mb, mh, nq * 32, nk * 32), bool)
+    padded[..., :Q, :KV] = dense
+    bits = t.bits.view(np.uint32)
+    for w in range(nk):  # the bit mask holds the dense mask exactly
+        got = (bits[..., w:w + 1] >> np.arange(32, dtype=np.uint32)) & 1
+        np.testing.assert_array_equal(got.astype(bool), padded[..., :Q, w * 32:(w + 1) * 32])
+    blocks = padded.reshape(mb, mh, nq, 32, nk, 32)
+    for b in range(mb):
+        for h in range(mh):
+            for qt in range(nq):
+                listed = t.kv_list[b, h, qt, :t.kv_count[b, h, qt]]
+                assert list(listed & (gfa._FULL - 1)) == list(np.nonzero(blocks[b, h, qt].any(axis=(0, 2)))[0])
+                for e in listed:
+                    kt, full = e & (gfa._FULL - 1), bool(e & gfa._FULL)
+                    rows, cols = min(32, Q - qt * 32), min(32, KV - kt * 32)
+                    assert full == bool(blocks[b, h, qt, :rows, kt, :cols].all())
+            for kt in range(nk):  # the transpose, for the backward
+                listed = t.q_list[b, h, kt, :t.q_count[b, h, kt]] & (gfa._FULL - 1)
+                assert list(listed) == list(np.nonzero(blocks[b, h, :, :, kt].any(axis=(1, 2)))[0])
+
+
+def fused_compare(make_mask=None, mask_bh=(None, None), q_shape=(B, H, L, E), kv_shape=(B, H, S, E), v_dim=None, **kw):
+    """Forward only (no_grad): the fused kernel against torch."""
+    vd = v_dim or kv_shape[-1]
+    q, k, v = rand(*q_shape), rand(*kv_shape), rand(*kv_shape[:-1], vd)
+    outs = []
+    for lib, fa in ((grilly, gfa), (torch, tfa)):
+        bm = None if make_mask is None else fa.create_block_mask(make_mask, *mask_bh, q_shape[2], kv_shape[2], device="cpu")
+        with lib.no_grad():
+            out, aux = fa.flex_attention(*(lib.tensor(a) for a in (q, k, v)), block_mask=bm,
+                                         return_aux=fa.AuxRequest(lse=True), **kw)
+        outs.append((out.numpy(), aux.lse.numpy()))
+    (og, lg), (ot, lt) = outs
+    np.testing.assert_allclose(og, ot, rtol=1e-5, atol=1e-6)
+    np.testing.assert_array_equal(np.isneginf(lg), np.isneginf(lt))
+    fin = np.isfinite(lt)
+    np.testing.assert_allclose(lg[fin], lt[fin], rtol=1e-5, atol=1e-6)
+    return og, lg
+
+
+@pytest.mark.parametrize("mod,bh", [(None, (None, None)), (causal, (None, None)), (window, (None, None)),
+                                    (per_batch_head, (B, H))])
+def test_fused_forward_matches_torch(mod, bh):
+    fused_compare(mod, bh)
+
+
+def test_fused_forward_shapes_match_torch():
+    fused_compare(causal, q_shape=(B, H, 70, 128), kv_shape=(B, H, 70, 128))            # D at the kernel's limit
+    fused_compare(window, q_shape=(1, 2, 45, 16), kv_shape=(1, 2, 45, 16), v_dim=48)     # Dv != D
+    fused_compare(lambda b, h, q, k: k <= q + 4, q_shape=(B, H, 5, E), kv_shape=(B, H, 99, E))  # L != S
+    fused_compare(causal, q_shape=(B, 8, L, E), kv_shape=(B, 2, S, E), enable_gqa=True)
+    fused_compare(window, scale=0.25)
+    og, lg = fused_compare(lambda b, h, q, k: (q != 3) & (k <= q))
+    assert np.all(og[:, :, 3] == 0) and np.all(np.isneginf(lg[:, :, 3]))
+
+
+def test_large_head_dims_use_the_dense_path():
+    fused_compare(causal, q_shape=(1, 2, 20, 160), kv_shape=(1, 2, 20, 160))
+
+
+def test_score_mod_warns_once():
+    gfa._SCORE_MOD_WARNED = False
+    q = grilly.tensor(rand(1, 1, 4, 8))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(3):
+            gfa.flex_attention(q, q, q, score_mod=lambda s, b, h, qi, ki: s)
+    assert sum("dense path" in str(w.message) for w in caught) == 1
