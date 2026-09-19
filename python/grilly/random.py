@@ -25,15 +25,12 @@ def _seed_u64(seed) -> int:
 
 
 class Generator:
-    """A random stream, like ``torch.Generator``. Generators live on the host,
-    as torch's CPU generators do; ``device`` may be None or "cpu"."""
+    """A random stream, like ``torch.Generator``. Streams are generated on
+    the host; ``device`` may be grilly's device or its "cpu" alias."""
 
     def __init__(self, device=None) -> None:
-        if device not in (None, "cpu"):
-            raise NotImplementedError(
-                f"grilly: Generator(device={device!r}) is not implemented yet "
-                "(generators are host-side, like torch's CPU generator)"
-            )
+        from . import _resolve_device
+        _resolve_device(device)  # grilly's one device, or its "cpu" alias
         self._g = _C.Generator(_C.DEFAULT_SEED)
 
     def manual_seed(self, seed) -> "Generator":

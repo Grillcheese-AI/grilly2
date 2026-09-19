@@ -15,7 +15,7 @@ import numpy as _np
 from . import _C
 
 __all__ = [
-    "Generator", "Size", "Tensor", "add", "default_generator", "dtype", "empty",
+    "Generator", "Size", "Tensor", "add", "default_generator", "device", "dtype", "empty",
     "enable_grad", "float32", "from_numpy", "full", "initial_seed",
     "is_grad_enabled", "is_tensor", "manual_seed", "no_grad", "ones", "rand",
     "rand_like", "randint", "randn", "randn_like", "relu", "seed",
@@ -64,11 +64,75 @@ def _not_yet(what: str) -> NotImplementedError:
     return NotImplementedError(f"grilly: {what} is not implemented yet")
 
 
-def _check_factory_args(dtype_, device, requires_grad=False) -> None:
+# ── devices ──────────────────────────────────────────────────────────────
+
+_DEVICE_TYPES = (
+    "cpu", "cuda", "ipu", "xpu", "mkldnn", "opengl", "opencl", "ideep", "hip", "ve", "fpga",
+    "maia", "xla", "lazy", "vulkan", "mps", "meta", "hpu", "mtia", "privateuseone",
+)
+
+
+class device:
+    """A device, like ``torch.device``. grilly runs on one Vulkan device,
+    ``device(type='vulkan', index=0)``; ``"cpu"`` is accepted anywhere a device
+    is expected as an alias for it (see docs/devices.md)."""
+
+    __slots__ = ("type", "index")
+
+    def __init__(self, type, index=None) -> None:  # noqa: A002 - torch's name
+        if isinstance(type, device):
+            self.type, self.index = type.type, type.index
+            return
+        if isinstance(type, _builtins.int):
+            type, index = "cuda", type
+        if not isinstance(type, str):
+            raise TypeError(f"device() received an invalid combination of arguments: {type!r}")
+        name = type
+        if ":" in name:
+            name, _, idx = name.partition(":")
+            if index is not None:
+                raise RuntimeError("type (string) must not include an index because index was passed explicitly")
+            index = _builtins.int(idx)
+        if name not in _DEVICE_TYPES:
+            raise RuntimeError(f"Expected one of {', '.join(_DEVICE_TYPES)} device type at start of device string: {type}")
+        self.type, self.index = name, index
+
+    def __eq__(self, other) -> _builtins.bool:
+        return isinstance(other, device) and (self.type, self.index) == (other.type, other.index)
+
+    def __hash__(self) -> _builtins.int:
+        return hash((self.type, self.index))
+
+    def __repr__(self) -> str:
+        if self.index is None:
+            return f"device(type='{self.type}')"
+        return f"device(type='{self.type}', index={self.index})"
+
+    def __str__(self) -> str:
+        return self.type if self.index is None else f"{self.type}:{self.index}"
+
+
+_DEVICE = device("vulkan", 0)
+
+
+def _resolve_device(d) -> device:
+    """The grilly device, for None, vulkan[:0] or the "cpu" alias."""
+    if d is None:
+        return _DEVICE
+    dev = device(d)
+    if dev.type in ("vulkan", "cpu") and dev.index in (None, 0):
+        return _DEVICE
+    raise _not_yet(f"device {str(dev)!r} (grilly runs on one Vulkan device; 'cpu' is accepted as an alias for it)")
+
+
+def _check_factory_args(dtype_, device_, requires_grad=False) -> None:
     if dtype_ is not None and dtype_ not in _SUPPORTED:
         raise _not_yet(f"dtype {dtype_!r} (only grilly.float32 so far)")
-    if device is not None:
-        raise _not_yet(f"device={device!r} (tensors always live on the default GPU)")
+    _resolve_device(device_)
+
+
+def _cast(t: "Tensor", dt) -> "Tensor":
+    raise _not_yet(f"converting to {dt!r} (only float32 so far)")
 
 
 def _leaf(t: "Tensor", requires_grad) -> "Tensor":
@@ -167,6 +231,44 @@ class Tensor:
     @property
     def dtype(self) -> dtype:
         return float32
+
+    @property
+    def device(self) -> device:
+        return _DEVICE
+
+    is_cuda = False
+
+    def cpu(self) -> "Tensor":
+        return self  # "cpu" is an alias for grilly's device
+
+    def cuda(self, *args, **kwargs) -> "Tensor":
+        raise _not_yet("Tensor.cuda() (grilly runs on Vulkan)")
+
+    def to(self, *args, **kwargs) -> "Tensor":
+        """``to(dtype)``, ``to(device, dtype)``, ``to(other)``; returns self when
+        nothing changes, as torch does."""
+        target_dtype, target_device = kwargs.pop("dtype", None), kwargs.pop("device", None)
+        copy = kwargs.pop("copy", False)
+        kwargs.pop("non_blocking", None)
+        kwargs.pop("memory_format", None)
+        if kwargs:
+            raise TypeError(f"to() got unexpected keyword arguments {sorted(kwargs)}")
+        for a in args:
+            if isinstance(a, Tensor):
+                target_dtype, target_device = a.dtype, a.device
+            elif isinstance(a, dtype):
+                target_dtype = a
+            elif isinstance(a, (str, device, _builtins.int)):
+                target_device = a
+            elif isinstance(a, _builtins.bool):
+                pass  # non_blocking passed positionally
+            else:
+                raise TypeError(f"to() received an invalid argument {a!r}")
+        _resolve_device(target_device)
+        out = self
+        if target_dtype is not None and target_dtype is not self.dtype:
+            out = _cast(self, target_dtype)
+        return out.clone() if copy and out is self else out
 
     # autograd
     @property
@@ -493,3 +595,4 @@ from .autograd import enable_grad, is_grad_enabled, no_grad, set_grad_enabled  #
 from . import nn  # noqa: E402  (needs Tensor defined)
 from . import utils  # noqa: E402
 from . import optim  # noqa: E402
+from . import cuda  # noqa: E402

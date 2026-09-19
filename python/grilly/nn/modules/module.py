@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections import OrderedDict, namedtuple
 
-from ... import Tensor, _not_yet, float32, no_grad
+from ... import Tensor, _not_yet, _resolve_device, device, dtype, float32, no_grad
 from ..parameter import Parameter
 
 _IncompatibleKeys = namedtuple("IncompatibleKeys", ["missing_keys", "unexpected_keys"])
@@ -206,12 +206,25 @@ class Module:
                 p.grad.zero_()
 
     def to(self, *args, **kwargs) -> "Module":
-        targets = list(args) + list(kwargs.values())
-        for t in targets:
-            if t is float32 or t is None:
-                continue
-            raise _not_yet(f"Module.to({t!r}) (only float32 on the default GPU so far)")
+        """Device moves are no-ops (grilly has one device; "cpu" is an alias
+        for it); dtype conversion supports float32 only."""
+        for t in list(args) + list(kwargs.values()):
+            if isinstance(t, Tensor):
+                t = t.dtype
+            if isinstance(t, dtype):
+                if t is not float32:
+                    raise _not_yet(f"Module.to({t!r}) (only float32 parameters so far)")
+            elif isinstance(t, (str, device, int)) and not isinstance(t, bool):
+                _resolve_device(t)
+            elif t is not None and not isinstance(t, bool):
+                raise TypeError(f"to() received an invalid argument {t!r}")
         return self
+
+    def cpu(self) -> "Module":
+        return self
+
+    def cuda(self, *args, **kwargs) -> "Module":
+        raise _not_yet("Module.cuda() (grilly runs on Vulkan)")
 
     def float(self) -> "Module":
         return self
