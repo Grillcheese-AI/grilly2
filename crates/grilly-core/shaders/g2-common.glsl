@@ -100,3 +100,24 @@ float sin_cos_acc(float v, bool want_cos) {
     }
     return sgn * r;
 }
+
+// Compensated sums, shared by the reductions. A value is carried as
+// (hi, lo), true ~ hi + lo; once hi is infinite the error term is dropped
+// (it would be inf - inf = NaN), so inf + x stays inf.
+
+// (hi, lo) += v, Kahan style
+void kahan_add(inout float hi, inout float lo, float v) {
+    precise float y = v + lo;
+    precise float t = hi + y;
+    lo = isinf(t) ? 0.0 : y - (t - hi);
+    hi = t;
+}
+
+// (a_hi, a_lo) += (b_hi, b_lo), two-sum on the high parts
+void pair_add(inout float a_hi, inout float a_lo, float b_hi, float b_lo) {
+    precise float t = a_hi + b_hi;
+    precise float bp = t - a_hi;
+    precise float err = (a_hi - (t - bp)) + (b_hi - bp);
+    a_lo = isinf(t) ? 0.0 : a_lo + b_lo + err;
+    a_hi = t;
+}

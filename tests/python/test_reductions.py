@@ -3,8 +3,9 @@
 grilly picks a path by shape (grilly_core::generic::reduce):
   rows      the reduced dim is last: a workgroup per row (g2-reduce-rows),
             long rows split into chunks and finished by a second pass;
-  columns   a strided dim with >= 8192 outputs: a thread per output;
-  moved     a strided dim with fewer outputs: copied to rows first.
+  columns   a strided dim: a thread per (output, chunk of the dim), with
+            neighbouring threads on neighbouring columns; few outputs split
+            the dim into chunks, finished by a second pass.
 Tolerance: |err| <= eps * sum(|x|) for sums (Kahan per thread, two-sum
 across threads; measured at most 0.14 of it), mean the same divided by
 the count; max / min are exact. Every path is deterministic: the same
@@ -25,9 +26,10 @@ PATHS = [
     ("rows, one per workgroup", (32768, 512), -1),
     ("rows, chunked", (3, 200_000), 1),
     ("rows, whole tensor", (5_000_000,), 0),
-    ("columns", (300, 9000), 0),
-    ("moved", (100_000, 4), 0),
-    ("moved, middle dim", (16, 5000, 7), 1),
+    ("columns", (300, 20000), 0),
+    ("columns, chunked", (100_000, 4), 0),
+    ("columns, chunked, middle dim", (16, 5000, 7), 1),
+    ("columns, layer_norm weight gradient", (4096, 2048), 0),
 ]
 
 

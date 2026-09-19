@@ -322,17 +322,38 @@ pub fn layer_norm(x: &Tensor, normalized: usize, weight: Option<&Tensor>, bias: 
     if normalized == 0 || normalized > x.dim() {
         return Err(Error::Shape(format!("layer_norm over {normalized} dims of a {}-d input", x.dim())));
     }
-    let dims: Vec<usize> = (x.dim() - normalized..x.dim()).collect();
-    let centred = binary(x, &mean(x, &dims, true)?, Binary::Sub)?;
-    let var = mean(&unary(&centred, Unary::PowScalar, 2.0, 0.0)?, &dims, true)?;
-    let inv = unary(&unary(&var, Unary::AddScalar, eps, 0.0)?, Unary::Rsqrt, 0.0, 0.0)?;
-    let mut y = binary(&centred, &inv, Binary::Mul)?;
-    if let Some(w) = weight {
-        y = binary(&y, w, Binary::Mul)?;
-    }
-    if let Some(b) = bias {
-        y = binary(&y, b, Binary::Add)?;
-    }
+    // one fused kernel each way (g2-layer-norm*); the backward is torch's
+    // formula, with dw and db as column sums over rows
+    let n: usize = x.shape()[x.dim() - normalized..].iter().product();
+    let (mut y, stats) = k::layer_norm(x, n, weight, bias, eps)?;
+    let mut inputs = vec![x];
+    inputs.extend(weight);
+    inputs.extend(bias);
+    let mut save = vec![x];
+    save.extend(weight);
+    let (has_w, has_b) = (weight.is_some(), bias.is_some());
+    let (w_shape, b_shape) = (weight.map(|t| t.shape().to_vec()), bias.map(|t| t.shape().to_vec()));
+    record("NativeLayerNormBackward0", &inputs, &mut y, &save, false, move |g, s, needs| {
+        let rows = stats.shape()[0];
+        let w = if has_w { Some(&s[1]) } else { None };
+        let need_w = has_w && needs[1];
+        let need_b = has_b && needs[if has_w { 2 } else { 1 }];
+        let (dx, gxhat) = k::layer_norm_backward(g, &s[0], w, &stats, n, need_w)?;
+        let column_sum = |t: &Tensor, shape: &[usize]| -> Result<Tensor> {
+            k::reduce(&t.reshape(&[rows, n])?, 0, Reduce::Sum, false)?.reshape(shape)
+        };
+        let mut grads = vec![if needs[0] { Some(dx) } else { None }];
+        if has_w {
+            grads.push(match gxhat {
+                Some(gx) if need_w => Some(column_sum(&gx, w_shape.as_deref().unwrap())?),
+                _ => None,
+            });
+        }
+        if has_b {
+            grads.push(if need_b { Some(column_sum(g, b_shape.as_deref().unwrap())?) } else { None });
+        }
+        Ok(grads)
+    })?;
     Ok(y)
 }
 

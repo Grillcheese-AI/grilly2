@@ -26,23 +26,6 @@ const uint SUM = 0, MEAN = 1, MAX = 2, MIN = 3;
 shared float s_hi[256];
 shared float s_lo[256];
 
-// (hi, lo) += v, Kahan style (lo carries the rounding error, true ~ hi + lo)
-void kahan_add(inout float hi, inout float lo, float v) {
-    precise float y = v + lo;
-    precise float t = hi + y;
-    lo = isinf(t) ? 0.0 : y - (t - hi);  // an infinite sum carries no error term
-    hi = t;
-}
-
-// (a_hi, a_lo) += (b_hi, b_lo) with two-sum on the high parts
-void pair_add(inout float a_hi, inout float a_lo, float b_hi, float b_lo) {
-    precise float t = a_hi + b_hi;
-    precise float bp = t - a_hi;
-    precise float err = (a_hi - (t - bp)) + (b_hi - bp);
-    a_lo = isinf(t) ? 0.0 : a_lo + b_lo + err;
-    a_hi = t;
-}
-
 float extreme(float r, float v) {
     // torch propagates NaN through max/min
     return (isnan(v) || isnan(r)) ? NAN : (p.op == MAX ? max(r, v) : min(r, v));

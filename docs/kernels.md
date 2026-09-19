@@ -14,8 +14,8 @@ applies to v1's modules.
 |---|---|---|
 | `g2-unary` | `f(x; a, b)` per element, in place or not | neg, abs, sign, exp, log, sqrt, rsqrt, tanh, sigmoid, sin, cos, scalar + - * / pow, clamp, gelu, isfinite/isinf/isnan |
 | `g2-binary` | `op(a, b)` with torch broadcasting (up to 6 dims) | + - * / pow, maximum, minimum, comparisons |
-| `g2-reduce` | sum / mean / max / min along a strided axis, a thread per output (used when there are >= 8192 outputs) | sum, mean, amax, amin, the backward of broadcasting |
-| `g2-reduce-rows` | the same along contiguous rows, a workgroup per row (or per chunk of a long row, finished by a second pass) | the last-dim reductions under softmax, log_softmax, layer_norm; full sums; strided reductions with few outputs (copied to rows first) |
+| `g2-reduce` | sum / mean / max / min along a strided axis, a thread per (output, chunk of the axis); few outputs split the axis and finish in a second pass | sum, mean, amax, amin over non-last dims, the backward of broadcasting, bias / weight gradients |
+| `g2-reduce-rows` | the same along contiguous rows, a workgroup per row (or per chunk of a long row, finished by a second pass) | the last-dim reductions under softmax and log_softmax; full sums |
 | `g2-copy` | strided gather/scatter | transpose, permute, expand, slicing, cat, stack, `__setitem__` |
 | `g2-cast` | dtype conversion with torch's rules | `.to(dtype)`, `.long()`, `.float()`, `.bool()` |
 | `g2-binary-int` | integer / bool ops with broadcasting | int arithmetic, bitwise and logical ops, int comparisons |
@@ -28,6 +28,7 @@ applies to v1's modules.
 | `g2-sort-init`, `g2-sort-step`, `g2-sort-take` | bitonic sort of every row (padded to a power of two), float32 or int64 keys, ties by position | sort, argsort, topk |
 | `g2-scatter` | `dst[c with c[dim] := index[c]] = src[c]`, any dtype | scatter, scatter_, the input gradient of scatter |
 | `g2-scan` | inclusive scan along one axis, one thread per line, forward or reversed | cumsum (and its gradient), logcumsumexp (and its gradient) |
+| `g2-layer-norm`, `g2-layer-norm-backward` | layer_norm forward and input gradient, a workgroup per row; (mean, rstd) saved per row | F.layer_norm, nn.LayerNorm (dw and db are column sums through g2-reduce) |
 | `g2-bmm` | batched `op(A) @ op(B)`, optional transposes, broadcast batch dims; 16x16 tiles through shared memory | matmul / bmm with batch dims, and both gradients (no transpose copies) |
 
 All are prefixed `g2-` so they cannot shadow a v1 kernel. Every tensor is
@@ -66,9 +67,12 @@ tests use. It runs 64 products of 512^3 in 15 ms (1.1 TFLOP/s) on the
 RX 6750 XT. 2-D @ 2-D still goes through v1's linear kernel.
 
 Reductions pick a path by shape (`grilly_core::generic::reduce`): the rows
-kernel when the reduced dim is last; a thread per output when a strided dim
-has at least 8192 outputs (neighbouring outputs then read neighbouring
-addresses); otherwise a copy to rows, then the rows kernel. Adjacent reduced
+kernel when the reduced dim is last; otherwise the columns kernel, which
+splits the reduced axis into chunks until there are ~16K threads
+(neighbouring threads take neighbouring columns, so reads stay coalesced).
+An earlier version copied few-output strided reductions to rows first;
+that transpose copy cost 4.2 ms for (4096, 2048), more than the
+reduction. Adjacent reduced
 dims merge into one pass. The rows kernel sums with Kahan per thread and a
 fixed two-sum tree across the workgroup: deterministic, and within
 0.14 * eps * sum(|x|) of float64 (measured). Before it, one thread per output

@@ -15,7 +15,7 @@ const MAX_DIMS: usize = 6;
 
 pub const UNARY: Kernel = Kernel { shader: "g2-unary", bindings: 2, push_words: 6, local_size: [256, 1, 1] };
 pub const BINARY: Kernel = Kernel { shader: "g2-binary", bindings: 3, push_words: 6 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
-pub const REDUCE: Kernel = Kernel { shader: "g2-reduce", bindings: 2, push_words: 6, local_size: [256, 1, 1] };
+pub const REDUCE: Kernel = Kernel { shader: "g2-reduce", bindings: 2, push_words: 11, local_size: [256, 1, 1] };
 pub const REDUCE_ROWS: Kernel = Kernel { shader: "g2-reduce-rows", bindings: 2, push_words: 10, local_size: [256, 1, 1] };
 pub const COPY: Kernel = Kernel { shader: "g2-copy", bindings: 2, push_words: 4 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 
@@ -38,9 +38,14 @@ pub const SCAN: Kernel = Kernel { shader: "g2-scan", bindings: 2, push_words: 8,
 
 pub const BMM: Kernel = Kernel { shader: "g2-bmm", bindings: 3, push_words: 9 + 3 * MAX_BATCH_DIMS as u32, local_size: [16, 16, 1] };
 
+pub const LAYER_NORM: Kernel = Kernel { shader: "g2-layer-norm", bindings: 5, push_words: 7, local_size: [256, 1, 1] };
+pub const LAYER_NORM_BACKWARD: Kernel =
+    Kernel { shader: "g2-layer-norm-backward", bindings: 6, push_words: 7, local_size: [256, 1, 1] };
+
 pub const ALL: &[Kernel] = &[
     UNARY, BINARY, REDUCE, COPY, CAST, BINARY_INT, WHERE, REDUCE_INT, INDEX, INDEX_ADD, INDEX_ADD_ATOMIC,
-    ARG_REDUCE, SORT_INIT, SORT_STEP, SORT_TAKE, SCATTER, SCAN, BMM, REDUCE_ROWS,
+    ARG_REDUCE, SORT_INIT, SORT_STEP, SORT_TAKE, SCATTER, SCAN, BMM, REDUCE_ROWS, LAYER_NORM,
+    LAYER_NORM_BACKWARD,
 ];
 
 /// Batch dimensions g2-bmm can broadcast over.
@@ -298,30 +303,40 @@ pub fn reduce(x: &Tensor, dim: usize, op: Reduce, keepdim: bool) -> Result<Tenso
     if len > 0 && inner == 1 {
         // the reduced dim is contiguous: a workgroup per row
         reduce_rows(x, x.offset(), outer, len, op, &out)?;
-    } else if len > 0 && outer * inner < COLUMN_THREADS {
-        // too few outputs to fill the GPU with a thread each: make the
-        // reduced dim contiguous, then reduce rows
-        let moved = Tensor::empty(x.device(), &[outer, inner, len])?;
-        copy_strided(x, x.offset(), &[len * inner, 1, inner], &moved, 0, &[inner * len, len, 1], &[outer, inner, len])?;
-        reduce_rows(&moved, 0, outer * inner, len, op, &out)?;
     } else {
-        // a thread per output; neighbouring outputs read neighbouring addresses
-        let push = [
-            u32_of(outer, "outer")?,
-            u32_of(len, "len")?,
-            u32_of(inner, "inner")?,
-            op as u32,
-            u32_of(x.offset(), "offset")?,
-            0,
-        ];
-        REDUCE.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], outer * inner, &push)?;
+        reduce_columns(x, outer, len, inner, op, &out)?;
     }
     Ok(out)
 }
 
-/// Below this many outputs, a strided (non-last-dim) reduction is copied
-/// to contiguous rows first rather than given one thread per output.
-const COLUMN_THREADS: usize = 8192;
+/// Threads a strided reduction aims for before it stops splitting the
+/// reduced axis into chunks.
+const COLUMN_THREADS: usize = 65_536;
+
+/// Reduce the middle axis of `x` viewed as (outer, len, inner), a thread
+/// per (output, chunk). With few outputs the axis is split into chunks
+/// whose (hi, lo) partials are reduced the same way, pass after pass (each
+/// shortens the axis at least 64-fold), until one chunk is left.
+fn reduce_columns(x: &Tensor, outer: usize, len: usize, inner: usize, op: Reduce, out: &Tensor) -> Result<()> {
+    let outputs = outer * inner;
+    let (o32, i32_, count) = (u32_of(outer, "outer")?, u32_of(inner, "inner")?, u32_of(len, "len")?);
+    let out_off = u32_of(out.offset(), "offset")?;
+    let (mut src, mut len, mut pairs_in, mut off) = (x.clone(), len, 0, u32_of(x.offset(), "offset")?);
+    loop {
+        let wanted = if outputs >= COLUMN_THREADS { 1 } else { COLUMN_THREADS.div_ceil(outputs).min(len.div_ceil(64)).max(1) };
+        let chunk = len.div_ceil(wanted).max(1);
+        let chunks = len.div_ceil(chunk).max(1);
+        let (l32, c32, k32) = (u32_of(len, "len")?, u32_of(chunks, "chunks")?, u32_of(chunk, "chunk")?);
+        if chunks == 1 {
+            let push = [o32, l32, i32_, op as u32, off, out_off, k32, 1, pairs_in, 0, count];
+            return REDUCE.launch_flat(x.device(), &[Arg::Storage(&src), Arg::Storage(out)], outputs, &push);
+        }
+        let partial = Tensor::empty(x.device(), &[outputs * chunks * 2])?;
+        let push = [o32, l32, i32_, op as u32, off, 0, k32, c32, pairs_in, 1, count];
+        REDUCE.launch_flat(x.device(), &[Arg::Storage(&src), Arg::Storage(&partial)], outputs * chunks, &push)?;
+        (src, len, pairs_in, off) = (partial, chunks, 1, 0);
+    }
+}
 
 /// Workgroups a row reduction aims for before it stops splitting rows.
 const TARGET_GROUPS: usize = 512;
@@ -858,4 +873,79 @@ pub fn bmm(a: &Tensor, b: &Tensor, trans_a: bool, trans_b: bool) -> Result<Tenso
     let threads = [u32_of(n.next_multiple_of(16), "N")?, u32_of(m.next_multiple_of(16), "M")?, batch as u32];
     BMM.launch(a.device(), &[Arg::Storage(a), Arg::Storage(b), Arg::Storage(&out)], threads, &push)?;
     Ok(out)
+}
+
+/// A workgroup per row, for `rows` rows (a 2-D grid past 65535).
+fn row_grid(rows: usize) -> Result<[u32; 3]> {
+    let gx = rows.min(65_535);
+    Ok([u32_of(gx * 256, "rows")?, u32_of(rows.div_ceil(gx), "rows")?, 1])
+}
+
+/// layer_norm over the last `n` elements of each row of float32 `x`:
+/// `(x - mean) * rstd * weight + bias`, with the biased variance and
+/// `rstd = 1 / sqrt(var + eps)`, as torch. Returns the output and the
+/// per-row `(mean, rstd)` pairs, (rows, 2), for [`layer_norm_backward`].
+pub fn layer_norm(x: &Tensor, n: usize, weight: Option<&Tensor>, bias: Option<&Tensor>, eps: f32) -> Result<(Tensor, Tensor)> {
+    require_float("layer_norm", x.dtype())?;
+    let rows = if n == 0 { 0 } else { x.numel() / n };
+    let y = Tensor::empty(x.device(), x.shape())?;
+    let stats = Tensor::empty(x.device(), &[rows, 2])?;
+    if rows == 0 {
+        return Ok((y, stats));
+    }
+    for (t, what) in [(weight, "weight"), (bias, "bias")] {
+        if let Some(t) = t {
+            require_float("layer_norm", t.dtype())?;
+            if t.numel() != n {
+                return Err(Error::Shape(format!("layer_norm: {what} has {} elements, expected {n}", t.numel())));
+            }
+        }
+    }
+    let affine = weight.is_some() as u32 | (bias.is_some() as u32) << 1;
+    let (w, b) = (weight.unwrap_or(x), bias.unwrap_or(x));
+    let push = [
+        u32_of(rows, "rows")?,
+        u32_of(n, "n")?,
+        eps.to_bits(),
+        affine,
+        u32_of(x.offset(), "offset")?,
+        u32_of(w.offset(), "offset")?,
+        u32_of(b.offset(), "offset")?,
+    ];
+    let args = [Arg::Storage(x), Arg::Storage(w), Arg::Storage(b), Arg::Storage(&y), Arg::Storage(&stats)];
+    LAYER_NORM.launch(x.device(), &args, row_grid(rows)?, &push)?;
+    Ok((y, stats))
+}
+
+/// The input gradient of [`layer_norm`] from the output gradient `g`, and,
+/// with `want_gxhat`, `g * xhat` per element (its column sums over rows are
+/// the weight's gradient).
+pub fn layer_norm_backward(
+    g: &Tensor,
+    x: &Tensor,
+    weight: Option<&Tensor>,
+    stats: &Tensor,
+    n: usize,
+    want_gxhat: bool,
+) -> Result<(Tensor, Option<Tensor>)> {
+    let rows = stats.shape()[0];
+    let dx = Tensor::empty(x.device(), x.shape())?;
+    let gxhat = if want_gxhat { Some(Tensor::empty(x.device(), x.shape())?) } else { None };
+    if rows == 0 {
+        return Ok((dx, gxhat));
+    }
+    let w = weight.unwrap_or(x);
+    let push = [
+        u32_of(rows, "rows")?,
+        u32_of(n, "n")?,
+        weight.is_some() as u32,
+        want_gxhat as u32,
+        u32_of(g.offset(), "offset")?,
+        u32_of(x.offset(), "offset")?,
+        u32_of(w.offset(), "offset")?,
+    ];
+    let gx_arg = gxhat.as_ref().unwrap_or(&dx);
+    let args = [Arg::Storage(g), Arg::Storage(x), Arg::Storage(w), Arg::Storage(stats), Arg::Storage(&dx), Arg::Storage(gx_arg)];
+    LAYER_NORM_BACKWARD.launch(x.device(), &args, row_grid(rows)?, &push)?;
+    Ok((dx, gxhat))
 }
