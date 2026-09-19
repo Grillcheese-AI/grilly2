@@ -83,6 +83,21 @@ def normalize(input: Tensor, p: float = 2.0, dim: int = 1, eps: float = 1e-12, o
     return Tensor._wrap(_C.normalize(x._t, _ops._dim(dim, x.dim()), float(eps)))
 
 
+def rms_norm(input: Tensor, normalized_shape, weight=None, eps: float | None = None) -> Tensor:
+    """``input * rsqrt(mean(input^2) + eps) * weight`` over the last
+    ``len(normalized_shape)`` dimensions, as torch computes it. ``eps``
+    defaults to float32's machine epsilon, as torch's does."""
+    x = _require_tensor("input", input)
+    shape = (normalized_shape,) if isinstance(normalized_shape, int) else tuple(normalized_shape)
+    if not shape or tuple(x.shape[x.dim() - len(shape):]) != shape:
+        raise RuntimeError(f"Given normalized_shape={list(shape)}, expected input with shape [*, "
+                           f"{', '.join(map(str, shape))}], but got input of size {list(x.shape)}")
+    eps = 1.1920928955078125e-07 if eps is None else float(eps)
+    dims = tuple(range(x.dim() - len(shape), x.dim()))
+    y = x * (x.pow(2).mean(dims, keepdim=True) + eps).rsqrt()
+    return y if weight is None else y * _require_tensor("weight", weight)
+
+
 def layer_norm(input: Tensor, normalized_shape, weight=None, bias=None, eps: float = 1e-5) -> Tensor:
     x = _require_tensor("input", input)
     if isinstance(normalized_shape, int):

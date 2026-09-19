@@ -58,7 +58,11 @@ model.load_state_dict(load_file("model.safetensors"), assign=True)
 
 from grilly.infer.quantization import quantize_, Int8WeightOnlyConfig   # torchao's API
 quantize_(model, Int8WeightOnlyConfig())         # int8 linear weights
+model.generate(input_ids, max_new_tokens=64, do_sample=True, top_p=0.8)  # grilly.infer.models: HF's generate()
 ```
+
+`python tools/generate.py` runs Qwen2.5-0.5B-Instruct from the local Hugging
+Face cache that way: int8, sampled, about 60 tokens/s on an RX 6750 XT.
 
 Only float32 tensors on the default GPU exist so far. Anything torch supports
 that grilly does not yet raises `NotImplementedError` or fails to resolve;

@@ -406,3 +406,107 @@ A split-K ("flash-decoding") kernel would fix this: several workgroups per
 head over slices of the cache, then a combine step, reading rows
 cooperatively. It is the next attention item once the decode loop shows
 where the time goes.
+
+## 4. The decode loop, and the acceptance run
+
+```python
+from grilly.infer.models import LlamaConfig, LlamaForCausalLM
+from grilly.infer.safetensors import load_file
+from grilly.infer.quantization import quantize_, Int8WeightOnlyConfig
+
+model = LlamaForCausalLM(config)                       # a LlamaConfig
+model.load_state_dict(load_file("model.safetensors"), assign=True, strict=False)
+model.tie_weights()
+quantize_(model, Int8WeightOnlyConfig())
+ids = model.generate(input_ids, max_new_tokens=128, do_sample=True,
+                     temperature=0.7, top_k=20, top_p=0.8, repetition_penalty=1.1)
+```
+
+**`generate()`** (`grilly.infer.generation.GenerationMixin`) has Hugging
+Face's signature and defaults:
+- **Inputs:** `inputs` or `input_ids=`, and a `generation_config` or its
+  fields as keyword arguments.
+- **Length:** `max_length` defaults to 20; `max_new_tokens` overrides it.
+- **Sampling:** `do_sample`, `temperature`, `top_k`, `top_p`,
+  `repetition_penalty`.
+- **Stopping:** `eos_token_id` ends a row; `pad_token_id` defaults to the
+  EOS id.
+- **Streaming:** `streamer` gets HF's `put`/`end` calls, so
+  `transformers.TextStreamer` works.
+- **Randomness:** grilly's global generator, seeded by `manual_seed`.
+- **Refused, by name:** beam search, padded batches, unknown keyword
+  arguments.
+
+How a step runs:
+- The prompt runs once.
+- Each step then runs one token against the KV cache.
+- The token is sampled on the device.
+- Only the sampled ids are read back, for EOS and the streamer.
+- The next step's input stays on the GPU.
+
+**The model** (`grilly.infer.models.LlamaForCausalLM`) is a Llama-family
+decoder built from grilly's torch ops:
+- RMSNorm; `nn.RMSNorm` and `F.rms_norm` are now in grilly with torch's
+  names;
+- rotary embeddings;
+- grouped-query attention;
+- a SwiGLU MLP;
+- q/k/v bias for Qwen2.
+
+Its parameter names are Hugging Face's, so checkpoints load with no
+remapping. It is the machinery's own model: a safetensors file loads and
+generates with no adapter installed. Reading `config.json` into a
+`LlamaConfig` is left to the adapter.
+
+**Tests against transformers' own Qwen2** (`tests/python/test_generation.py`,
+the same random weights in both, float32):
+- logits within 1e-5 of the logit scale (measured 2e-7), over a full
+  prompt and token by token through the cache, tied and untied;
+- greedy generation, with and without a repetition penalty, and EOS
+  stopping with padding in a batch of two: identical token sequences;
+- seeded sampling reproducible, the streamer protocol, a quantized model,
+  and the refusals.
+
+### The acceptance run (`tools/generate.py`), RX 6750 XT
+
+Qwen2.5-0.5B-Instruct: loaded from its safetensors, quantized to int8, then
+a chat prompt sampled with the model's own `generation_config.json`
+(temperature 0.7, top_k 20, top_p 0.8, repetition penalty 1.1).
+
+- **Correct:** greedy float32 generation is identical to transformers for
+  32 new tokens, both without a repetition penalty and with the model's
+  1.1. The comparison passes identical settings to both. transformers'
+  `from_pretrained` also loads `generation_config.json`, so a bare
+  `do_sample=False` there still applies the 1.1.
+- **Coherent:** "The sky is blue because of the scattering of sunlight by
+  tiny particles in the Earth's atmosphere, ..." The model's physics is its
+  own.
+
+| | |
+|---|---:|
+| decode (int8, sampled) | **59.5 tokens/s** (16.8 ms per token) |
+| prompt of 40 tokens + first token | 50 ms |
+| peak dedicated VRAM while generating | **1.04 GiB** |
+| peak while loading (float32 weights, then quantized) | 2.63 GiB |
+| weights + KV cache in persistent memory | 0.97 GiB |
+
+**Where a token's 16.8 ms goes:**
+- 1,145 dispatches;
+- 5.8 ms of GPU wait;
+- the rest is host-side recording, about 10 µs per dispatch through
+  Python and Rust.
+
+That is what the dispatch-cost measurement (docs/submission.md) predicted:
+the decode loop is host-bound, and the lever is fewer dispatches per token.
+
+Per layer, the largest contributors are:
+- RMSNorm, composed from 6 ops, twice;
+- rotary embeddings, about 7 ops each for q and k;
+- layout copies for the transposes around attention.
+
+The next pass: fused RMSNorm and rotary kernels, attention kernels that
+read the projections' layout directly, and one int8 linear for q, k and v.
+After that, replaying a recorded decode step, as CUDA graphs do.
+
+The loading peak (2.63 GiB) holds the float32 weights before they are
+quantized. Quantizing each tensor as it is read would remove it.

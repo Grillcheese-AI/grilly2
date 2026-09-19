@@ -54,6 +54,35 @@ class Linear(Module):
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
 
 
+class RMSNorm(Module):
+    """``torch.nn.RMSNorm``: ``x * rsqrt(mean(x^2) + eps) * weight`` over the
+    last dimensions."""
+
+    def __init__(self, normalized_shape, eps: float | None = None, elementwise_affine: bool = True,
+                 device=None, dtype=None) -> None:
+        super().__init__()
+        _no_device(device, dtype)
+        if isinstance(normalized_shape, int):
+            normalized_shape = (normalized_shape,)
+        self.normalized_shape = tuple(normalized_shape)
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+        if elementwise_affine:
+            self.weight = Parameter(_parameter_storage(*self.normalized_shape, fill=1.0))
+        else:
+            self.register_parameter("weight", None)
+
+    def reset_parameters(self) -> None:
+        if self.elementwise_affine:
+            init.ones_(self.weight)
+
+    def forward(self, input):
+        return F.rms_norm(input, self.normalized_shape, self.weight, self.eps)
+
+    def extra_repr(self) -> str:
+        return f"{self.normalized_shape}, eps={self.eps}, elementwise_affine={self.elementwise_affine}"
+
+
 class LayerNorm(Module):
     def __init__(self, normalized_shape, eps: float = 1e-5, elementwise_affine: bool = True,
                  bias: bool = True, device=None, dtype=None) -> None:
