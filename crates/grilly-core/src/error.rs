@@ -12,6 +12,8 @@ pub enum Error {
     Invalid(String),
     /// torch supports this; grilly does not yet.
     NotImplemented(String),
+    /// An index is out of range (Python's IndexError, where torch raises it).
+    Index(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -23,6 +25,7 @@ impl fmt::Display for Error {
             Error::Shape(m) => write!(f, "shape error: {m}"),
             Error::Invalid(m) => write!(f, "invalid argument: {m}"),
             Error::NotImplemented(m) => write!(f, "grilly: {m} is not implemented yet"),
+            Error::Index(m) => write!(f, "{m}"),
         }
     }
 }

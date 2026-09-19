@@ -10,8 +10,8 @@ from .. import _ops
 from .. import relu as _relu
 
 __all__ = [
-    "cosine_similarity", "cross_entropy", "dropout", "gelu", "layer_norm", "linear",
-    "log_softmax", "mse_loss", "normalize", "relu", "sigmoid", "silu", "softmax", "tanh",
+    "cosine_similarity", "cross_entropy", "dropout", "embedding", "gelu", "layer_norm", "linear",
+    "log_softmax", "mse_loss", "nll_loss", "normalize", "relu", "sigmoid", "silu", "softmax", "tanh",
 ]
 
 
@@ -117,20 +117,55 @@ def _reduce(loss: Tensor, reduction: str) -> Tensor:
     raise ValueError(f"{reduction} is not a valid value for reduction")
 
 
+def _nll(logp: Tensor, target: Tensor, ignore_index: int, reduction: str, smoothing: float) -> Tensor:
+    """Negative log-likelihood of class indices along dim 1 (or 0 for 1-D
+    input), with ignore_index; 'mean' averages over the non-ignored targets."""
+    class_dim = 1 if logp.dim() > 1 else 0
+    if target.is_floating_point():
+        raise RuntimeError("expected scalar type Long but found Float")
+    keep = target != ignore_index
+    safe = _ops.where(keep, target, 0)
+    picked = _ops.gather(logp, class_dim, safe.unsqueeze(class_dim)).squeeze(class_dim)
+    loss = -picked
+    if smoothing:
+        loss = loss * (1.0 - smoothing) - logp.mean(class_dim) * smoothing
+    loss = _ops.where(keep, loss, 0.0)
+    if reduction == "mean":
+        return loss.sum() / keep.sum()
+    return _reduce(loss, reduction)
+
+
+def nll_loss(input: Tensor, target: Tensor, weight=None, size_average=None, ignore_index: int = -100,
+             reduce=None, reduction: str = "mean") -> Tensor:
+    if weight is not None or size_average is not None or reduce is not None:
+        raise _not_yet("nll_loss(weight / size_average / reduce)")
+    return _nll(_require_tensor("input", input), _require_tensor("target", target), ignore_index, reduction, 0.0)
+
+
 def cross_entropy(input: Tensor, target: Tensor, weight=None, size_average=None, ignore_index: int = -100,
                   reduce=None, reduction: str = "mean", label_smoothing: float = 0.0) -> Tensor:
-    """Class-probability targets (same shape as ``input``) are supported;
-    class-index targets need int64 tensors, which grilly does not have yet."""
+    """Class-index targets (int64, the input's shape without the class dim)
+    or class-probability targets (the input's shape)."""
     x, t = _require_tensor("input", input), _require_tensor("target", target)
     if weight is not None or size_average is not None or reduce is not None:
         raise _not_yet("cross_entropy(weight / size_average / reduce)")
-    if tuple(t.shape) != tuple(x.shape):
-        raise _not_yet("cross_entropy with class-index targets (int64 tensors)")
     class_dim = 1 if x.dim() > 1 else 0
+    if tuple(t.shape) != tuple(x.shape):
+        return _nll(log_softmax(x, class_dim), t, ignore_index, reduction, label_smoothing)
     if label_smoothing:
         t = t * (1.0 - label_smoothing) + label_smoothing / x.shape[class_dim]
     loss = -(t * log_softmax(x, class_dim)).sum(class_dim)
     return _reduce(loss, reduction)
+
+
+def embedding(input: Tensor, weight: Tensor, padding_idx=None, max_norm=None, norm_type: float = 2.0,
+              scale_grad_by_freq: bool = False, sparse: bool = False) -> Tensor:
+    if max_norm is not None or scale_grad_by_freq or sparse:
+        raise _not_yet("embedding(max_norm / scale_grad_by_freq / sparse)")
+    w = _require_tensor("weight", weight)
+    if padding_idx is not None and padding_idx < 0:
+        padding_idx += w.shape[0]
+    return Tensor._wrap(_C.embedding(_require_tensor("input", input)._t, w._t, padding_idx))
 
 
 def mse_loss(input: Tensor, target: Tensor, size_average=None, reduce=None, reduction: str = "mean", weight=None) -> Tensor:

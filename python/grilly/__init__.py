@@ -701,6 +701,7 @@ from ._ops import (  # noqa: E402,F401
     greater_equal, gt, isfinite, isinf, isnan, le, less, less_equal, logical_and, logical_not,
     logical_or, logical_xor, lt, masked_fill, ne, not_equal, outer, result_type, where,
     cos, sin,
+    are_deterministic_algorithms_enabled, gather, index_select, use_deterministic_algorithms,
 )
 from ._ops import (  # noqa: E402,F401
     abs, add, allclose, amax, amin, bmm, cat, chunk, clamp, clamp_max, clamp_min, clip,

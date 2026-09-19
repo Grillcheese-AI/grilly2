@@ -698,11 +698,17 @@ def _parse_index(x: Tensor, idx):
 
 
 def _index(x: Tensor, idx) -> Tensor:
+    items = idx if isinstance(idx, tuple) else (idx,)
+    if builtins.any(_is_advanced(i) for i in items):
+        return _advanced(x, items)
     offset, strides, shape, only_ints = _parse_index(x, idx)
     return _w(_C.strided_read(x._t, offset, strides, shape, only_ints))
 
 
 def _setitem(x: Tensor, idx, value) -> None:
+    items = idx if isinstance(idx, tuple) else (idx,)
+    if builtins.any(_is_advanced(i) for i in items):
+        return _advanced_setitem(x, items, value)
     offset, strides, shape, _ = _parse_index(x, idx)
     if _is_number(value):
         from . import _code
@@ -710,6 +716,146 @@ def _setitem(x: Tensor, idx, value) -> None:
     else:
         v = _require_tensor("value", value)
     _C.write_region(x._t, offset, strides, shape, v._t)
+
+
+# ── indexing with index tensors ─────────────────────────────────────────
+
+def gather(input, dim, index, *, sparse_grad=False) -> Tensor:
+    if sparse_grad:
+        raise _not_yet("gather(sparse_grad=True)")
+    x, i = _require_tensor("input", input), _require_tensor("index", index)
+    return _w(_C.gather(x._t, _dim(dim, x.dim()), i._t))
+
+
+def index_select(input, dim, index) -> Tensor:
+    x, i = _require_tensor("input", input), _require_tensor("index", index)
+    return _w(_C.index_select(x._t, _dim(dim, x.dim()), i._t))
+
+
+def use_deterministic_algorithms(mode, *, warn_only=False) -> None:
+    """When on, ops that would sum with atomics (in hardware order, e.g.
+    embedding and gather backward) use fixed-order kernels instead."""
+    _C.set_deterministic(builtins.bool(mode))
+
+
+def are_deterministic_algorithms_enabled() -> builtins.bool:
+    return _C.deterministic()
+
+
+def _is_advanced(item) -> builtins.bool:
+    return isinstance(item, (Tensor, list, np.ndarray))
+
+
+def _index_tensor(item) -> Tensor:
+    if isinstance(item, Tensor):
+        return item
+    from . import tensor
+    return tensor(np.asarray(item))
+
+
+def _mask_indices(x: Tensor, mask: Tensor):
+    """Flat positions of a bool mask over x's leading dims (a host sync, as in torch)."""
+    if tuple(mask.shape) != tuple(x.shape[:mask.dim()]):
+        raise IndexError(f"The shape of the mask {list(mask.shape)} at index 0 does not match the shape of "
+                         f"the indexed tensor {list(x.shape)} at index 0")
+    from . import tensor
+    return tensor(np.flatnonzero(mask.numpy()).astype(np.int64)), mask.dim()
+
+
+def _expand_ellipsis(x: Tensor, items):
+    if builtins.any(i is None for i in items):
+        raise _not_yet("advanced indexing combined with None")
+    n = builtins.sum(1 for i in items if i is Ellipsis)
+    if n > 1:
+        raise IndexError("an index can only have a single ellipsis ('...')")
+    used = builtins.sum(_index_tensor(i).dim() if _is_advanced(i) and _index_tensor(i).dtype is _dt()[0] else 1
+                        for i in items if i is not Ellipsis)
+    if used > x.dim():
+        raise IndexError(f"too many indices for tensor of dimension {x.dim()}")
+    out = []
+    for i in items:
+        out.extend([slice(None)] * (x.dim() - used) if i is Ellipsis else [i])
+    return out
+
+
+def _advanced(x: Tensor, items) -> Tensor:
+    """torch's advanced indexing: ints, int tensors (or lists) and slices,
+    or one bool mask over the leading dims. Ints and slices are applied
+    first, as basic indexing (as in torch, unlike numpy, an int is not
+    broadcast with the index tensors); the indexed dims are moved to the front, linearized
+    into one index, and the broadcast index dims are put back where torch
+    puts them: in place if the indexed dims were adjacent, in front if not."""
+    b_ = _dt()[0]
+    items = _expand_ellipsis(x, items)
+    for i in items:
+        if _is_advanced(i) and _index_tensor(i).is_floating_point():
+            raise IndexError("tensors used as indices must be long, int, byte or bool tensors")
+    masks = [k for k, i in enumerate(items) if _is_advanced(i) and _index_tensor(i).dtype is b_]
+    if masks:
+        full = builtins.all(isinstance(i, slice) and i == slice(None) for i in items[1:])
+        if masks != [0] or not full:
+            raise _not_yet("bool masks combined with other indices")
+        flat, nd = _mask_indices(x, _index_tensor(items[0]))
+        lead = math.prod(x.shape[:nd])
+        return _w(_C.index_tensor(x.reshape([lead] + list(x.shape[nd:]))._t, 0, flat._t))
+    items += [slice(None)] * (x.dim() - len(items))
+    basic = lambda i: isinstance(i, (slice, builtins.int))  # noqa: E731
+    if builtins.any(basic(i) and i != slice(None) for i in items):
+        # ints and slices first, as torch does: an int drops its dim
+        x = x[tuple(i if basic(i) else slice(None) for i in items)]
+        items = [slice(None) if isinstance(i, slice) else i for i in items if not isinstance(i, builtins.int)]
+    adv = [k for k, i in enumerate(items) if not isinstance(i, slice)]
+    rest = [k for k in range(x.dim()) if k not in adv]
+    if len(adv) == 1:
+        return _w(_C.index_tensor(x._t, adv[0], _index_tensor(items[adv[0]])._t))
+    idx = [_index_tensor(items[k]) for k in adv]
+    flat, stride = None, 1
+    for k, t in builtins.reversed(builtins.list(builtins.zip(adv, idx))):
+        size = x.shape[k]
+        if builtins.bool(((t >= size) | (t < -size)).any()):
+            bad = t.max().item() if builtins.bool((t >= size).any()) else t.min().item()
+            raise IndexError(f"index {bad} is out of bounds for dimension {k} with size {size}")
+        term = where(t < 0, t + size, t) * stride
+        flat = term if flat is None else flat + term
+        stride *= size
+    moved = x if adv + rest == builtins.list(range(x.dim())) else x.permute(*(adv + rest))
+    lead = math.prod(x.shape[k] for k in adv)
+    picked = _w(_C.index_tensor(moved.reshape([lead] + [x.shape[k] for k in rest])._t, 0, flat._t))
+    p, nb = adv[0], flat.dim()
+    if p == 0 or adv != builtins.list(range(p, adv[-1] + 1)):
+        return picked
+    order = builtins.list(range(nb, nb + p)) + builtins.list(range(nb)) + builtins.list(range(nb + p, picked.dim()))
+    return picked.permute(*order)
+
+
+def _numpy_key(item):
+    if isinstance(item, Tensor):
+        return item.numpy()
+    return np.asarray(item) if isinstance(item, list) else item
+
+
+def _advanced_setitem(x: Tensor, items, value) -> None:
+    """A bool mask over the leading dims is a GPU select. Other advanced
+    keys (int tensors, lists, mixed with ints and slices) go through the
+    host: numpy's assignment semantics are torch's for these keys, and this
+    is setup code, not a training path."""
+    b_ = _dt()[0]
+    if len(items) == 1 and _is_advanced(items[0]):
+        mask = _index_tensor(items[0])
+        if mask.dtype is b_ and tuple(mask.shape) == tuple(x.shape[:mask.dim()]):
+            m = mask.reshape(list(mask.shape) + [1] * (x.dim() - mask.dim()))
+            x.copy_(where(m, _as(value, x.dtype), x))
+            return
+    for i in items:
+        if _is_advanced(i) and _index_tensor(i).is_floating_point():
+            raise IndexError("tensors used as indices must be long, int, byte or bool tensors")
+    host = x.detach().numpy().copy()
+    try:
+        host[tuple(_numpy_key(i) for i in items)] = _numpy_key(value)
+    except IndexError as e:
+        raise IndexError(str(e)) from None
+    from . import tensor
+    x.copy_(tensor(host))
 
 
 # ── installation as Tensor methods ───────────────────────────────────────
@@ -749,7 +895,7 @@ def _install() -> None:
     for name in ("eq", "ne", "gt", "ge", "lt", "le", "greater", "greater_equal", "less", "less_equal",
                  "not_equal", "logical_and", "logical_or", "logical_xor", "logical_not",
                  "bitwise_and", "bitwise_or", "bitwise_xor", "bitwise_not", "isfinite", "isinf",
-                 "isnan", "masked_fill", "equal", "outer", "ger", "where"):
+                 "isnan", "masked_fill", "equal", "outer", "ger", "where", "gather", "index_select"):
         setattr(T, name, globals()[name])
     T.all = all_
     T.any = any_

@@ -144,8 +144,9 @@ class Softmax(Module):
 
 
 class Embedding(Module):
-    """Holds its weight like torch's (N(0, 1) init); looking up indices needs
-    int64 tensors, which grilly does not have yet."""
+    """A lookup table of ``num_embeddings`` rows, initialized N(0, 1) as in
+    torch (from grilly's RNG); the padding row starts at zero and gets no
+    gradient."""
 
     def __init__(self, num_embeddings: int, embedding_dim: int, padding_idx=None, max_norm=None,
                  norm_type: float = 2.0, scale_grad_by_freq: bool = False, sparse: bool = False,
@@ -169,8 +170,7 @@ class Embedding(Module):
             self.weight = Parameter(_weight, requires_grad=not _freeze)
 
     def forward(self, input):
-        from ... import _not_yet
-        raise _not_yet("Embedding lookup (indices are int64 tensors; integer dtypes)")
+        return F.embedding(input, self.weight, self.padding_idx)
 
     def extra_repr(self) -> str:
         return f"{self.num_embeddings}, {self.embedding_dim}"

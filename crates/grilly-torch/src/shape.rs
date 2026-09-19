@@ -3,8 +3,8 @@
 //! marked as view copies (in-place writes through them are refused rather
 //! than silently missing the original). Gradients are torch's.
 
-use grilly_core::generic::{self as k, contiguous_strides};
-use grilly_core::{Error, Result, Tensor};
+use grilly_core::generic::{self as k, contiguous_strides, IndexMode};
+use grilly_core::{DType, Error, Result, Tensor};
 
 use crate::math::record;
 
@@ -245,4 +245,100 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
             b.shape()
         ))),
     }
+}
+
+// ── indexing with index tensors ─────────────────────────────────────────
+
+/// Index tensors may be int64 or int32 (torch accepts both).
+fn as_index(index: &Tensor, op: &str) -> Result<Tensor> {
+    match index.dtype() {
+        DType::I64 => Ok(index.clone()),
+        DType::I32 => index.cast(DType::I64),
+        _ => Err(Error::Invalid(format!("{op}(): Expected dtype int32/int64 for index"))),
+    }
+}
+
+/// The values of `index` lie in [lo, size) (lo = -size when negative indices
+/// count from the end, else 0); otherwise `error(bad value)`.
+fn check_bounds(index: &Tensor, size: usize, allow_negative: bool, error: impl Fn(i64) -> Error) -> Result<()> {
+    let lo = if allow_negative { -(size as i64) } else { 0 };
+    if let Some((min, max)) = k::index_bounds(index)? {
+        if min < lo {
+            return Err(error(min));
+        }
+        if max >= size as i64 {
+            return Err(error(max));
+        }
+    }
+    Ok(())
+}
+
+fn indexed(src: &Tensor, dim: usize, index: &Tensor, mode: IndexMode, name: &'static str) -> Result<Tensor> {
+    let mut out = k::index_gather(src, dim, index, mode)?;
+    let (idx, in_shape) = (index.detach(), src.shape().to_vec());
+    record(name, &[src], &mut out, &[], false, move |g, _, _| {
+        Ok(vec![Some(k::index_add_backward(g, dim, &idx, mode, &in_shape)?)])
+    })?;
+    Ok(out)
+}
+
+/// `torch.gather(input, dim, index)`.
+pub fn gather(input: &Tensor, dim: usize, index: &Tensor) -> Result<Tensor> {
+    let index = as_index(index, "gather")?;
+    let size = *input.shape().get(dim).ok_or_else(|| Error::Shape(format!("gather: dim {dim} out of range")))?;
+    check_bounds(&index, size, false, |v| {
+        Error::Invalid(format!("index {v} is out of bounds for dimension {dim} with size {size}"))
+    })?;
+    indexed(input, dim, &index, IndexMode::Gather, "GatherBackward0")
+}
+
+/// `torch.index_select(input, dim, index)`.
+pub fn index_select(input: &Tensor, dim: usize, index: &Tensor) -> Result<Tensor> {
+    let index = as_index(index, "index_select")?;
+    let size = *input.shape().get(dim).ok_or_else(|| Error::Shape(format!("index_select: dim {dim} out of range")))?;
+    check_bounds(&index, size, false, |v| {
+        Error::Invalid(format!("INDICES element is out of DATA bounds, id={v} axis_dim={size}"))
+    })?;
+    indexed(input, dim, &index, IndexMode::Select, "IndexSelectBackward0")
+}
+
+/// Advanced indexing `x[index]` along `dim` (a tensor index, any shape):
+/// negative values count from the end, as in torch.
+pub fn index_tensor(input: &Tensor, dim: usize, index: &Tensor) -> Result<Tensor> {
+    let index = as_index(index, "index")?;
+    let size = input.shape()[dim];
+    check_bounds(&index, size, true, |v| {
+        Error::Index(format!("index {v} is out of bounds for dimension {dim} with size {size}"))
+    })?;
+    let flat = index.detach().reshape(&[index.numel()])?;
+    let picked = indexed(input, dim, &flat, IndexMode::Select, "IndexBackward0")?;
+    let mut shape = input.shape()[..dim].to_vec();
+    shape.extend_from_slice(index.shape());
+    shape.extend_from_slice(&input.shape()[dim + 1..]);
+    picked.reshape(&shape)
+}
+
+/// `F.embedding(input, weight, padding_idx)`: rows of `weight`. The
+/// padding row gets no gradient, as in torch.
+pub fn embedding(input: &Tensor, weight: &Tensor, padding_idx: Option<usize>) -> Result<Tensor> {
+    let index = as_index(input, "embedding")?;
+    if weight.dim() != 2 {
+        return Err(Error::Shape("'weight' must be 2-D".into()));
+    }
+    let (rows, width) = (weight.shape()[0], weight.shape()[1]);
+    check_bounds(&index, rows, false, |_| Error::Index("index out of range in self".into()))?;
+    let flat = index.detach().reshape(&[index.numel()])?;
+    let mut out = k::index_gather(weight, 0, &flat, IndexMode::Select)?;
+    let w_shape = weight.shape().to_vec();
+    record("EmbeddingBackward0", &[weight], &mut out, &[], false, move |g, _, _| {
+        let grad = k::index_add_backward(g, 0, &flat, IndexMode::Select, &w_shape)?;
+        if let Some(p) = padding_idx {
+            let zeros = Tensor::zeros(grad.device(), &[width])?;
+            k::copy_strided(&zeros, 0, &[1], &grad, p * width, &[1], &[width])?;
+        }
+        Ok(vec![Some(grad)])
+    })?;
+    let mut shape = index.shape().to_vec();
+    shape.push(width);
+    out.reshape(&shape)
 }

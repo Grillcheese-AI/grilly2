@@ -223,14 +223,20 @@ def test_deepcopy_gives_independent_parameters():
     assert isinstance(c.weight, gnn.Parameter) and c.weight.requires_grad
 
 
-@pytest.mark.parametrize("call", [
-    lambda: gnn.Embedding(10, 4)(grilly.zeros(3)),
-    lambda: gnn.Linear(2, 2).to("cuda"),
-    lambda: GF.cross_entropy(grilly.zeros(4, 5), grilly.zeros(4)),
-])
-def test_not_implemented_yet(call):
+def test_not_implemented_yet():
     with pytest.raises(NotImplementedError):
-        call()
+        gnn.Linear(2, 2).to("cuda")
+
+
+@pytest.mark.parametrize("call", [
+    lambda lib: lib.nn.Embedding(10, 4)(lib.zeros(3)),
+    lambda lib: lib.nn.functional.cross_entropy(lib.zeros(4, 5), lib.zeros(4)),
+])
+def test_float_indices_raise_like_torch(call):
+    with pytest.raises(RuntimeError):
+        call(torch)
+    with pytest.raises(RuntimeError):
+        call(grilly)
 
 
 def test_embedding_holds_a_weight_like_torch():

@@ -245,7 +245,49 @@ fn where_py(py: Python<'_>, cond: &PyTensor, a: &PyTensor, b: &PyTensor) -> PyRe
     run(py, move || math::where_(&c, &a, &b))
 }
 
+#[pyfunction]
+fn gather(py: Python<'_>, x: &PyTensor, dim: usize, index: &PyTensor) -> PyResult<PyTensor> {
+    let (x, i) = (x.inner.clone(), index.inner.clone());
+    run(py, move || shape::gather(&x, dim, &i))
+}
+
+#[pyfunction]
+fn index_select(py: Python<'_>, x: &PyTensor, dim: usize, index: &PyTensor) -> PyResult<PyTensor> {
+    let (x, i) = (x.inner.clone(), index.inner.clone());
+    run(py, move || shape::index_select(&x, dim, &i))
+}
+
+/// Advanced indexing along `dim` with an index tensor of any shape.
+#[pyfunction]
+fn index_tensor(py: Python<'_>, x: &PyTensor, dim: usize, index: &PyTensor) -> PyResult<PyTensor> {
+    let (x, i) = (x.inner.clone(), index.inner.clone());
+    run(py, move || shape::index_tensor(&x, dim, &i))
+}
+
+#[pyfunction]
+#[pyo3(signature = (index, weight, padding_idx=None))]
+fn embedding(py: Python<'_>, index: &PyTensor, weight: &PyTensor, padding_idx: Option<usize>) -> PyResult<PyTensor> {
+    let (i, w) = (index.inner.clone(), weight.inner.clone());
+    run(py, move || shape::embedding(&i, &w, padding_idx))
+}
+
+#[pyfunction]
+fn set_deterministic(on: bool) {
+    grilly_core::generic::set_deterministic(on);
+}
+
+#[pyfunction]
+fn deterministic() -> bool {
+    grilly_core::generic::deterministic()
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(gather, m)?)?;
+    m.add_function(wrap_pyfunction!(index_select, m)?)?;
+    m.add_function(wrap_pyfunction!(index_tensor, m)?)?;
+    m.add_function(wrap_pyfunction!(embedding, m)?)?;
+    m.add_function(wrap_pyfunction!(set_deterministic, m)?)?;
+    m.add_function(wrap_pyfunction!(deterministic, m)?)?;
     m.add_function(wrap_pyfunction!(predicate, m)?)?;
     m.add_function(wrap_pyfunction!(compare, m)?)?;
     m.add_function(wrap_pyfunction!(integer, m)?)?;

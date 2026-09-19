@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use grilly_core::autograd::{PackedTensor, SavedTensorHooks};
 use grilly_core::{autograd, rng, DType, Device, Error, Tensor};
-use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError};
+use pyo3::exceptions::{PyIndexError, PyNotImplementedError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
@@ -36,6 +36,7 @@ fn err(e: Error) -> PyErr {
     }
     match e {
         Error::NotImplemented(_) => PyNotImplementedError::new_err(e.to_string()),
+        Error::Index(_) => PyIndexError::new_err(e.to_string()),
         // torch raises RuntimeError for shape, argument and device failures.
         _ => PyRuntimeError::new_err(e.to_string()),
     }

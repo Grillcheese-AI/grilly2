@@ -23,7 +23,23 @@ pub const BINARY_INT: Kernel = Kernel { shader: "g2-binary-int", bindings: 3, pu
 pub const WHERE: Kernel = Kernel { shader: "g2-where", bindings: 4, push_words: 7 + 4 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 pub const REDUCE_INT: Kernel = Kernel { shader: "g2-reduce-int", bindings: 2, push_words: 6, local_size: [256, 1, 1] };
 
-pub const ALL: &[Kernel] = &[UNARY, BINARY, REDUCE, COPY, CAST, BINARY_INT, WHERE, REDUCE_INT];
+pub const INDEX: Kernel = Kernel { shader: "g2-index", bindings: 3, push_words: 9 + 2 * MAX_DIMS as u32, local_size: [256, 1, 1] };
+pub const INDEX_ADD: Kernel = Kernel { shader: "g2-index-add", bindings: 3, push_words: 9 + 2 * MAX_DIMS as u32, local_size: [256, 1, 1] };
+pub const INDEX_ADD_ATOMIC: Kernel = Kernel { shader: "g2-index-add-atomic", bindings: 3, push_words: 9 + 2 * MAX_DIMS as u32, local_size: [256, 1, 1] };
+
+pub const ALL: &[Kernel] = &[UNARY, BINARY, REDUCE, COPY, CAST, BINARY_INT, WHERE, REDUCE_INT, INDEX, INDEX_ADD, INDEX_ADD_ATOMIC];
+
+static DETERMINISTIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// torch's `use_deterministic_algorithms`: when on, ops that would sum with
+/// atomics (in hardware order) use a fixed-order kernel instead.
+pub fn set_deterministic(on: bool) {
+    DETERMINISTIC.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn deterministic() -> bool {
+    DETERMINISTIC.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Elementwise `f(x; a, b)`. Codes match g2-unary.glsl.
 #[repr(u32)]
@@ -434,5 +450,112 @@ pub fn reduce_int(x: &Tensor, dim: usize, op: Reduce, keepdim: bool) -> Result<T
     let out = Tensor::empty_typed(x.device(), &out_shape, DType::I64)?;
     let push = [u32_of(outer, "outer")?, u32_of(len, "len")?, u32_of(inner, "inner")?, op as u32, u32_of(x.offset(), "offset")?, 0];
     REDUCE_INT.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], outer * inner, &push)?;
+    Ok(out)
+}
+
+/// How an index tensor addresses the gathered dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexMode {
+    /// torch.gather: the index has the output's shape.
+    Gather = 0,
+    /// torch.index_select: a 1-D index along `dim`.
+    Select = 1,
+}
+
+/// The smallest and largest value of an int64 tensor (None when empty).
+/// Downloads two numbers, so it waits for pending work.
+pub fn index_bounds(index: &Tensor) -> Result<Option<(i64, i64)>> {
+    require(index.dtype(), DType::I64, "index")?;
+    if index.numel() == 0 {
+        return Ok(None);
+    }
+    let flat = index.detach().reshape(&[index.numel()])?;
+    let lo = reduce_int(&flat, 0, Reduce::Min, false)?;
+    let hi = reduce_int(&flat, 0, Reduce::Max, false)?;
+    let read = |t: &Tensor| -> Result<i64> { Ok(i64::from_le_bytes(t.to_bytes()?.try_into().unwrap())) };
+    Ok(Some((read(&lo)?, read(&hi)?)))
+}
+
+fn index_shape(src_shape: &[usize], dim: usize, index: &Tensor, mode: IndexMode) -> Result<Vec<usize>> {
+    require(index.dtype(), DType::I64, "index")?;
+    if dim >= src_shape.len().max(1) {
+        return Err(Error::Shape(format!("index: dim {dim} out of range for shape {src_shape:?}")));
+    }
+    match mode {
+        IndexMode::Gather => {
+            if index.dim() != src_shape.len() {
+                return Err(Error::Shape(format!(
+                    "Index tensor must have the same number of dimensions as input tensor ({} vs {})",
+                    index.dim(),
+                    src_shape.len()
+                )));
+            }
+            for (d, (&i, &s)) in index.shape().iter().zip(src_shape).enumerate() {
+                if d != dim && i > s {
+                    return Err(Error::Shape(format!(
+                        "Size does not match at dimension {d} expected index {:?} to be smaller than self {src_shape:?} apart from dimension {dim}",
+                        index.shape()
+                    )));
+                }
+            }
+            Ok(index.shape().to_vec())
+        }
+        IndexMode::Select => {
+            if index.dim() > 1 {
+                return Err(Error::Shape("index_select(): Index is supposed to be a vector".into()));
+            }
+            let mut shape = src_shape.to_vec();
+            shape[dim] = index.numel();
+            Ok(shape)
+        }
+    }
+}
+
+/// `torch.gather` / `torch.index_select` along `dim`, any dtype. Untracked;
+/// callers check index bounds (see [`index_bounds`]).
+pub fn index_gather(src: &Tensor, dim: usize, index: &Tensor, mode: IndexMode) -> Result<Tensor> {
+    let shape = index_shape(src.shape(), dim, index, mode)?;
+    let out = Tensor::empty_typed(src.device(), &shape, src.dtype())?;
+    let mut push = vec![
+        u32_of(out.numel(), "numel")?,
+        shape.len() as u32,
+        dim as u32,
+        src.dtype().words() as u32,
+        mode as u32,
+        u32_of(src.offset(), "offset")?,
+        u32_of(index.offset(), "offset")?,
+        0,
+        u32_of(src.shape().get(dim).copied().unwrap_or(1), "dim size")?,
+    ];
+    push.extend(padded(&shape, "index")?);
+    push.extend(padded(&contiguous_strides(src.shape()), "index")?);
+    INDEX.launch_flat(src.device(), &[Arg::Storage(src), Arg::Storage(index), Arg::Storage(&out)], out.numel(), &push)?;
+    Ok(out)
+}
+
+/// The backward of [`index_gather`] for float32: the gradient `g` summed
+/// into a zero tensor of `in_shape` at the indexed positions. Fixed-order
+/// when [`deterministic`] is on, atomic (hardware order) otherwise.
+pub fn index_add_backward(g: &Tensor, dim: usize, index: &Tensor, mode: IndexMode, in_shape: &[usize]) -> Result<Tensor> {
+    require_float("index backward", g.dtype())?;
+    let det = deterministic();
+    let out = Tensor::full(g.device(), in_shape, 0.0)?;
+    let len = g.shape()[dim];
+    let n = if det { out.numel() } else { g.numel() };
+    let mut push = vec![
+        u32_of(n, "numel")?,
+        in_shape.len() as u32,
+        dim as u32,
+        mode as u32,
+        u32_of(g.offset(), "offset")?,
+        u32_of(index.offset(), "offset")?,
+        0,
+        u32_of(in_shape[dim], "dim size")?,
+        u32_of(len, "len")?,
+    ];
+    push.extend(padded(in_shape, "index backward")?);
+    push.extend(padded(g.shape(), "index backward")?);
+    let kernel = if det { INDEX_ADD } else { INDEX_ADD_ATOMIC };
+    kernel.launch_flat(g.device(), &[Arg::Storage(g), Arg::Storage(index), Arg::Storage(&out)], n, &push)?;
     Ok(out)
 }
