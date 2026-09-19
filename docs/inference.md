@@ -240,3 +240,81 @@ Real activations need the decode loop (step 4).
   filter.
 
 `quantize_` takes 0.12 s for the whole model.
+
+## 3. Sampling on the GPU
+
+```python
+from grilly.infer import sampling
+
+token = sampling.next_token(logits, input_ids, do_sample=True, temperature=0.7,
+                            top_k=20, top_p=0.8, repetition_penalty=1.05)
+```
+
+The parameters, defaults and processing order are Hugging Face's
+`generate()` (transformers 5.5):
+1. repetition penalty over `input_ids`: `x < 0 ? x·r : x/r`, applied in
+   greedy decoding too;
+2. greedy (`do_sample=False`): the first index of the maximum, as
+   `torch.argmax`;
+3. when sampling: temperature, then top-k, then top-p, then a draw from
+   the softmax of what is left by the inverse CDF in token order, as
+   `torch.multinomial`.
+
+`None` turns a filter off. `processed_logits(...)` returns the scores after
+the penalty and temperature. `probabilities(...)` returns the filtered
+distribution. `torch.multinomial` (grilly's `multinomial` and
+`Tensor.multinomial`) uses the same kernel.
+
+**One kernel, no sort, nothing read back.** `g2-sample` runs one workgroup
+per row. Only one uniform number per row travels, from grilly's generator
+on the host into the push constants. The logits never leave the device.
+- Top-k is a radix select of the k-th largest value: four passes of 8-bit
+  digits over order-preserving integer keys.
+- Top-p is a binary search over those keys for the smallest value whose
+  cumulative mass passes (1 − p)·Z: at most 32 masked sums.
+- HF instead sorts all 152K scores, twice per token when both filters are
+  on.
+
+**Numerics against HF's own processors**, run in torch
+(`tests/python/test_sampling.py`):
+- Penalized and scaled scores are HF's bit for bit, because both
+  divisions use `div_rn`.
+- Top-k keeps exactly HF's tokens, including every token tied with the
+  k-th value.
+- Top-p keeps HF's tokens, with two exceptions:
+  - a token whose cumulative probability is within float32 rounding of
+    1 − p can be decided differently;
+  - among tokens tied at the cut, grilly keeps as many as HF, dropping the
+    lowest indices first. HF's choice follows `torch.sort`, which is not
+    stable on CPU, so only the count can match.
+- Probabilities are within `(|x − max| + 8)·2⁻²⁴` of a float64 softmax
+  (worst measured ratio 0.82). The kernel's sums are compensated.
+- torch's own float32 softmax is 1.6e-5 off float64 at a 152K vocabulary;
+  grilly's is 1.1e-6. So torch is not the reference for this number.
+- Draws pass a chi-square test against the distribution, with a fixed
+  seed. The same seed gives the same tokens in grilly, but not torch's
+  numbers, per the RNG policy.
+
+**Rows with nothing to draw.** A row that is all −inf, or all zero weights
+for `multinomial`, returns −1. HF's softmax would give NaN there and
+`torch.multinomial` would raise. torch checks that on the host, which would
+cost a round trip here.
+
+**A hang, found before this committed.** The first version of the draw
+handled a row with no mass by falling into a loop that ran 2³² − 1
+iterations on one GPU thread. The dev machine has the Windows GPU watchdog
+off (`TdrLevel = 0`), so that loop froze the desktop for minutes and needed
+a reset. The loop is now bounded, and a regression test covers the case.
+
+**Speed, not tuned yet.** GPU time per call for one row, measured with
+launch blocking:
+
+| vocab | greedy | top_k 20 | top_k 50, top_p 0.8 | top_p 0.9 (top_k off) |
+|---:|---:|---:|---:|---:|
+| 10,000 | 0.8 ms (with penalty) | 0.14 ms | 0.38 ms | 0.45 ms |
+| 151,936 | 11.3 ms (with penalty) | 1.0 ms | 4.0 ms | 5.4 ms |
+
+That is too slow next to a decode step. One workgroup per row is four
+waves on one CU of forty, so the passes are bound by memory latency, not
+bandwidth. Greedy is slow because grilly's generic argmax scans a row on
+one thread. Both are the next pass.

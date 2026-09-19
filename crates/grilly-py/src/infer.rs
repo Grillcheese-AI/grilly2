@@ -4,13 +4,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use grilly_infer::{Int8Weight, LoadError, SafeTensorsFile};
+use grilly_infer::{sampling, Int8Weight, LoadError, SafeTensorsFile, Sampling};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyFileNotFoundError, PyOSError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use crate::{device, err, wrap, PyTensor};
+use crate::{device, err, wrap, PyGenerator, PyTensor};
 
 create_exception!(
     _C,
@@ -117,9 +117,73 @@ impl PyInt8Weight {
     }
 }
 
+/// Sampling parameters from Python, as Hugging Face names them.
+fn sampling_of(do_sample: bool, temperature: f32, top_k: usize, top_p: f32, repetition_penalty: f32) -> Sampling {
+    Sampling { do_sample, temperature, top_k, top_p, repetition_penalty }
+}
+
+/// The next token per row (grilly_infer::sampling::next_tokens).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn next_tokens(
+    py: Python<'_>,
+    logits: &PyTensor,
+    input_ids: Option<&PyTensor>,
+    do_sample: bool,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    repetition_penalty: f32,
+    generator: &Bound<'_, PyGenerator>,
+) -> PyResult<PyTensor> {
+    let s = sampling_of(do_sample, temperature, top_k, top_p, repetition_penalty);
+    let mut g = generator.borrow_mut();
+    let gen = &mut g.inner;
+    py.detach(|| sampling::next_tokens(&logits.inner, input_ids.map(|t| &t.inner), &s, gen)).map(wrap).map_err(err)
+}
+
+#[pyfunction]
+fn processed_scores(
+    py: Python<'_>,
+    logits: &PyTensor,
+    input_ids: Option<&PyTensor>,
+    do_sample: bool,
+    temperature: f32,
+    repetition_penalty: f32,
+) -> PyResult<PyTensor> {
+    let s = sampling_of(do_sample, temperature, 0, 1.0, repetition_penalty);
+    py.detach(|| sampling::processed_scores(&logits.inner, input_ids.map(|t| &t.inner), &s)).map(wrap).map_err(err)
+}
+
+#[pyfunction]
+fn sample_probabilities(
+    py: Python<'_>,
+    logits: &PyTensor,
+    input_ids: Option<&PyTensor>,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    repetition_penalty: f32,
+) -> PyResult<PyTensor> {
+    let s = sampling_of(true, temperature, top_k, top_p, repetition_penalty);
+    py.detach(|| sampling::probabilities(&logits.inner, input_ids.map(|t| &t.inner), &s)).map(wrap).map_err(err)
+}
+
+/// torch.multinomial(weights, 1) for (batch, n) weights, as int64 (batch,).
+#[pyfunction]
+fn multinomial(py: Python<'_>, weights: &PyTensor, generator: &Bound<'_, PyGenerator>) -> PyResult<PyTensor> {
+    let mut g = generator.borrow_mut();
+    let gen = &mut g.inner;
+    py.detach(|| sampling::multinomial(&weights.inner, gen)).map(wrap).map_err(err)
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySafeFile>()?;
     m.add_class::<PyInt8Weight>()?;
+    m.add_function(wrap_pyfunction!(next_tokens, m)?)?;
+    m.add_function(wrap_pyfunction!(processed_scores, m)?)?;
+    m.add_function(wrap_pyfunction!(sample_probabilities, m)?)?;
+    m.add_function(wrap_pyfunction!(multinomial, m)?)?;
     m.add("SafetensorError", m.py().get_type::<SafetensorError>())?;
     Ok(())
 }

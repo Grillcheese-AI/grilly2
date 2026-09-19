@@ -426,6 +426,9 @@ class Tensor:
         self._t.normal_(_builtins.float(mean), _builtins.float(std), _generator(generator)._g)
         return self
 
+    def multinomial(self, num_samples, replacement=False, *, generator=None) -> "Tensor":
+        return multinomial(self, num_samples, replacement, generator=generator)
+
     def uniform_(self, from_=0.0, to=1.0, *, generator=None) -> "Tensor":
         self._t.uniform_(_builtins.float(from_), _builtins.float(to), _generator(generator)._g)
         return self
@@ -676,6 +679,31 @@ def rand_like(input: Tensor, *, dtype=None, layout=None, device=None,
               requires_grad=False, memory_format=None) -> Tensor:
     return rand(*_require_tensor("input", input).shape, dtype=dtype, device=device,
                 requires_grad=requires_grad)
+
+
+def multinomial(input, num_samples, replacement=False, *, generator=None, out=None) -> Tensor:
+    """Indices drawn from each row of non-negative weights, like
+    ``torch.multinomial``, on the GPU (grilly's generator; not torch's
+    numbers). Without replacement only ``num_samples=1`` is supported so far.
+    A row with no positive weight gives -1: torch's check of that happens on
+    the host, which here would cost a round trip."""
+    x = _require_tensor("input", input)
+    if out is not None:
+        raise _not_yet("multinomial(out=...)")
+    if x.dim() not in (1, 2):
+        raise RuntimeError("prob_dist must be 1 or 2 dim")
+    if x.dtype is not float32:
+        raise RuntimeError("multinomial only supports floating-point dtypes for input")
+    num_samples = _builtins.int(num_samples)
+    if num_samples <= 0:
+        raise RuntimeError("cannot sample n_sample <= 0 samples")
+    if num_samples > 1 and not replacement:
+        raise _not_yet("multinomial without replacement for num_samples > 1")
+    rows = x if x.dim() == 2 else x.reshape(1, -1)
+    g = _generator(generator)._g
+    draws = [Tensor._wrap(_C.multinomial(rows._t, g)).reshape(-1, 1) for _ in range(num_samples)]
+    out_ = draws[0] if num_samples == 1 else _ops.cat(draws, 1)
+    return out_ if x.dim() == 2 else out_.reshape(num_samples)
 
 
 def randint(*args, size=None, generator=None, out=None, dtype=None, layout=None, device=None,
