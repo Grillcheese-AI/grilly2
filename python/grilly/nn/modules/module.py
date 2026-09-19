@@ -229,13 +229,22 @@ class Module:
     def float(self) -> "Module":
         return self
 
+    def compile(self, *args, **kwargs) -> None:
+        """Compiles ``self.forward`` in place (``torch.nn.Module.compile``,
+        torch >= 2.2): afterwards every ``self(...)`` call runs through
+        ``grilly.compile`` (docs/fusion.md). Unlike ``grilly.compile(self)``,
+        ``self`` keeps its own type — there is no wrapper object."""
+        from ... import compile as _compile
+        self._compiled_call = _compile(lambda *a, **kw: self.forward(*a, **kw), *args, **kwargs)
+
     # ── forward ──────────────────────────────────────────────────────────
 
     def forward(self, *args, **kwargs):
         raise NotImplementedError(f'Module [{type(self).__name__}] is missing the required "forward" function')
 
     def __call__(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
+        hook = self.__dict__.get("_compiled_call")
+        return hook(*args, **kwargs) if hook is not None else self.forward(*args, **kwargs)
 
     # ── state ────────────────────────────────────────────────────────────
 

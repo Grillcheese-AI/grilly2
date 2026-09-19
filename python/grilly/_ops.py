@@ -10,7 +10,7 @@ import math
 
 import numpy as np
 
-from . import Tensor, _C, _not_yet, _require_tensor
+from . import Tensor, _C, _lazy, _not_yet, _require_tensor
 
 _Number = (builtins.int, builtins.float, builtins.bool, np.number)
 
@@ -46,10 +46,16 @@ def _dims(dim, ndim) -> list:
 
 
 def _unary(x, op, a=0.0, b=0.0) -> Tensor:
-    return _w(_C.unary(_require_tensor("input", x)._t, op, builtins.float(a), builtins.float(b)))
+    x = _require_tensor("input", x)
+    a, b = builtins.float(a), builtins.float(b)
+    if _lazy.should_capture_unary(x):
+        return _lazy.LazyTensor._unary(x, op, a, b)
+    return _w(_C.unary(x._t, op, a, b))
 
 
 def _binary(a, b, op) -> Tensor:
+    if _lazy.should_capture_binary(a, b):
+        return _lazy.LazyTensor._binary(op, a, b)
     return _w(_C.binary(a._t, b._t, op))
 
 

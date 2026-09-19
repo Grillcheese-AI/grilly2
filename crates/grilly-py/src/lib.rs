@@ -323,6 +323,15 @@ fn device_name() -> PyResult<String> {
     Ok(device()?.caps().name.clone())
 }
 
+/// Count of fused kernels (crate::fusion, ops::fused) compiled so far on
+/// the default device: for tests confirming a `torch.compile`d graph's
+/// structure, not its scalar values, is what decides whether a new kernel
+/// is generated.
+#[pyfunction]
+fn generated_kernel_count() -> PyResult<usize> {
+    Ok(device()?.generated_kernel_count())
+}
+
 #[pymodule]
 fn _C(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
@@ -336,6 +345,7 @@ fn _C(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(push_saved_tensor_hooks, m)?)?;
     m.add_function(wrap_pyfunction!(pop_saved_tensor_hooks, m)?)?;
     m.add_function(wrap_pyfunction!(device_name, m)?)?;
+    m.add_function(wrap_pyfunction!(generated_kernel_count, m)?)?;
     ops::register(m)?;
     Ok(())
 }

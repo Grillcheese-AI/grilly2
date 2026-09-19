@@ -15,8 +15,8 @@ import numpy as _np
 from . import _C
 
 __all__ = [
-    "Generator", "Size", "Tensor", "add", "default_generator", "device", "dtype", "empty",
-    "arange", "enable_grad", "float32", "from_numpy", "full", "initial_seed",
+    "Generator", "Size", "Tensor", "add", "arange", "compile", "default_generator", "device",
+    "dtype", "empty", "enable_grad", "float32", "from_numpy", "full", "initial_seed",
     "is_grad_enabled", "is_tensor", "manual_seed", "no_grad", "ones", "rand",
     "rand_like", "randint", "randn", "randn_like", "relu", "seed",
     "set_grad_enabled", "tensor", "zeros",
@@ -729,3 +729,8 @@ from . import optim  # noqa: E402
 from . import cuda  # noqa: E402
 from . import return_types  # noqa: E402
 from ._einsum import einsum  # noqa: E402
+
+# ── torch.compile ────────────────────────────────────────────────────────
+
+from . import compiler  # noqa: E402  (needs nn defined)
+from ._compile import OptimizedModule, compile  # noqa: E402,A001,F401

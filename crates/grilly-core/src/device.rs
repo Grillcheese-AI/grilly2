@@ -145,6 +145,13 @@ impl Device {
         Ok(name)
     }
 
+    /// Count of distinct generated kernels (crate::fusion) compiled so far
+    /// on this device: whether a `torch.compile`d graph's *structure*, not
+    /// its scalar values, changed since the last call is what this answers.
+    pub fn generated_kernel_count(&self) -> usize {
+        self.inner.generated.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
     /// Register every `.spv` in `dir`; a later name replaces an earlier one.
     pub fn load_kernels(&self, dir: PathBuf) -> Result<u32> {
         let dir_c = cstring(dir.to_str().ok_or_else(|| {

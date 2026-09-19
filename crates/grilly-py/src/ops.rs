@@ -1,11 +1,13 @@
 //! Bindings for grilly-torch's math and shape ops. Ops are named by string;
 //! argument checking and torch's calling conventions live in Python.
 
+use grilly_core::fusion::{Graph, Node};
 use grilly_core::generic::{Binary, IntBinary, Reduce, Unary};
 use grilly_core::{DType, Tensor};
 use grilly_torch::{attention, math, shape};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyTuple;
 
 use crate::{err, wrap, PyTensor};
 
@@ -390,6 +392,60 @@ fn synchronize(py: Python<'_>) -> PyResult<()> {
     py.detach(|| grilly_core::Device::default_device().and_then(|d| d.synchronize())).map_err(err)
 }
 
+/// One node of a `fused()` graph, as a Python tuple: `("input", i)`,
+/// `("param", i)`, `("unary", op, x, a_or_None, b_or_None)` or
+/// `("binary", op, x, y)`, where `x`, `y`, `a`, `b` are earlier node
+/// indices. See `crates/grilly-core/src/fusion.rs`.
+fn parse_node(item: &Bound<'_, PyAny>) -> PyResult<Node> {
+    let tuple = item.cast::<PyTuple>().map_err(|_| {
+        PyValueError::new_err("fused(): each node must be a tuple: (\"input\", i), (\"param\", i), \
+            (\"unary\", op, x, a, b) or (\"binary\", op, x, y)")
+    })?;
+    let kind: String = tuple.get_item(0)?.extract()?;
+    Ok(match kind.as_str() {
+        "input" => Node::Input(tuple.get_item(1)?.extract()?),
+        "param" => Node::Param(tuple.get_item(1)?.extract()?),
+        "unary" => {
+            let op = unary_op(&tuple.get_item(1)?.extract::<String>()?)?;
+            let x: usize = tuple.get_item(2)?.extract()?;
+            let a: Option<usize> = tuple.get_item(3)?.extract()?;
+            let b: Option<usize> = tuple.get_item(4)?.extract()?;
+            Node::Unary(op, x, a, b)
+        }
+        "binary" => {
+            let op = binary_op(&tuple.get_item(1)?.extract::<String>()?)?;
+            let x: usize = tuple.get_item(2)?.extract()?;
+            let y: usize = tuple.get_item(3)?.extract()?;
+            Node::Binary(op, x, y)
+        }
+        _ => return Err(PyValueError::new_err(format!("fused(): unknown node kind {kind:?}"))),
+    })
+}
+
+/// `torch.compile`'s fusion path (docs/fusion.md): builds one
+/// `grilly_core::fusion::Graph` from `nodes` and runs it as a single
+/// kernel, producing one tensor per index in `outputs`. `inputs` and
+/// `params` are the graph's real-tensor and scalar leaves, in the order
+/// their `("input", i)` / `("param", i)` nodes reference. Not recorded for
+/// autograd: grilly-py's lazy capture (python/grilly/_lazy.py) only builds
+/// these graphs outside grad mode, or for tensors that don't require it.
+#[pyfunction]
+fn fused(
+    py: Python<'_>,
+    nodes: Vec<Bound<'_, PyAny>>,
+    outputs: Vec<usize>,
+    inputs: Vec<PyRef<'_, PyTensor>>,
+    params: Vec<f32>,
+    shape: Vec<usize>,
+) -> PyResult<Vec<PyTensor>> {
+    let nodes = nodes.iter().map(parse_node).collect::<PyResult<Vec<Node>>>()?;
+    let inputs: Vec<Tensor> = inputs.iter().map(|t| t.inner.clone()).collect();
+    let graph = Graph { nodes, outputs, inputs: inputs.len(), params: params.len() };
+    py.detach(move || graph.run(&inputs.iter().collect::<Vec<_>>(), &params, &shape))
+        .map(|ts| ts.into_iter().map(wrap).collect())
+        .map_err(err)
+}
+
 #[pyfunction]
 fn set_deterministic(on: bool) {
     grilly_core::generic::set_deterministic(on);
@@ -425,6 +481,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(where_py, m)?)?;
     m.add_function(wrap_pyfunction!(unary, m)?)?;
     m.add_function(wrap_pyfunction!(binary, m)?)?;
+    m.add_function(wrap_pyfunction!(fused, m)?)?;
     m.add_function(wrap_pyfunction!(sum, m)?)?;
     m.add_function(wrap_pyfunction!(mean, m)?)?;
     m.add_function(wrap_pyfunction!(amax, m)?)?;
