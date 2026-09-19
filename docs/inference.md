@@ -267,13 +267,74 @@ simply have few.** Within a group of 128 they are already close to
 gaussian, so what four bits cost here is the sixteen levels themselves, not
 a handful of large values.
 
-Two things this does *not* say. Rotation is still the right tool for
-quantizing **activations** (W8A8, W4A4) and the **KV cache**, where the
-outliers are famously large — it just has nothing to do for these weights.
-And the accuracy gap has other levers that this measurement points at
-instead: a smaller group (32 instead of 128 measured 7.8% against 10.0%,
-for 25% more parameter bytes), and error-compensated rounding (GPTQ-style),
-which is the usual way weight-only int4 gets close to int8.
+Qwen3-1.7B says it more strongly, and on every weight: its 2048 and 6144
+both have Hadamard constructions (6144 = 12 x 512), where Qwen2.5's
+4864 = 2^8 * 19 has none, so nothing has to be left out of the table. The
+mean gain over 23 weights is **1.04x**.
+
+Rotation is still the right tool for quantizing **activations** (W8A8,
+W4A4) and the **KV cache**, where the outliers are famously large. It just
+has nothing to do for these weights.
+
+#### Nor does a better codebook, and there is a bound that says so
+
+A rotation makes a weight gaussian whether or not it started that way, and
+a gaussian is exactly when a *non-uniform* codebook should pay: uniform
+steps spend the same resolution on the dense middle as on the empty tails.
+QLoRA's NF4 uses equal-probability quantiles; Lloyd-Max uses the
+squared-error-optimal levels, which is 1-D k-means.
+
+Qwen3-1.7B, six weights, 16 levels, group 128:
+
+| scheme | plain | rotated |
+|---|---:|---:|
+| uniform, min/max scale (what grilly does) | 1.02e-01 | 9.94e-02 |
+| NF4 codebook (quantiles, absmax per group) | 9.65e-02 | 9.44e-02 |
+| Lloyd-Max codebook for a normal | 1.04e-01 | 9.60e-02 |
+| **Lloyd-Max fitted to every group (not implementable)** | 8.91e-02 | **8.65e-02** |
+| int8, for scale | **9.48e-03** | |
+
+The fixed Lloyd-Max codebook behaves exactly as the theory says: it loses
+to uniform on the raw weights and wins once they are rotated, because a
+fixed normal codebook needs the data to be normal and the rotation makes
+it so.
+
+**The last row is the answer to the whole family.** Fitting an optimal
+16-level codebook to each group of 128 separately is not implementable — it
+would need a codebook per group, which costs more than the weights — but
+it bounds every scheme that *is*: rotation, NF4, Lloyd-Max, clipping
+searches, anything that rounds each weight to one of sixteen levels. That
+bound is 8.65e-02, which is **1.18x** better than what grilly does today
+and still **9x worse than int8**.
+
+So no amount of cleverness inside scalar quantization closes this gap. With
+128 near-gaussian values and sixteen levels, ~10% is simply where the
+information sits. Getting past it needs a method that does not round each
+weight on its own:
+
+- **error compensation across a row** (GPTQ): the errors are made to cancel
+  in the *output* using a Hessian from calibration data, rather than made
+  smaller per weight. This is why GPTQ beats the bound above;
+- **vector quantization** over several weights at once (QuIP#'s lattices,
+  AQLM);
+- **a different representation entirely**, such as low-rank binary
+  factorization (NanoQuant).
+
+A smaller group also helps a little and costs bytes: group 32 measured 7.8%
+against 10.0%, for 25% more parameter bytes.
+
+Two footnotes for anyone re-running `tools/int4_accuracy.py`, both of which
+produced confidently wrong tables first:
+
+- 1-D k-means is not convex, and **the starting point decides the answer**.
+  From the quantiles (equal counts), a group of 128 normal samples
+  converges to MSE 0.0184; from evenly spaced points, to 0.0093. Uniform
+  quantization is 0.0144, so the quantile start reports Lloyd-Max as
+  *losing* to uniform — which is exactly what the first run said.
+- NF4 normalizes a block by its **absmax**, not its standard deviation.
+  Normalizing by the standard deviation clips everything past 1.86 sigma
+  while a group of 128 normal samples reaches 2.8, and NF4 then looks 50%
+  worse than uniform instead of 6% better.
 
 One practical note for anyone extending this: a Hadamard matrix of order
 `n` needs `n` to be 1, 2 or a multiple of 4, and a *construction* to exist
