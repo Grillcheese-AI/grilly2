@@ -6,6 +6,8 @@
 // `_C` mirrors torch's native module name.
 #![allow(non_snake_case)]
 
+mod ops;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -318,5 +320,6 @@ fn _C(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(push_saved_tensor_hooks, m)?)?;
     m.add_function(wrap_pyfunction!(pop_saved_tensor_hooks, m)?)?;
     m.add_function(wrap_pyfunction!(device_name, m)?)?;
+    ops::register(m)?;
     Ok(())
 }

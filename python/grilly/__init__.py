@@ -320,14 +320,8 @@ class Tensor:
     def relu(self) -> "Tensor":
         return relu(self)
 
-    def add(self, other, *, alpha=1) -> "Tensor":
-        return add(self, other, alpha=alpha)
-
-    def __add__(self, other) -> "Tensor":
-        return add(self, other)
-
-    def __radd__(self, other) -> "Tensor":
-        return add(self, other)
+    # Arithmetic, reductions, shape ops, indexing and operators are
+    # installed from grilly._ops.
 
 
 def is_tensor(obj) -> _builtins.bool:
@@ -407,16 +401,6 @@ def relu(input: Tensor) -> Tensor:
     return Tensor._wrap(_C.relu(_require_tensor("input", input)._t))
 
 
-def add(input, other, *, alpha=1) -> Tensor:
-    if alpha != 1:
-        raise _not_yet("add with alpha != 1")
-    a = _require_tensor("input", input)
-    b = _require_tensor("other", other)
-    if a.shape != b.shape:
-        raise _not_yet(f"broadcasting in add ({list(a.shape)} vs {list(b.shape)})")
-    return Tensor._wrap(_C.add(a._t, b._t))
-
-
 # ── random ───────────────────────────────────────────────────────────────
 
 from .random import Generator, default_generator, initial_seed, manual_seed, seed  # noqa: E402
@@ -467,6 +451,22 @@ def randint(*args, **kwargs):
         "and integer dtypes are not implemented yet)"
     )
 
+
+# ── tensor operations ────────────────────────────────────────────────────
+
+from . import _ops  # noqa: E402  (needs Tensor defined)
+from ._ops import (  # noqa: E402,F401
+    abs, add, allclose, amax, amin, bmm, cat, chunk, clamp, clamp_max, clamp_min, clip,
+    concat, concatenate, contiguous, div, divide, empty_like, exp, expand, flatten,
+    full_like, log, log_softmax, matmul, max, maximum, mean, min, minimum, mm, mul,
+    multiply, narrow, neg, negative, ones_like, permute, pow, rsqrt, select, sigmoid,
+    sign, softmax, split, sqrt, square, squeeze, stack, sub, subtract, sum, swapaxes,
+    swapdims, t, tanh, transpose, true_divide, unsqueeze, zeros_like,
+)
+
+_ops._install()
+__all__ += [n for n in dir(_ops) if not n.startswith("_") and callable(getattr(_ops, n))
+            and n not in __all__ and n not in ("Tensor",)]
 
 # ── autograd ─────────────────────────────────────────────────────────────
 
