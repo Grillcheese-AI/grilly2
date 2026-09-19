@@ -123,3 +123,27 @@ fn second_backward_needs_retain_graph() {
     y.backward(Some(&g), false).unwrap();
     assert_eq!(x.grad().unwrap().to_vec().unwrap(), [0.0, 2.0]);
 }
+
+#[test]
+fn modifying_a_saved_tensor_is_caught_at_backward() {
+    use grilly_core::autograd::no_grad;
+    let g = t(&[1.0, 1.0, 1.0], &[1, 3]);
+
+    // linear saves its input; change the input after the forward pass
+    let x = leaf(&[1.0, -1.0], &[1, 2], true);
+    let w = leaf(&[0.5, 0.5, 0.5, 0.5, 0.5, 0.5], &[3, 2], true);
+    let y = linear(&x, &w, None).unwrap();
+    {
+        let _g = no_grad();
+        x.fill_(0.0).unwrap();
+    }
+    let e = y.backward(Some(&g), false).unwrap_err();
+    assert!(e.to_string().contains("modified by an inplace operation"), "{e}");
+
+    // relu saves its output; a detached alias shares the version counter
+    let x = leaf(&[1.0, -1.0, 2.0], &[1, 3], true);
+    let y = relu(&x).unwrap();
+    y.detach().zero_().unwrap();
+    let e = y.backward(Some(&g), false).unwrap_err();
+    assert!(e.to_string().contains("modified by an inplace operation"), "{e}");
+}

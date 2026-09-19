@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use crate::autograd::{self, Backward, Meta};
+use crate::rng::Generator;
+use crate::ops;
 use crate::device::{Buffer, Device, MemClass};
 use crate::error::{Error, Result};
 
@@ -197,7 +199,103 @@ impl Tensor {
         autograd::backward(self, gradient, retain_graph)
     }
 
+    // ── in place ─────────────────────────────────────────────────────────
+    //
+    // torch's rules: outside no_grad, an in-place op on a leaf that requires
+    // grad is an error. In-place ops on tensors inside a graph (which torch
+    // handles by rebasing their history) are not implemented yet. Every
+    // in-place op bumps the storage version, which saved tensors check.
+
+    /// How many in-place writes this tensor's storage has seen (`_version`).
+    pub fn version(&self) -> u64 {
+        self.storage.version()
+    }
+
+    fn check_inplace(&self, operands: &[&Tensor]) -> Result<()> {
+        if !autograd::is_grad_enabled() {
+            return Ok(());
+        }
+        if self.requires_grad() {
+            return Err(if self.is_leaf() {
+                Error::Invalid("a leaf Variable that requires grad is being used in an in-place operation.".into())
+            } else {
+                Error::NotImplemented("in-place operations on tensors that are part of an autograd graph".into())
+            });
+        }
+        if operands.iter().any(|t| t.requires_grad()) {
+            return Err(Error::NotImplemented("in-place operations with an operand that requires grad".into()));
+        }
+        Ok(())
+    }
+
+    /// `self += other` (torch's `add_`).
+    pub fn add_(&self, other: &Tensor) -> Result<&Tensor> {
+        self.check_inplace(&[other])?;
+        ops::add_into(self, other)?;
+        Ok(self)
+    }
+
+    /// Every element set to `value` (torch's `fill_`).
+    pub fn fill_(&self, value: f32) -> Result<&Tensor> {
+        self.check_inplace(&[])?;
+        self.device().record_fill(&self.storage, self.byte_offset(), self.byte_len(), value.to_bits())?;
+        self.bump_version();
+        Ok(self)
+    }
+
+    /// torch's `zero_`.
+    pub fn zero_(&self) -> Result<&Tensor> {
+        self.fill_(0.0)
+    }
+
+    /// Copy `src`'s elements into this tensor (torch's `copy_`, same shape).
+    pub fn copy_(&self, src: &Tensor) -> Result<&Tensor> {
+        if src.shape() != self.shape() {
+            return Err(Error::NotImplemented(format!(
+                "copy_ between shapes {:?} and {:?} (broadcasting)",
+                src.shape(),
+                self.shape()
+            )));
+        }
+        self.check_inplace(&[src])?;
+        self.device().record_copy(&src.storage, src.byte_offset(), &self.storage, self.byte_offset(), self.byte_len())?;
+        self.bump_version();
+        Ok(self)
+    }
+
+    /// Overwrite with host-computed values, in place.
+    fn overwrite(&self, values: &[f32]) -> Result<&Tensor> {
+        let src = Tensor::from_slice(self.device(), values, &self.shape)?;
+        self.device().record_copy(&src.storage, 0, &self.storage, self.byte_offset(), self.byte_len())?;
+        self.bump_version();
+        Ok(self)
+    }
+
+    /// Samples from N(mean, std^2) (torch's `normal_`); deterministic per
+    /// generator, not torch's values.
+    pub fn normal_(&self, mean: f32, std: f32, generator: &mut Generator) -> Result<&Tensor> {
+        self.check_inplace(&[])?;
+        let values: Vec<f32> = generator.normal(self.numel()).into_iter().map(|z| mean + std * z).collect();
+        self.overwrite(&values)
+    }
+
+    /// Samples uniform in [from, to) (torch's `uniform_`).
+    pub fn uniform_(&self, from: f32, to: f32, generator: &mut Generator) -> Result<&Tensor> {
+        self.check_inplace(&[])?;
+        let values: Vec<f32> = generator.uniform(self.numel()).into_iter().map(|u| from + (to - from) * u).collect();
+        self.overwrite(&values)
+    }
+
+    /// torch's `mul_`: needs an elementwise-multiply kernel, which v1 lacks.
+    pub fn mul_(&self, _other: f32) -> Result<&Tensor> {
+        Err(Error::NotImplemented("mul_ (no elementwise multiply kernel yet)".into()))
+    }
+
     // ── crate internals ─────────────────────────────────────────────────
+
+    pub(crate) fn bump_version(&self) {
+        self.storage.bump_version();
+    }
 
     pub(crate) fn meta(&self) -> &Arc<Meta> {
         &self.meta

@@ -10,6 +10,8 @@ pub enum Error {
     Shape(String),
     /// An argument is invalid for reasons other than shape.
     Invalid(String),
+    /// torch supports this; grilly does not yet.
+    NotImplemented(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -20,6 +22,7 @@ impl fmt::Display for Error {
             Error::Device(m) => write!(f, "device error: {m}"),
             Error::Shape(m) => write!(f, "shape error: {m}"),
             Error::Invalid(m) => write!(f, "invalid argument: {m}"),
+            Error::NotImplemented(m) => write!(f, "grilly: {m} is not implemented yet"),
         }
     }
 }

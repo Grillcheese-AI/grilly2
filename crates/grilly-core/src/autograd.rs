@@ -119,18 +119,21 @@ pub trait Backward: Send {
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A tensor kept for backward. It is freed with the rest of the graph after
-/// `backward()`, and a later use raises torch's "second time" error.
+/// `backward()`, and a later use raises torch's "second time" error. If the
+/// tensor is modified in place after being saved, using it raises torch's
+/// in-place error instead of silently computing a wrong gradient.
 pub struct SavedTensor {
     data: Option<Tensor>,
+    version: u64,
 }
 
 impl SavedTensor {
     pub fn save(t: &Tensor) -> SavedTensor {
-        SavedTensor { data: Some(t.detach()) }
+        SavedTensor { data: Some(t.detach()), version: t.version() }
     }
 
     pub fn get(&self) -> Result<&Tensor> {
-        self.data.as_ref().ok_or_else(|| {
+        let t = self.data.as_ref().ok_or_else(|| {
             Error::Invalid(
                 "Trying to backward through the graph a second time (or directly access saved \
                  tensors after they have already been freed). Saved intermediate values of the \
@@ -139,7 +142,18 @@ impl SavedTensor {
                  if you need to access saved tensors after calling backward."
                     .into(),
             )
-        })
+        })?;
+        if t.version() != self.version {
+            return Err(Error::Invalid(format!(
+                "one of the variables needed for gradient computation has been modified by an \
+                 inplace operation: [FloatTensor {:?}] is at version {}; expected version {} \
+                 instead.",
+                t.shape(),
+                t.version(),
+                self.version
+            )));
+        }
+        Ok(t)
     }
 
     pub fn release(&mut self) {

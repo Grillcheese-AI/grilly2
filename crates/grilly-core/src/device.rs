@@ -1,6 +1,7 @@
 use std::ffi::{c_void, CStr, CString};
 use std::path::PathBuf;
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use grilly_sys as sys;
@@ -156,7 +157,7 @@ impl Device {
         let mut handle = 0;
         let _state = self.lock();
         check(unsafe { sys::gc_buffer_create(self.inner.ctx, bytes, class, &mut handle) })?;
-        Ok(Buffer { device: self.clone(), handle, bytes })
+        Ok(Buffer { device: self.clone(), handle, bytes, version: AtomicU64::new(0) })
     }
 
     /// Run everything recorded so far and wait for it.
@@ -254,6 +255,9 @@ pub struct Buffer {
     device: Device,
     handle: sys::gc_buf,
     bytes: u64,
+    /// Bumped by every in-place write through a tensor; autograd compares it
+    /// against the value seen when a tensor was saved for backward.
+    version: AtomicU64,
 }
 
 impl Buffer {
@@ -267,6 +271,14 @@ impl Buffer {
 
     pub(crate) fn handle(&self) -> sys::gc_buf {
         self.handle
+    }
+
+    pub(crate) fn version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn bump_version(&self) {
+        self.version.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Copy `data` into the buffer at byte `offset`. Waits for recorded work.

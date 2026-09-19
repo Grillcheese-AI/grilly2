@@ -50,12 +50,14 @@ pub fn add(input: &Tensor, other: &Tensor) -> Result<Tensor> {
     Ok(out)
 }
 
-/// `dst += src` in place, untracked. Used to accumulate `.grad`.
+/// `dst += src` in place, untracked. Used to accumulate `.grad` and by
+/// `Tensor::add_`.
 pub(crate) fn add_into(dst: &Tensor, src: &Tensor) -> Result<()> {
     same_shape("add_", dst, src)?;
     let n = numel_u32(dst)?;
     if n > 0 {
         ADD_INPLACE.launch(dst.device(), &[Arg::Tensor(dst), Arg::Tensor(src)], [n, 1, 1], &[n])?;
     }
+    dst.bump_version();
     Ok(())
 }
