@@ -6,15 +6,21 @@ tokens/sec and peak VRAM.
     python tools/generate.py --check-hf               # first: greedy float32 tokens vs transformers
     python tools/generate.py --model DIR --prompt "..."
 
-The model directory holds `config.json`, `generation_config.json`,
-`model.safetensors` and `tokenizer.json`. Without --model it is looked up in
-the local Hugging Face cache (huggingface_hub), and nothing is downloaded.
-Reading config.json into a LlamaConfig here is what grilly-huggingface's
-adapter will do; grilly-infer itself takes no Hugging Face files. The
-tokenizer is Hugging Face's `tokenizers`, per CLAUDE.md §11.
+The whole run is `grilly.huggingface`, which is `transformers`' own calls:
 
-Qwen2 only so far: Llama-family configs load too, but the prompt uses
-Qwen's chat format.
+    model = AutoModelForCausalLM.from_pretrained(repo, quantization_config=Int8WeightOnlyConfig())
+    tokenizer = AutoTokenizer.from_pretrained(repo)
+    ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt")
+    out = model.generate(ids, **settings)
+
+Nothing is downloaded: the repository must already be in the local Hugging
+Face cache, or --model must name a directory holding `config.json`,
+`generation_config.json`, `model.safetensors` and `tokenizer.json`. The
+machinery underneath does not need the adapter (CLAUDE.md §11); what that
+looks like without it is `tests/python/test_huggingface.py`'s last test.
+
+Llama and Qwen2 configs load; the chat prompt is whatever the tokenizer's
+own template renders.
 """
 
 from __future__ import annotations
@@ -29,15 +35,16 @@ import time
 from pathlib import Path
 
 import grilly
-from grilly.infer.models import LlamaConfig, LlamaForCausalLM
-from grilly.infer.quantization import Int8WeightOnlyConfig, load_quantized_, quantize_
-from grilly.infer.safetensors import load_file
+from grilly.huggingface import AutoModelForCausalLM, AutoTokenizer
+from grilly.infer.quantization import Int8WeightOnlyConfig
 
 REPO = "Qwen/Qwen2.5-0.5B-Instruct"
 FILES = ("config.json", "generation_config.json", "model.safetensors", "tokenizer.json")
 
 
 def model_dir(arg: str | None) -> Path:
+    """The directory the files are in: --model, or the local Hugging Face
+    cache. Nothing is downloaded."""
     if arg:
         return Path(arg)
     from huggingface_hub import try_to_load_from_cache
@@ -46,24 +53,6 @@ def model_dir(arg: str | None) -> Path:
     if missing:
         sys.exit(f"{REPO} is not fully in the local Hugging Face cache (missing {missing}); pass --model DIR")
     return Path(paths[0]).parent
-
-
-def config_from(path: Path) -> LlamaConfig:
-    c = json.loads((path / "config.json").read_text())
-    if c.get("model_type") not in ("qwen2", "llama"):
-        sys.exit(f"model_type {c.get('model_type')!r}: this tool knows qwen2 and llama")
-    if c.get("rope_scaling"):
-        sys.exit(f"rope_scaling {c['rope_scaling']} is not supported yet")
-    if c.get("use_sliding_window"):
-        sys.exit("sliding-window attention is not supported yet")
-    qwen = c["model_type"] == "qwen2"
-    return LlamaConfig(
-        vocab_size=c["vocab_size"], hidden_size=c["hidden_size"], intermediate_size=c["intermediate_size"],
-        num_hidden_layers=c["num_hidden_layers"], num_attention_heads=c["num_attention_heads"],
-        num_key_value_heads=c.get("num_key_value_heads"), head_dim=c.get("head_dim"),
-        rms_norm_eps=c["rms_norm_eps"], rope_theta=c.get("rope_theta", 10000.0),
-        qkv_bias=qwen or c.get("attention_bias", False), o_bias=(not qwen) and c.get("attention_bias", False),
-        tie_word_embeddings=c.get("tie_word_embeddings", False))
 
 
 class PeakVram:
@@ -99,12 +88,11 @@ class PeakVram:
 
 
 def chat(tokenizer, prompt: str) -> list[int]:
-    text = ("<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n"
-            f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
-    return tokenizer.encode(text).ids
+    """The prompt through the model's own chat template."""
+    return tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True)
 
 
-def check_against_transformers(path: Path, model: LlamaForCausalLM, ids: list[int], n: int, penalty: float) -> None:
+def check_against_transformers(path: Path, model, ids: list[int], n: int, penalty: float) -> None:
     """Greedy float32 tokens from both, with the same settings passed to
     both explicitly: from_pretrained also loads generation_config.json, whose
     repetition_penalty transformers would otherwise apply to its greedy run."""
@@ -135,40 +123,35 @@ def main() -> None:
     args = ap.parse_args()
     args.prompt *= args.repeat_prompt
 
-    from tokenizers import Tokenizer
     path = model_dir(args.model)
-    tokenizer = Tokenizer.from_file(str(path / "tokenizer.json"))
-    gen = json.loads((path / "generation_config.json").read_text())
-    config = config_from(path)
+    tokenizer = AutoTokenizer.from_pretrained(path)
     ids = chat(tokenizer, args.prompt)
 
     grilly._C.reset_persistent_peak()
     with PeakVram() as load_vram:
         t0 = time.perf_counter()
-        model = LlamaForCausalLM(config)
-        checkpoint = path / "model.safetensors"
-        stream = not args.no_quantize and not args.check_hf
-        if stream:  # quantize each weight as it arrives: no float32 copy of the model
-            load_quantized_(model, checkpoint, Int8WeightOnlyConfig(), strict=False)
-        else:
-            model.load_state_dict(load_file(checkpoint), assign=True, strict=False)
-        model.tie_weights()
+        # float32 first when comparing with transformers; otherwise each weight
+        # is quantized as it is read, and no float32 copy of the model exists
+        quantization = None if args.no_quantize or args.check_hf else Int8WeightOnlyConfig()
+        model = AutoModelForCausalLM.from_pretrained(path, quantization_config=quantization)
         grilly._C.synchronize()
-        print(f"loaded {config.num_hidden_layers} layers, {sum(p.numel() for p in model.parameters()) / 1e6:.0f}M parameters "
-              f"in {time.perf_counter() - t0:.1f} s{' (quantized while loading)' if stream else ''}")
+        print(f"loaded {model.config.num_hidden_layers} layers, "
+              f"{sum(p.numel() for p in model.parameters()) / 1e6:.0f}M parameters "
+              f"in {time.perf_counter() - t0:.1f} s{'' if quantization is None else ' (quantized while loading)'}")
+        gen = vars(model.generation_config)
         if args.check_hf:
             for penalty in (1.0, gen.get("repetition_penalty", 1.0)):
                 check_against_transformers(path, model, ids, 32, penalty)
-        if not args.no_quantize:
+        if quantization is None and not args.no_quantize:
+            from grilly.infer.quantization import quantize_
             t0 = time.perf_counter()
-            # after streaming, this quantizes only what the checkpoint did not
-            # carry: the tied output projection
             quantize_(model, Int8WeightOnlyConfig())
             grilly._C.synchronize()
             print(f"quantized to int8 in {time.perf_counter() - t0:.2f} s")
         load_peak = grilly._C.submit_stats()["persistent_peak"]
 
-        settings = {k: gen[k] for k in ("do_sample", "temperature", "top_k", "top_p", "repetition_penalty") if k in gen}
+        settings = {k: gen[k] for k in ("do_sample", "temperature", "top_k", "top_p", "repetition_penalty")
+                    if gen.get(k) is not None}
         eos = gen.get("eos_token_id")
         print(f"sampling with the model's generation_config: {settings}, eos {eos}")
 

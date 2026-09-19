@@ -1,7 +1,7 @@
 """Load safetensors checkpoints onto the GPU.
 
 This module has the API of ``safetensors.torch``: ``load_file``, ``load``,
-``safe_open`` and ``SafetensorError``. To port code, change the import::
+``load_model``, ``safe_open`` and ``SafetensorError``. To port code, change the import::
 
     from safetensors.torch import load_file          # torch
     from grilly.infer.safetensors import load_file   # grilly
@@ -22,7 +22,7 @@ import os
 
 from .. import Tensor, _C, _not_yet, _resolve_device
 
-__all__ = ["SafetensorError", "load", "load_file", "safe_open"]
+__all__ = ["SafetensorError", "load", "load_file", "load_model", "safe_open", "stream_into"]
 
 SafetensorError = _C.SafetensorError
 
@@ -80,6 +80,63 @@ def load_file(filename, device="cpu") -> dict[str, Tensor]:
     """Every tensor in the file, in file order, uploaded to the device."""
     with safe_open(filename, framework="pt", device=device) as f:
         return {k: f.get_tensor(k) for k in f.offset_keys()}
+
+
+def stream_into(model, filename, strict: bool = True, convert=None) -> set[str]:
+    """Load ``filename`` into ``model`` one tensor at a time, and return the
+    names it held.
+
+    ``convert(key, tensor)`` may return what to set in the tensor's place —
+    a quantized weight, say — or None to assign the tensor as it is. Nothing
+    keeps a reference to a tensor after its key is done, so the file's
+    tensors are never all alive at once, unlike
+    ``load_state_dict(load_file(path), assign=True)``.
+    """
+    # shapes only: holding the state dict itself would keep every weight the
+    # loop is replacing alive until it finished, which is the whole point
+    own = {k: tuple(v.shape) for k, v in model.state_dict(keep_vars=True).items()}
+    unexpected, errors = [], []
+    with safe_open(filename, framework="pt") as f:
+        names = f.offset_keys()
+        for key in names:
+            shape = own.get(key)
+            if shape is None:
+                unexpected.append(key)
+                continue
+            value = f.get_tensor(key)
+            if tuple(value.shape) != shape:
+                errors.append(f"size mismatch for {key}: copying a param with shape {list(value.shape)} from "
+                              f"checkpoint, the shape in current model is {list(shape)}.")
+                continue
+            replacement = None if convert is None else convert(key, value)
+            if replacement is None:
+                model.load_state_dict({key: value}, assign=True, strict=False)
+            else:
+                owner, _, attr = key.rpartition(".")
+                setattr(model.get_submodule(owner) if owner else model, attr, replacement)
+            del value  # its device memory goes back before the next tensor is read
+    if strict:
+        missing = [k for k in own if k not in set(names)]
+        if missing:
+            errors.insert(0, "Missing key(s) in state_dict: " + ", ".join(f'"{k}"' for k in missing))
+        if unexpected:
+            errors.insert(0, "Unexpected key(s) in state_dict: " + ", ".join(f'"{k}"' for k in unexpected))
+    if errors:
+        joined = "\n\t".join(errors)
+        raise RuntimeError(f"Error(s) in loading state_dict for {type(model).__name__}:\n\t{joined}")
+    return set(names)
+
+
+def load_model(model, filename, strict: bool = True, device="cpu") -> tuple[list[str], list[str]]:
+    """``safetensors.torch.load_model``: load a checkpoint into a model.
+
+    One tensor is on the device at a time, so this needs about the model's
+    own size rather than twice it. Returns ``(missing, unexpected)`` as
+    safetensors does when ``strict`` is False.
+    """
+    _resolve_device(device)
+    loaded = stream_into(model, filename, strict=strict)
+    return [k for k in model.state_dict() if k not in loaded], []
 
 
 def load(data: bytes) -> dict[str, Tensor]:

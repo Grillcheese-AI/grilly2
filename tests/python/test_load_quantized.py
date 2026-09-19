@@ -20,13 +20,14 @@ from grilly.infer.safetensors import load_file
 
 
 class Small(nn.Module):
-    """Linears big enough that the float32 copies dominate the peak."""
+    """Equal-sized linears, so the bound on the peak is tight: holding one
+    float32 tensor is a small fraction of holding them all, which is what
+    the memory assertions below turn on."""
 
-    def __init__(self, width=512, depth=4):
+    def __init__(self, width=512, depth=16):
         super().__init__()
         self.layers = nn.ModuleList([nn.Linear(width, width, bias=(i % 2 == 0)) for i in range(depth)])
         self.norm = nn.LayerNorm(width)
-        self.head = nn.Linear(width, 3 * width, bias=False)
 
 
 def checkpoint(tmp_path, model, seed=0):
@@ -67,10 +68,10 @@ def test_streaming_gives_the_same_int8_as_loading_then_quantizing(tmp_path):
     del state
 
     grilly._C.reset_persistent_peak()
-    after_two_step, _ = persistent()
+    before_streaming, _ = persistent()
     load_quantized_(streamed, path, Int8WeightOnlyConfig())
     held, streaming_peak = persistent()
-    streaming_peak -= after_two_step
+    streaming_peak -= before_streaming  # over what was already alive, the model included
 
     want, got = q_bits(reference), q_bits(streamed)
     assert set(want) == set(got) != set()
@@ -79,13 +80,20 @@ def test_streaming_gives_the_same_int8_as_loading_then_quantizing(tmp_path):
         np.testing.assert_array_equal(got[name][1], want[name][1], f"{name}: scales")
 
     quantized = sum(m.weight.nbytes for m in streamed.modules() if isinstance(getattr(m, "weight", None), Int8Tensor))
-    biggest = max(v.numel() * 4 for v in load_file(path).values())
-    print(f"peak over the quantized weights: two-step {two_step_peak / 2**20:.1f} MiB, "
-          f"streaming {streaming_peak / 2**20:.1f} MiB, one float32 tensor is {biggest / 2**20:.1f} MiB")
-    # streaming holds the int8 weights plus at most one float32 tensor;
-    # the two-step path holds every float32 weight as well
-    assert streaming_peak <= quantized + 2 * biggest
-    assert two_step_peak > streaming_peak + biggest
+    tensors = load_file(path)
+    biggest = max(v.numel() * 4 for v in tensors.values())
+    whole = sum(v.numel() * 4 for v in tensors.values())
+    del tensors
+    print(f"streaming rose {streaming_peak / 2**20:.1f} MiB above what was alive, two-step "
+          f"{two_step_peak / 2**20:.1f} MiB; the checkpoint is {whole / 2**20:.1f} MiB, its largest tensor "
+          f"{biggest / 2**20:.1f} MiB, quantized {quantized / 2**20:.1f} MiB")
+    # Each weight is replaced by a quarter of its size, so a streaming load's
+    # alive bytes *fall*: the peak can only rise by about one float32 tensor.
+    # Keeping anything per weight — a state_dict held across the loop, say —
+    # leaves the old float32 weights alive and shows up here immediately.
+    assert streaming_peak <= 2 * biggest, "the load is holding on to weights it has replaced"
+    assert two_step_peak >= whole, "the two-step path should hold the whole checkpoint at once"
+    assert streaming_peak < two_step_peak / 4
 
 
 def test_streaming_reports_missing_and_unexpected_keys(tmp_path):
@@ -93,13 +101,13 @@ def test_streaming_reports_missing_and_unexpected_keys(tmp_path):
     path = checkpoint(tmp_path, model)
     state = {k: torch.zeros(tuple(v.shape)) for k, v in model.state_dict().items()}
     state.pop("layers.0.weight")
-    state["layers.9.weight"] = torch.zeros(4, 4)
+    state["layers.99.weight"] = torch.zeros(4, 4)  # no such layer
     odd = tmp_path / "odd.safetensors"
     save_file(state, str(odd))
 
     with pytest.raises(RuntimeError, match='Missing key.*"layers.0.weight"'):
         load_quantized_(Small(), odd, Int8WeightOnlyConfig())
-    with pytest.raises(RuntimeError, match='Unexpected key.*"layers.9.weight"'):
+    with pytest.raises(RuntimeError, match='Unexpected key.*"layers.99.weight"'):
         load_quantized_(Small(), odd, Int8WeightOnlyConfig())
     load_quantized_(Small(), odd, Int8WeightOnlyConfig(), strict=False)  # both tolerated
 
@@ -127,8 +135,26 @@ def test_streaming_leaves_unquantized_weights_alone(tmp_path):
 def test_streaming_with_a_filter(tmp_path):
     model = Small()
     path = checkpoint(tmp_path, model)
-    load_quantized_(model, path, Int8WeightOnlyConfig(), filter_fn=lambda m, name: name == "head")
-    assert isinstance(model.head.weight, Int8Tensor)
+    load_quantized_(model, path, Int8WeightOnlyConfig(), filter_fn=lambda m, name: name == "layers.3")
+    assert isinstance(model.layers[3].weight, Int8Tensor)
     assert not isinstance(model.layers[0].weight, Int8Tensor)
     np.testing.assert_array_equal(model.layers[0].weight.detach().numpy().view(np.uint32),
                                   load_file(path)["layers.0.weight"].numpy().view(np.uint32))
+
+
+def test_keep_vars_does_not_dequantize_the_model(tmp_path):
+    """``state_dict()`` returns dense tensors, so on a quantized model it
+    dequantizes every weight — the whole model in float32, at once. Loading
+    code must ask for ``keep_vars=True`` instead. Dequantizing is a kernel,
+    so the dispatch counter says whether it happened."""
+    model = Small()
+    load_quantized_(model, checkpoint(tmp_path, model), Int8WeightOnlyConfig())
+
+    before = grilly._C.submit_stats()["dispatches"]
+    keys = list(model.state_dict(keep_vars=True))
+    assert grilly._C.submit_stats()["dispatches"] == before, "keep_vars dequantized something"
+    assert "layers.0.weight" in keys
+
+    dense = model.state_dict()
+    assert grilly._C.submit_stats()["dispatches"] > before, "state_dict() should give dense tensors"
+    assert dense["layers.0.weight"].dtype is grilly.float32

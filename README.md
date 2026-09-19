@@ -50,19 +50,33 @@ x = torch.tensor([[1.0, -2.0]])
 torch.nn.functional.linear(x, torch.ones(3, 2))
 ```
 
-To load a safetensors checkpoint and quantize it (see `docs/inference.md`):
+To run a Hugging Face checkpoint (see `docs/huggingface.md`):
 
 ```python
-from grilly.infer.safetensors import load_file   # safetensors.torch's API
-model.load_state_dict(load_file("model.safetensors"), assign=True)
+from grilly.huggingface import AutoModelForCausalLM, AutoTokenizer   # transformers' API
+from grilly.infer.quantization import Int8WeightOnlyConfig           # torchao's API
 
-from grilly.infer.quantization import quantize_, Int8WeightOnlyConfig   # torchao's API
-quantize_(model, Int8WeightOnlyConfig())         # int8 linear weights
-model.generate(input_ids, max_new_tokens=64, do_sample=True, top_p=0.8)  # grilly.infer.models: HF's generate()
+model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct",
+                                             quantization_config=Int8WeightOnlyConfig())
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+ids = tokenizer.apply_chat_template([{"role": "user", "content": "Why is the sky blue?"}],
+                                    add_generation_prompt=True, return_tensors="pt")
+print(tokenizer.decode(model.generate(ids, max_new_tokens=128)[0]))
 ```
 
-`python tools/generate.py` runs Qwen2.5-0.5B-Instruct from the local Hugging
-Face cache that way: int8, sampled, about 60 tokens/s on an RX 6750 XT.
+`python tools/generate.py` is that run: Qwen2.5-0.5B-Instruct from the local
+Hugging Face cache, int8, sampled, **166 tokens/s** on an RX 6750 XT, 1.24 GiB
+of VRAM while generating, and greedy output identical to transformers.
+
+The machinery underneath takes no Hugging Face files, and works with
+`grilly.huggingface` uninstalled (see `docs/inference.md`):
+
+```python
+from grilly.infer.safetensors import load_file           # safetensors.torch's API
+from grilly.infer.quantization import load_quantized_, Int8WeightOnlyConfig
+load_quantized_(model, "model.safetensors", Int8WeightOnlyConfig())  # quantized as it loads
+model.generate(input_ids, max_new_tokens=64, do_sample=True, top_p=0.8)
+```
 
 Only float32 tensors on the default GPU exist so far. Anything torch supports
 that grilly does not yet raises `NotImplementedError` or fails to resolve;
