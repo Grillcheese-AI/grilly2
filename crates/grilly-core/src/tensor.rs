@@ -22,6 +22,10 @@ pub struct Tensor {
     /// Offset of the first element, in elements.
     offset: usize,
     meta: Arc<Meta>,
+    /// A copy standing in for what torch returns as a view (transpose,
+    /// expand, slicing). Writing through it would not reach the original, so
+    /// in-place ops on it are refused rather than silently diverging.
+    view_copy: bool,
 }
 
 const ELEM: usize = std::mem::size_of::<f32>();
@@ -58,7 +62,7 @@ impl Backward for CloneBackward {
 
 impl Tensor {
     fn from_parts(storage: Arc<Buffer>, shape: Vec<usize>, offset: usize) -> Tensor {
-        Tensor { storage, shape, offset, meta: Arc::new(Meta::leaf()) }
+        Tensor { storage, shape, offset, meta: Arc::new(Meta::leaf()), view_copy: false }
     }
 
     /// A tensor with undefined contents.
@@ -154,6 +158,7 @@ impl Tensor {
             )));
         }
         let mut out = Tensor::from_parts(self.storage.clone(), shape.to_vec(), self.offset);
+        out.view_copy = self.view_copy;
         let input_shape = self.shape.clone();
         autograd::record("ViewBackward0", &[self], &mut [&mut out], |_| Ok(ViewBackward { input_shape }))?;
         Ok(out)
@@ -216,7 +221,25 @@ impl Tensor {
         self.storage.version()
     }
 
-    fn check_inplace(&self, operands: &[&Tensor]) -> Result<()> {
+    /// Mark this tensor as a copy standing in for a torch view.
+    pub fn mark_view_copy(&mut self) {
+        self.view_copy = true;
+    }
+
+    /// Whether this tensor is a copy standing in for a torch view.
+    pub fn is_view_copy(&self) -> bool {
+        self.view_copy
+    }
+
+    /// torch's in-place rules, plus refusing writes through view copies.
+    pub fn check_inplace(&self, operands: &[&Tensor]) -> Result<()> {
+        if self.view_copy {
+            return Err(Error::NotImplemented(
+                "in-place writes through a transposed, expanded or sliced tensor (grilly returns \
+                 a copy where torch returns a view; call .clone() or .contiguous() first)"
+                    .into(),
+            ));
+        }
         if !autograd::is_grad_enabled() {
             return Ok(());
         }

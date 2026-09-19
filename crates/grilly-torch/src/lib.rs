@@ -3,6 +3,8 @@
 //! formula for autograd.
 
 pub mod kernels;
+pub mod math;
+pub mod shape;
 
 use grilly_core::autograd::{self, Backward, SavedTensor};
 use grilly_core::{Arg, Error, Result, Tensor};

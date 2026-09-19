@@ -248,7 +248,7 @@ fn strided_copy_transposes_and_writes_slices() {
     // write a (2, 2) block into rows 1..3, cols 2..4 of a (4, 5) zeros
     let out = Tensor::zeros(&dev(), &[4, 5]).unwrap();
     let block = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
-    generic::copy_strided(&block, 0, &[2, 1], &out, 5 + 2, &[5, 1], &[2, 2]).unwrap();
+    generic::write_strided(&block, 0, &[2, 1], &out, 5 + 2, &[5, 1], &[2, 2]).unwrap();
     let want = torch("torch.nn.functional.pad(x, (2, 1, 1, 1))", &[("x", &[1.0, 2.0, 3.0, 4.0], &[2, 2])]);
     exact(&out.to_vec().unwrap(), &want, "slice write");
     assert_eq!(out.version(), 1); // a fresh zeros tensor is at 0, as in torch; one write

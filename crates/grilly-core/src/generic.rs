@@ -237,8 +237,8 @@ pub fn sum_to_shape(g: &Tensor, shape: &[usize]) -> Result<Tensor> {
 
 /// For every coordinate `c` of `shape`:
 /// `dst[dst_off + c . dst_strides] = src[src_off + c . src_strides]`
-/// (offsets and strides in elements, relative to each storage). Bumps `dst`'s
-/// version.
+/// (offsets and strides in elements, relative to each storage). For filling
+/// a freshly made `dst`; use [`write_strided`] to modify an existing tensor.
 pub fn copy_strided(
     src: &Tensor,
     src_off: usize,
@@ -256,7 +256,21 @@ pub fn copy_strided(
     push.extend(padded(shape, "strided copy")?);
     push.extend(padded(src_strides, "strided copy")?);
     push.extend(padded(dst_strides, "strided copy")?);
-    COPY.launch_flat(src.device(), &[Arg::Storage(src), Arg::Storage(dst)], n, &push)?;
+    COPY.launch_flat(src.device(), &[Arg::Storage(src), Arg::Storage(dst)], n, &push)
+}
+
+/// [`copy_strided`] as an in-place write into an existing tensor: bumps
+/// `dst`'s version, which saved tensors check.
+pub fn write_strided(
+    src: &Tensor,
+    src_off: usize,
+    src_strides: &[usize],
+    dst: &Tensor,
+    dst_off: usize,
+    dst_strides: &[usize],
+    shape: &[usize],
+) -> Result<()> {
+    copy_strided(src, src_off, src_strides, dst, dst_off, dst_strides, shape)?;
     dst.bump_version();
     Ok(())
 }
