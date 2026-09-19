@@ -98,6 +98,13 @@ def load_weights(model, shards, quantization_config=None, strict: bool = True) -
     accounted = loaded | {k for k, v in own.items() if id(v) in carried}
     if quantization_config is not None:
         quantize_(model, quantization_config)  # only what the checkpoint did not carry
+    # a model built on the meta device must be fully replaced by now: a
+    # parameter still without data would fail much later, in a kernel
+    left = sorted(k for k, v in model.state_dict(keep_vars=True).items() if v.is_meta)
+    if left:
+        names = ", ".join(f'"{k}"' for k in left)
+        raise RuntimeError(f"{type(model).__name__} has parameters with no data after loading "
+                           f"(built on the meta device, and the checkpoint did not carry them): {names}")
     if strict:
         # keep_vars again: a plain state_dict() of a quantized model dequantizes
         # every weight at once, which is the whole model in float32

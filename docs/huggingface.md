@@ -100,20 +100,27 @@ together raises rather than silently truncating or padding.
 
 `python tools/generate.py` is this package end to end — load, quantize
 while loading, chat template, sample, report. On an RX 6750 XT with
-Qwen2.5-0.5B-Instruct: **166 tokens/s**, 1.24 GiB while generating, 2.4 GiB
-peak while loading, and greedy float32 generation identical to transformers
-for 32 tokens with and without a repetition penalty.
+Qwen2.5-0.5B-Instruct: **157 tokens/s**, 1.24 GiB while generating, 1.04 GiB
+peak while loading (1.6 s), and greedy float32 generation identical to
+transformers for 32 tokens with and without a repetition penalty.
 
-## Known gap: constructing a model still materializes weights
+## Nothing is allocated twice
 
-`from_pretrained` builds the model and then overwrites it. Building
-Qwen2.5-0.5B allocates and initializes 1.84 GiB of float32 parameters the
-checkpoint is about to replace, plus 0.5 GiB for the untied `lm_head`
-weight that `tie_weights` immediately frees. Streaming cannot help: both
-happen before it runs.
+`from_pretrained` builds the model on the **meta device** (docs/devices.md)
+— parameters with shapes and no storage — and the checkpoint's tensors
+take their place as they are read. So the float32 model that the checkpoint
+is about to overwrite never exists:
 
-For a 0.5B model on 12 GB this is merely wasteful. For a 7B model it is
-fatal — the int8 weights would fit in about 7 GB, but constructing the
-float32 model first needs 28 GB. **So this is what decides how large a
-model this adapter can load**, and it is an open decision (torch spells the
-fix `with torch.device("meta")`, accelerate `init_empty_weights`).
+| Qwen2.5-0.5B, int8 | peak persistent | load |
+|---|---:|---:|
+| build, load, then quantize | 2.98 GiB | 7.4 s |
+| stream the quantization | 2.37 GiB | 5.8 s |
+| build on meta as well | **0.97 GiB** | **1.5 s** |
+
+0.97 GiB is the weights themselves. That is also what decides the largest
+model this can load: a 7B in int8 fits on a 12 GB card, and would not have
+if 28 GB of float32 parameters had to be allocated first.
+
+`test_from_pretrained_never_allocates_the_float32_model` measures it rather
+than asserting it in prose: loading float32 must peak at the checkpoint's
+own size (it does, exactly), and an int8 load must peak below it.

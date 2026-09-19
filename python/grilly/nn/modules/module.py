@@ -3,6 +3,8 @@ and submodules, and the traversal, state and mode methods built on it."""
 
 from __future__ import annotations
 
+import builtins as _builtins
+import warnings
 from collections import OrderedDict, namedtuple
 
 from ... import Tensor, _not_yet, _resolve_device, device, dtype, float32, no_grad
@@ -207,7 +209,13 @@ class Module:
 
     def to(self, *args, **kwargs) -> "Module":
         """Device moves are no-ops (grilly has one device; "cpu" is an alias
-        for it); dtype conversion supports float32 only."""
+        for it); dtype conversion supports float32 only. A module built on
+        the meta device cannot be moved: it has no data to move."""
+        if _builtins.any(p is not None and p.is_meta for p in
+                         list(self.parameters()) + list(self.buffers())):
+            raise NotImplementedError(
+                "Cannot copy out of meta tensor; no data! Please use torch.nn.Module.to_empty() "
+                "instead of torch.nn.Module.to() when moving module from meta to a different device.")
         for t in list(args) + list(kwargs.values()):
             if isinstance(t, Tensor):
                 t = t.dtype
@@ -218,6 +226,25 @@ class Module:
                 _resolve_device(t)
             elif t is not None and not isinstance(t, bool):
                 raise TypeError(f"to() received an invalid argument {t!r}")
+        return self
+
+    def to_empty(self, *, device=None, recurse: bool = True) -> "Module":
+        """Give every parameter and buffer real, **uninitialized** storage,
+        as ``torch.nn.Module.to_empty`` does. It is how a model built on the
+        meta device becomes runnable when its values are about to be written
+        anyway; the tensors hold whatever was in memory until then."""
+        from ... import MetaTensor, empty
+        if device is not None and _resolve_device(device) is not _DEVICE:
+            raise _not_yet(f"to_empty(device={device!r}) (grilly has one device)")
+        for module in (self.modules() if recurse else [self]):
+            for holder in (module._parameters, module._buffers):
+                for name, value in list(holder.items()):
+                    if not isinstance(value, MetaTensor):
+                        continue
+                    fresh = empty(*value.shape, dtype=value.dtype)
+                    if holder is module._parameters:
+                        fresh = Parameter(fresh, requires_grad=value.requires_grad)
+                    holder[name] = fresh
         return self
 
     def cpu(self) -> "Module":
@@ -287,6 +314,13 @@ class Module:
                                   f"checkpoint, the shape in current model is {target.shape}.")
                     continue
                 if not assign:
+                    if target.is_meta:  # torch warns and does nothing here
+                        warnings.warn(f"for {key}: copying from a non-meta parameter in the checkpoint to "
+                                      "a meta parameter in the current model, which is a no-op. (Did you "
+                                      "mean to pass `assign=True` to assign items in the state dictionary "
+                                      "to their corresponding key in the module instead of copying them in "
+                                      "place?)", stacklevel=2)
+                        continue
                     target.copy_(value)
                     continue
                 owner, _, name = key.rpartition(".")

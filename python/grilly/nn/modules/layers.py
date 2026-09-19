@@ -12,7 +12,13 @@ from .module import Module
 
 
 def _no_device(device, dtype):
-    from ... import _check_factory_args
+    """grilly has one real device; ``device="meta"`` (or a ``with
+    device("meta")``) builds parameters without storage."""
+    from ... import _check_factory_args, _code, _is_meta
+    if _is_meta(device):
+        if dtype is not None:
+            _code(dtype)
+        return
     _check_factory_args(dtype, device)
 
 
@@ -34,9 +40,9 @@ class Linear(Module):
         _no_device(device, dtype)
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = Parameter(_parameter_storage(out_features, in_features))
+        self.weight = Parameter(_parameter_storage(out_features, in_features, device=device))
         if bias:
-            self.bias = Parameter(_parameter_storage(out_features))
+            self.bias = Parameter(_parameter_storage(out_features, device=device))
         else:
             self.register_parameter("bias", None)
         self.reset_parameters()
@@ -68,7 +74,7 @@ class RMSNorm(Module):
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         if elementwise_affine:
-            self.weight = Parameter(_parameter_storage(*self.normalized_shape, fill=1.0))
+            self.weight = Parameter(_parameter_storage(*self.normalized_shape, fill=1.0, device=device))
         else:
             self.register_parameter("weight", None)
 
@@ -94,8 +100,8 @@ class LayerNorm(Module):
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         if elementwise_affine:
-            self.weight = Parameter(_parameter_storage(*self.normalized_shape, fill=1.0))
-            self.bias = Parameter(_parameter_storage(*self.normalized_shape, fill=0.0)) if bias else None
+            self.weight = Parameter(_parameter_storage(*self.normalized_shape, fill=1.0, device=device))
+            self.bias = Parameter(_parameter_storage(*self.normalized_shape, fill=0.0, device=device)) if bias else None
             if not bias:
                 self.register_parameter("bias", None)
         else:
@@ -189,7 +195,7 @@ class Embedding(Module):
         self.embedding_dim = embedding_dim
         self.padding_idx = padding_idx
         if _weight is None:
-            self.weight = Parameter(_parameter_storage(num_embeddings, embedding_dim), requires_grad=not _freeze)
+            self.weight = Parameter(_parameter_storage(num_embeddings, embedding_dim, device=device), requires_grad=not _freeze)
             init.normal_(self.weight)
             if padding_idx is not None:
                 from ... import no_grad

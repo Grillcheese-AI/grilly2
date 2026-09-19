@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dataclasses import fields
 
-from .. import _not_yet, float32
+from .. import _not_yet, device, float32
 from ..infer.generation import GenerationConfig
 from .configuration import config_from_dict, model_class_for
 from .loading import load_weights, quantization_config_of, repo_files, shard_files
@@ -59,7 +59,10 @@ def from_pretrained(pretrained_model_name_or_path, *, config=None, dtype=None, t
 
     files = repo_files(pretrained_model_name_or_path, (CONFIG, GENERATION), optional=(GENERATION,), **where)
     raw = json.loads(Path(files[CONFIG]).read_text(encoding="utf-8"))
-    model = (model_class_for(raw))(config if config is not None else config_from_dict(raw))
+    # built on the meta device: its parameters have shapes and no storage, so
+    # the float32 model the checkpoint is about to replace is never allocated
+    with device("meta"):
+        model = (model_class_for(raw))(config if config is not None else config_from_dict(raw))
     load_weights(model, shard_files(pretrained_model_name_or_path, **where),
                  quantization_config=quantization_config_of(quantization_config))
     if GENERATION in files:

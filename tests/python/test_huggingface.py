@@ -47,9 +47,9 @@ LLAMA = dict(QWEN, architectures=["LlamaForCausalLM"], model_type="llama", atten
              tie_word_embeddings=False, head_dim=8)
 
 
-def write_model(path, config=QWEN, shards=1, generation=None, seed=0):
+def write_model(path, config=QWEN, shards=1, generation=None, seed=0, drop=()):
     """A checkpoint directory: config.json, weights (sharded if asked), and
-    optionally generation_config.json."""
+    optionally generation_config.json. ``drop`` leaves weights out."""
     path.mkdir(parents=True, exist_ok=True)
     (path / "config.json").write_text(json.dumps(config), encoding="utf-8")
     if generation is not None:
@@ -61,6 +61,8 @@ def write_model(path, config=QWEN, shards=1, generation=None, seed=0):
     for name, p in model.state_dict().items():
         if config.get("tie_word_embeddings") and name == "lm_head.weight":
             continue  # a tied checkpoint does not carry it, as transformers' does not
+        if name in drop:
+            continue
         values = rng.standard_normal(tuple(p.shape)).astype(np.float32)
         state[name] = torch.from_numpy(values * 0.5 + 1.0 if "norm" in name else values * 0.1)
 
@@ -274,3 +276,40 @@ print("ok")
     done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     assert done.stdout.strip().endswith("ok")
+
+
+def test_from_pretrained_never_allocates_the_float32_model(tmp_path):
+    """The model is built on the meta device, so loading peaks at the
+    weights it keeps — not at those plus the ones it threw away. This is
+    what decides the largest model that fits: a 7B in int8 does, the same
+    7B in float32 does not."""
+    path = write_model(tmp_path / "m")
+    checkpoint = sum(v.numel() * 4 for v in
+                     __import__("grilly.infer.safetensors", fromlist=["load_file"]).load_file(path / "model.safetensors").values())
+
+    grilly._C.reset_persistent_peak()
+    before = grilly._C.submit_stats()["persistent_bytes"]
+    model = from_pretrained(path)
+    peak = grilly._C.submit_stats()["persistent_peak"] - before
+    held = grilly._C.submit_stats()["persistent_bytes"] - before
+    print(f"float32: peak {peak} bytes, held {held}, the checkpoint is {checkpoint}")
+    # the weights themselves, and no second copy of them
+    assert peak <= checkpoint + max(v.numel() * 4 for v in model.state_dict().values())
+    assert held == pytest.approx(checkpoint, rel=0.01)
+
+    grilly._C.reset_persistent_peak()
+    before = grilly._C.submit_stats()["persistent_bytes"]
+    quantized = from_pretrained(path, quantization_config=Int8WeightOnlyConfig())
+    peak = grilly._C.submit_stats()["persistent_peak"] - before
+    print(f"int8:    peak {peak} bytes, the float32 checkpoint is {checkpoint}")
+    assert peak < checkpoint, "an int8 load must never hold the float32 model"
+    assert not any(v.is_meta for v in quantized.state_dict(keep_vars=True).values())
+
+
+def test_a_weight_the_checkpoint_lacks_is_reported_not_left_empty(tmp_path):
+    """Building on meta means a weight nobody wrote is a tensor with no
+    data. That must be an error at load time, not a kernel failure later."""
+    missing = "model.layers.1.mlp.down_proj.weight"
+    path = write_model(tmp_path / "m", config=dict(QWEN, tie_word_embeddings=False), drop=(missing,))
+    with pytest.raises(RuntimeError, match=f'no data after loading.*"{missing}"'):
+        from_pretrained(path, )

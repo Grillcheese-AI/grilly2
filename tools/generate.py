@@ -197,7 +197,8 @@ def main() -> None:
     print(f"weights and cache in persistent memory: {after['persistent_bytes'] / 2**30:.2f} GiB, "
           f"peak while loading {load_peak / 2**30:.2f} GiB")
     if vram.peak is not None:
-        print(f"peak dedicated VRAM: {load_vram.peak / 2**30:.2f} GiB while loading and quantizing (float32 weights first), "
+        print(f"peak dedicated VRAM: {load_vram.peak / 2**30:.2f} GiB while loading"
+              f"{' (float32, for the transformers comparison)' if args.check_hf else ''}, "
               f"{vram.peak / 2**30:.2f} GiB while generating")
 
 

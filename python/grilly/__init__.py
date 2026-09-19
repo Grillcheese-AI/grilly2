@@ -125,24 +125,52 @@ class device:
     def __str__(self) -> str:
         return self.type if self.index is None else f"{self.type}:{self.index}"
 
+    def __enter__(self) -> "device":
+        """``with device("meta"):`` makes the factories inside build tensors
+        on that device, as ``with torch.device(...)`` does."""
+        _DEVICE_STACK.append(self)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        _DEVICE_STACK.pop()
+
 
 _DEVICE = device("vulkan", 0)
+_META = device("meta")
+# devices pushed by `with device(...)`; the innermost is the default
+_DEVICE_STACK: _builtins.list = []
+
+
+def _default_device() -> device:
+    return _DEVICE_STACK[-1] if _DEVICE_STACK else _DEVICE
 
 
 def _resolve_device(d) -> device:
     """The grilly device, for None, vulkan[:0] or the "cpu" alias."""
     if d is None:
-        return _DEVICE
+        d = _default_device()
     dev = device(d)
     if dev.type in ("vulkan", "cpu") and dev.index in (None, 0):
         return _DEVICE
+    if dev.type == "meta" and dev.index in (None, 0):
+        return _META
     raise _not_yet(f"device {str(dev)!r} (grilly runs on one Vulkan device; 'cpu' is accepted as an alias for it)")
+
+
+def _is_meta(device_) -> _builtins.bool:
+    """Whether a factory called with this ``device=`` should build a meta
+    tensor: it asked for one, or a ``with device("meta")`` is open."""
+    return _resolve_device(device_) is _META
 
 
 def _check_factory_args(dtype_, device_, requires_grad=False) -> None:
     if dtype_ is not None:
         _code(dtype_)
-    _resolve_device(device_)
+    if _resolve_device(device_) is _META:
+        # a factory that reaches here has no meta path, and quietly returning
+        # real storage under `with device("meta")` is the bad failure
+        raise _not_yet("this factory on the meta device (grilly builds meta tensors in "
+                       "empty, zeros, ones, full, rand, randn and module parameters)")
 
 
 def _cast(t: "Tensor", dt) -> "Tensor":
@@ -286,6 +314,7 @@ class Tensor:
         return _DEVICE
 
     is_cuda = False
+    is_meta = False
 
     def cpu(self) -> "Tensor":
         return self  # "cpu" is an alias for grilly's device
@@ -563,13 +592,17 @@ def from_numpy(ndarray: _np.ndarray) -> Tensor:
 
 
 def empty(*size, dtype=None, device=None, requires_grad=False) -> Tensor:
+    if _is_meta(device):
+        return MetaTensor._new(_size_args(size), dtype or float32, requires_grad)
     _check_factory_args(dtype, device)
     t = Tensor._wrap(_C.Tensor.empty(list(_size_args(size)), _code(dtype or float32)))
     return _leaf(t, requires_grad)
 
 
 def full(size, fill_value, *, dtype=None, device=None, requires_grad=False) -> Tensor:
-    _check_factory_args(dtype, device)
+    meta = _is_meta(device)
+    if not meta:
+        _check_factory_args(dtype, device)
     if dtype is None:  # torch infers from the fill value
         if isinstance(fill_value, _builtins.bool):
             dtype = bool
@@ -579,26 +612,151 @@ def full(size, fill_value, *, dtype=None, device=None, requires_grad=False) -> T
             dtype = float32
         else:
             raise TypeError(f"full(): fill_value must be a number, not {type(fill_value).__name__}")
+    if meta:
+        return MetaTensor._new(_size_args((size,)), dtype, requires_grad)
     t = Tensor._wrap(_C.Tensor.full(list(_size_args((size,))), _builtins.float(fill_value), _code(dtype)))
     return _leaf(t, requires_grad)
 
 
 def zeros(*size, dtype=None, device=None, requires_grad=False) -> Tensor:
+    if _is_meta(device):
+        return MetaTensor._new(_size_args(size), dtype or float32, requires_grad)
     _check_factory_args(dtype, device)
     t = Tensor._wrap(_C.Tensor.full(list(_size_args(size)), 0.0, _code(dtype or float32)))
     return _leaf(t, requires_grad)
 
 
 def ones(*size, dtype=None, device=None, requires_grad=False) -> Tensor:
+    if _is_meta(device):
+        return MetaTensor._new(_size_args(size), dtype or float32, requires_grad)
     _check_factory_args(dtype, device)
     t = Tensor._wrap(_C.Tensor.full(list(_size_args(size)), 1.0, _code(dtype or float32)))
     return _leaf(t, requires_grad)
 
 
-def _parameter_storage(*size, fill=None) -> Tensor:
+class MetaTensor(Tensor):
+    """A tensor with a shape and a dtype and no data, as
+    ``torch.empty(..., device="meta")`` gives. It exists so a model can be
+    built without allocating the weights a checkpoint is about to replace:
+
+        with device("meta"):
+            model = LlamaForCausalLM(config)          # nothing allocated
+        model.load_state_dict(state, assign=True)     # real tensors take their place
+        model.to_empty()                              # or: uninitialized storage
+
+    Everything that needs data raises, naming what to do instead. In-place
+    initialization (``uniform_``, ``normal_``, ``fill_``) is a no-op, so a
+    module's ``reset_parameters`` runs unchanged.
+    """
+
+    __slots__ = ("_shape", "_dtype", "_requires_grad")
+
+    def __init__(self, *args, **kwargs) -> None:
+        raise _not_yet("MetaTensor(...); use empty(..., device='meta')")
+
+    @classmethod
+    def _new(cls, shape, dtype_=None, requires_grad=False) -> "MetaTensor":
+        t = object.__new__(cls)
+        t._shape = Size(_builtins.tuple(_builtins.int(d) for d in shape))
+        t._dtype = dtype_ or float32
+        t._requires_grad = _builtins.bool(requires_grad)
+        t._grad = None
+        return t
+
+    @property
+    def _t(self):
+        raise _not_yet(f"an operation on a meta tensor of shape {list(self._shape)} (it has no data: "
+                       "load real tensors with load_state_dict(..., assign=True), or allocate "
+                       "uninitialized ones with Module.to_empty())")
+
+    # metadata, which is all a meta tensor has
+    @property
+    def shape(self) -> Size:
+        return self._shape
+
+    def dim(self) -> _builtins.int:
+        return len(self._shape)
+
+    ndim = property(dim)
+
+    def numel(self) -> _builtins.int:
+        return _math.prod(self._shape)
+
+    @property
+    def dtype(self) -> dtype:
+        return self._dtype
+
+    @property
+    def device(self) -> device:
+        return _META
+
+    is_meta = True
+
+    @property
+    def requires_grad(self) -> _builtins.bool:
+        return self._requires_grad
+
+    @requires_grad.setter
+    def requires_grad(self, value) -> None:
+        self._requires_grad = _builtins.bool(value)
+
+    def requires_grad_(self, requires_grad: _builtins.bool = True) -> "MetaTensor":
+        self._requires_grad = _builtins.bool(requires_grad)
+        return self
+
+    @property
+    def is_leaf(self) -> _builtins.bool:
+        return True
+
+    @property
+    def grad_fn(self):
+        return None
+
+    def detach(self) -> "MetaTensor":
+        return MetaTensor._new(self._shape, self._dtype, False)
+
+    def clone(self) -> "MetaTensor":
+        return MetaTensor._new(self._shape, self._dtype, self._requires_grad)
+
+    def to(self, *args, **kwargs) -> "Tensor":
+        """Only ``to("meta")`` and a dtype change stay meta; moving a meta
+        tensor to the real device is ``Module.to_empty()``, as in torch."""
+        target = kwargs.get("device", next((a for a in args if isinstance(a, (device, str))), None))
+        if target is not None and _resolve_device(target) is not _META:
+            raise _not_yet("moving a meta tensor to the device (it has no data; use Module.to_empty() "
+                           "or load_state_dict(..., assign=True))")
+        target_dtype = kwargs.get("dtype", next((a for a in args if isinstance(a, dtype)), None))
+        return self if target_dtype in (None, self._dtype) else MetaTensor._new(self._shape, target_dtype, self._requires_grad)
+
+    def cpu(self) -> "Tensor":
+        return self.to("meta")
+
+    # initialization has nothing to write to, as in torch
+    def uniform_(self, *args, **kwargs) -> "MetaTensor":
+        return self
+
+    def normal_(self, *args, **kwargs) -> "MetaTensor":
+        return self
+
+    def fill_(self, *args, **kwargs) -> "MetaTensor":
+        return self
+
+    def zero_(self) -> "MetaTensor":
+        return self
+
+    def __repr__(self) -> str:
+        kind = "" if self._dtype is float32 else f", dtype={self._dtype}"
+        grad = ", requires_grad=True" if self._requires_grad else ""
+        return f"tensor(..., device='meta', size={_builtins.tuple(self._shape)}{kind}{grad})"
+
+
+def _parameter_storage(*size, fill=None, device=None) -> Tensor:
     """A float32 tensor for a module parameter, filled with ``fill`` if given.
     It is in persistent device memory: exactly its size and never pooled,
-    because a parameter lives as long as its module (docs/inference.md)."""
+    because a parameter lives as long as its module (docs/inference.md).
+    On the meta device it has no storage at all (see ``MetaTensor``)."""
+    if _is_meta(device):
+        return MetaTensor._new(_size_args(size))
     t = Tensor._wrap(_C.Tensor.empty(list(_size_args(size)), _code(float32), True))
     return t if fill is None else t.fill_(fill)
 
@@ -650,6 +808,8 @@ def _generator(generator) -> Generator:
 def _random(kind: str, size, generator, dtype_, device, requires_grad, out) -> Tensor:
     if out is not None:
         raise _not_yet("the out= argument")
+    if _is_meta(device):
+        return MetaTensor._new(_size_args(size), dtype_ or float32, requires_grad)
     _check_factory_args(dtype_, device)
     if dtype_ is not None and dtype_ is not float32:
         raise RuntimeError(f"{'normal' if kind == 'normal' else 'uniform'} expects a floating point dtype, got {dtype_!r}")

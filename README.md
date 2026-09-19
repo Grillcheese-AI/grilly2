@@ -78,7 +78,9 @@ load_quantized_(model, "model.safetensors", Int8WeightOnlyConfig())  # quantized
 model.generate(input_ids, max_new_tokens=64, do_sample=True, top_p=0.8)
 ```
 
-Only float32 tensors on the default GPU exist so far. Anything torch supports
+Only float32 tensors on the default GPU exist so far, plus torch's meta
+device (`with grilly.device("meta")`) for building a model without
+allocating the weights a checkpoint is about to replace. Anything torch supports
 that grilly does not yet raises `NotImplementedError` or fails to resolve;
 nothing silently behaves differently.
 
