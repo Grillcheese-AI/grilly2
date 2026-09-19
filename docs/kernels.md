@@ -23,6 +23,8 @@ applies to v1's modules.
 | `g2-index` | gather along one dim by an int64 index | gather, index_select, advanced indexing, embedding |
 | `g2-index-add` | backward of `g2-index`, one thread per destination, fixed order | the gradient under `use_deterministic_algorithms(True)` |
 | `g2-index-add-atomic` | backward of `g2-index`, one thread per gradient element | the gradient by default (fast; last bits vary with duplicate indices) |
+| `g2-argreduce` | index of the first extreme along one axis (NaN is the extreme) | argmax, argmin, `max(dim)`, `min(dim)` |
+| `g2-sort-init`, `g2-sort-step`, `g2-sort-take` | bitonic sort of every row (padded to a power of two), float32 or int64 keys, ties by position | sort, argsort, topk |
 
 All are prefixed `g2-` so they cannot shadow a v1 kernel. Every tensor is
 passed as its whole storage buffer plus an element offset, so views never
@@ -40,3 +42,9 @@ arguments would need Payne-Hanek reduction.
 atomics rather than `GL_EXT_shader_atomic_float`: on the RX 6750 XT driver
 stack, float `atomicAdd` puts every add at flat index 0. v1 recorded the same
 failure in `cpp/src/ops/loss.cpp`, and it was measured again here.
+
+The sort runs log2(p)(log2(p)+1)/2 compare-exchange dispatches for rows
+padded to p, all recorded in one batch (120 for a 32768-wide row). Its
+order is total (equal values keep their original order), so `sort` is
+always stable and `topk` breaks ties toward the lower index. torch's default
+sort is not stable, so tests compare against `sort(stable=True)`.

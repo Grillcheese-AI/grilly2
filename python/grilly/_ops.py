@@ -443,12 +443,30 @@ def amin(input, dim=(), keepdim=False) -> Tensor:
     return _extreme(input, dim, keepdim, False)
 
 
+def _zero_index(x: Tensor, dim) -> Tensor:
+    """The only index of a 0-d tensor (dim must be 0 or -1, as in torch)."""
+    _dim(dim, 1)
+    from . import zeros
+    return zeros((), dtype=_dt()[2])
+
+
+def _max_dim(x: Tensor, dim, keepdim, is_max):
+    from . import return_types
+    cls = return_types.max if is_max else return_types.min
+    if x.dim() == 0:
+        return cls(x, _zero_index(x, dim))
+    v, i = _C.max_dim(x._t, _dim(dim, x.dim()), builtins.bool(keepdim), is_max)
+    return cls(_w(v), _w(i))
+
+
 def max(input, dim=None, keepdim=False):  # noqa: A001
+    """``max(x)``: the largest value; ``max(x, dim)``: (values, indices),
+    the first largest along ``dim``; ``max(a, b)``: elementwise maximum."""
     if isinstance(dim, Tensor):
         return maximum(input, dim)  # torch.max(a, b)
     if dim is None:
         return amax(input)
-    raise _not_yet("max(dim) (it returns values and int64 indices)")
+    return _max_dim(_require_tensor("input", input), dim, keepdim, True)
 
 
 def min(input, dim=None, keepdim=False):  # noqa: A001
@@ -456,7 +474,64 @@ def min(input, dim=None, keepdim=False):  # noqa: A001
         return minimum(input, dim)
     if dim is None:
         return amin(input)
-    raise _not_yet("min(dim) (it returns values and int64 indices)")
+    return _max_dim(_require_tensor("input", input), dim, keepdim, False)
+
+
+def _arg(input, dim, keepdim, is_max) -> Tensor:
+    x = _require_tensor("input", input)
+    if dim is None:
+        if x.numel() == 0:
+            raise IndexError(f"{'argmax' if is_max else 'argmin'}(): Expected reduction dim to be specified "
+                             "for input.numel() == 0.")
+        flat = x.reshape(-1)
+        r = _w(_C.argmax(flat._t, 0, False, is_max))
+        return r.reshape([1] * x.dim()) if keepdim else r
+    if x.dim() == 0:
+        return _zero_index(x, dim)
+    return _w(_C.argmax(x._t, _dim(dim, x.dim()), builtins.bool(keepdim), is_max))
+
+
+def argmax(input, dim=None, keepdim=False) -> Tensor:
+    """The index of the first largest value (NaN counts as largest), of the
+    flattened tensor when ``dim`` is None."""
+    return _arg(input, dim, keepdim, True)
+
+
+def argmin(input, dim=None, keepdim=False) -> Tensor:
+    return _arg(input, dim, keepdim, False)
+
+
+def _sort_dim(x: Tensor, dim):
+    """(dim, its size); a 0-d tensor sorts as one element along dim 0."""
+    d = _dim(dim, builtins.max(x.dim(), 1))
+    return d, (x.shape[d] if x.dim() else 1)
+
+
+def _sorted(x: Tensor, dim, descending, take, name):
+    v, i = _C.sorted(x._t, _sort_dim(x, dim)[0], builtins.bool(descending), take, name)
+    return _w(v), _w(i)
+
+
+def sort(input, dim=-1, descending=False, stable=False):
+    """(values, indices) along ``dim``. Equal values keep their original
+    order (so ``stable`` is always honoured) and NaN sorts as the largest."""
+    from . import return_types
+    x = _require_tensor("input", input)
+    return return_types.sort(*_sorted(x, dim, descending, _sort_dim(x, dim)[1], "sort"))
+
+
+def argsort(input, dim=-1, descending=False, stable=False) -> Tensor:
+    return sort(input, dim, descending, stable).indices
+
+
+def topk(input, k, dim=-1, largest=True, sorted=True):  # noqa: A002
+    """The ``k`` largest (or smallest) values along ``dim`` and their
+    indices, always in sorted order; ties go to the lower index."""
+    from . import return_types
+    x = _require_tensor("input", input)
+    if not 0 <= k <= _sort_dim(x, dim)[1]:
+        raise RuntimeError("selected index k out of range")
+    return return_types.topk(*_sorted(x, dim, largest, builtins.int(k), "topk"))
 
 
 def _float_input(x, op):
@@ -864,7 +939,8 @@ def _install() -> None:
     T = Tensor
     for name in ("sin", "cos", "add", "sub", "mul", "div", "pow", "neg", "abs", "sign", "exp", "log",
                  "sqrt", "rsqrt", "tanh", "sigmoid", "square", "clamp", "clip", "clamp_min",
-                 "clamp_max", "sum", "mean", "amax", "amin", "max", "min", "softmax",
+                 "clamp_max", "sum", "mean", "amax", "amin", "max", "min", "argmax", "argmin", "sort",
+                 "argsort", "topk", "softmax",
                  "log_softmax", "transpose", "swapaxes", "t", "permute", "unsqueeze",
                  "squeeze", "flatten", "expand", "narrow", "select", "chunk", "split",
                  "matmul", "mm", "bmm", "contiguous", "maximum", "minimum", "true_divide",

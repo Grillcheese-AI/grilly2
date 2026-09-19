@@ -271,6 +271,32 @@ fn embedding(py: Python<'_>, index: &PyTensor, weight: &PyTensor, padding_idx: O
     run(py, move || shape::embedding(&i, &w, padding_idx))
 }
 
+fn run2(py: Python<'_>, f: impl FnOnce() -> grilly_core::Result<(Tensor, Tensor)> + Send) -> PyResult<(PyTensor, PyTensor)> {
+    py.detach(f).map(|(a, b)| (wrap(a), wrap(b))).map_err(err)
+}
+
+#[pyfunction]
+fn argmax(py: Python<'_>, x: &PyTensor, dim: usize, keepdim: bool, max: bool) -> PyResult<PyTensor> {
+    let x = x.inner.clone();
+    run(py, move || shape::argmax(&x, dim, keepdim, max))
+}
+
+/// (values, indices) of `x.max(dim)` or `x.min(dim)`.
+#[pyfunction]
+fn max_dim(py: Python<'_>, x: &PyTensor, dim: usize, keepdim: bool, max: bool) -> PyResult<(PyTensor, PyTensor)> {
+    let x = x.inner.clone();
+    run2(py, move || shape::max_dim(&x, dim, keepdim, max))
+}
+
+/// (values, indices) of the first `take` elements in sorted order along
+/// `dim`; `name` is the autograd node's name (SortBackward0, TopkBackward0).
+#[pyfunction]
+fn sorted(py: Python<'_>, x: &PyTensor, dim: usize, descending: bool, take: usize, name: &str) -> PyResult<(PyTensor, PyTensor)> {
+    let x = x.inner.clone();
+    let name: &'static str = if name == "topk" { "TopkBackward0" } else { "SortBackward0" };
+    run2(py, move || shape::sorted(&x, dim, descending, take, name))
+}
+
 #[pyfunction]
 fn set_deterministic(on: bool) {
     grilly_core::generic::set_deterministic(on);
@@ -286,6 +312,9 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(index_select, m)?)?;
     m.add_function(wrap_pyfunction!(index_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(embedding, m)?)?;
+    m.add_function(wrap_pyfunction!(argmax, m)?)?;
+    m.add_function(wrap_pyfunction!(max_dim, m)?)?;
+    m.add_function(wrap_pyfunction!(sorted, m)?)?;
     m.add_function(wrap_pyfunction!(set_deterministic, m)?)?;
     m.add_function(wrap_pyfunction!(deterministic, m)?)?;
     m.add_function(wrap_pyfunction!(predicate, m)?)?;

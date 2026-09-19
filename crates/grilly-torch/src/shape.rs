@@ -342,3 +342,72 @@ pub fn embedding(input: &Tensor, weight: &Tensor, padding_idx: Option<usize>) ->
     shape.push(width);
     out.reshape(&shape)
 }
+
+// ── extremes and ordering ───────────────────────────────────────────────
+
+/// argmax (`max`) / argmin along `dim` as int64: the first extreme, NaN
+/// counting as the extreme, as in torch.
+pub fn argmax(x: &Tensor, dim: usize, keepdim: bool, max: bool) -> Result<Tensor> {
+    check_reducible(x, dim, if max { "argmax" } else { "argmin" })?;
+    let src = match x.dtype() {
+        DType::F32 | DType::I64 => x.detach(),
+        _ => x.detach().cast(DType::I64)?,
+    };
+    let idx = k::arg_reduce(&src, dim, max)?;
+    if keepdim {
+        Ok(idx)
+    } else {
+        idx.reshape(&dropped(x.shape(), dim))
+    }
+}
+
+/// torch's IndexError for reducing an empty (or missing) dimension.
+fn check_reducible(x: &Tensor, dim: usize, op: &str) -> Result<()> {
+    match x.shape().get(dim) {
+        Some(0) => Err(Error::Index(format!("{op}(): Expected reduction dim {dim} to have non-zero size."))),
+        Some(_) => Ok(()),
+        None => Err(Error::Index(format!("{op}(): dim {dim} out of range for {} dimensions", x.dim()))),
+    }
+}
+
+fn dropped(shape: &[usize], dim: usize) -> Vec<usize> {
+    let mut s = shape.to_vec();
+    s.remove(dim);
+    s
+}
+
+/// `x.max(dim)` / `x.min(dim)`: (values, int64 indices). The values are
+/// gathered at the indices, so the gradient goes to the chosen element,
+/// as torch's max(dim) backward does.
+pub fn max_dim(x: &Tensor, dim: usize, keepdim: bool, max: bool) -> Result<(Tensor, Tensor)> {
+    check_reducible(x, dim, if max { "max" } else { "min" })?;
+    let idx = argmax(x, dim, true, max)?;
+    let values = indexed(x, dim, &idx, IndexMode::Gather, if max { "MaxBackward0" } else { "MinBackward0" })?;
+    if keepdim {
+        return Ok((values, idx));
+    }
+    let shape = dropped(x.shape(), dim);
+    Ok((values.reshape(&shape)?, idx.reshape(&shape)?))
+}
+
+/// The first `take` elements of `x` in sorted order along `dim`, and their
+/// positions: `sort` (take = the whole dim) and `topk`. Equal values keep
+/// their original order and NaN sorts as the largest value, so the result
+/// is deterministic; values are gathered from `x`, so they keep its dtype
+/// and gradients are torch's. int32 and bool sort as int64 keys.
+pub fn sorted(x: &Tensor, dim: usize, descending: bool, take: usize, name: &'static str) -> Result<(Tensor, Tensor)> {
+    if x.dim() == 0 {
+        let (v, i) = sorted(&x.reshape(&[1])?, 0, descending, take, name)?;
+        return Ok((v.reshape(&[])?, i.reshape(&[])?));
+    }
+    let keys = match x.dtype() {
+        DType::F32 | DType::I64 => x.detach(),
+        _ => x.detach().cast(DType::I64)?,
+    };
+    let last = x.dim() - 1;
+    let moved = if dim == last { keys } else { transpose(&keys, dim, last)? };
+    let pos = k::sort_positions(&moved, descending, take)?;
+    let idx = if dim == last { pos } else { transpose(&pos, dim, last)? };
+    let values = indexed(x, dim, &idx, IndexMode::Gather, name)?;
+    Ok((values, idx))
+}

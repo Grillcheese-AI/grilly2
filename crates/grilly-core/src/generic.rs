@@ -27,7 +27,15 @@ pub const INDEX: Kernel = Kernel { shader: "g2-index", bindings: 3, push_words: 
 pub const INDEX_ADD: Kernel = Kernel { shader: "g2-index-add", bindings: 3, push_words: 9 + 2 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 pub const INDEX_ADD_ATOMIC: Kernel = Kernel { shader: "g2-index-add-atomic", bindings: 3, push_words: 9 + 2 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 
-pub const ALL: &[Kernel] = &[UNARY, BINARY, REDUCE, COPY, CAST, BINARY_INT, WHERE, REDUCE_INT, INDEX, INDEX_ADD, INDEX_ADD_ATOMIC];
+pub const ARG_REDUCE: Kernel = Kernel { shader: "g2-argreduce", bindings: 2, push_words: 7, local_size: [256, 1, 1] };
+pub const SORT_INIT: Kernel = Kernel { shader: "g2-sort-init", bindings: 3, push_words: 5, local_size: [256, 1, 1] };
+pub const SORT_STEP: Kernel = Kernel { shader: "g2-sort-step", bindings: 2, push_words: 7, local_size: [256, 1, 1] };
+pub const SORT_TAKE: Kernel = Kernel { shader: "g2-sort-take", bindings: 2, push_words: 3, local_size: [256, 1, 1] };
+
+pub const ALL: &[Kernel] = &[
+    UNARY, BINARY, REDUCE, COPY, CAST, BINARY_INT, WHERE, REDUCE_INT, INDEX, INDEX_ADD, INDEX_ADD_ATOMIC,
+    ARG_REDUCE, SORT_INIT, SORT_STEP, SORT_TAKE,
+];
 
 static DETERMINISTIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -557,5 +565,81 @@ pub fn index_add_backward(g: &Tensor, dim: usize, index: &Tensor, mode: IndexMod
     push.extend(padded(g.shape(), "index backward")?);
     let kernel = if det { INDEX_ADD } else { INDEX_ADD_ATOMIC };
     kernel.launch_flat(g.device(), &[Arg::Storage(g), Arg::Storage(index), Arg::Storage(&out)], n, &push)?;
+    Ok(out)
+}
+
+/// `argmax` (`max`) or `argmin` of a float32 or int64 tensor along `dim`,
+/// as int64 with `dim` kept as size 1. Ties go to the first position, and
+/// NaN is both the largest and the smallest value, as in torch.
+pub fn arg_reduce(x: &Tensor, dim: usize, max: bool) -> Result<Tensor> {
+    let is_int = match x.dtype() {
+        DType::F32 => 0,
+        DType::I64 => 1,
+        other => return Err(Error::Invalid(format!("arg reduction: expected float32 or int64, got {}", other.name()))),
+    };
+    let shape = x.shape();
+    if dim >= shape.len() {
+        return Err(Error::Shape(format!("arg reduction: dim {dim} out of range for shape {shape:?}")));
+    }
+    let (outer, len, inner): (usize, usize, usize) = (shape[..dim].iter().product(), shape[dim], shape[dim + 1..].iter().product());
+    if len == 0 {
+        return Err(Error::Invalid(format!(
+            "{}(): Expected reduction dim {dim} to have non-zero size.",
+            if max { "argmax" } else { "argmin" }
+        )));
+    }
+    let mut out_shape = shape.to_vec();
+    out_shape[dim] = 1;
+    let out = Tensor::empty_typed(x.device(), &out_shape, DType::I64)?;
+    let push = [u32_of(outer, "outer")?, u32_of(len, "len")?, u32_of(inner, "inner")?, max as u32, is_int, u32_of(x.offset(), "offset")?, 0];
+    ARG_REDUCE.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], outer * inner, &push)?;
+    Ok(out)
+}
+
+/// The positions that sort each row of a float32 or int64 tensor along its
+/// last dimension, first `take` of them, as int64 of shape (..., take). A bitonic
+/// sort over rows padded to a power of two: log2(p)(log2(p)+1)/2 dispatches,
+/// recorded in one batch. The order is total (equal values keep their
+/// original order; NaN is largest, as in torch), so the result is
+/// deterministic.
+pub fn sort_positions(x: &Tensor, descending: bool, take: usize) -> Result<Tensor> {
+    let words = match x.dtype() {
+        DType::F32 => 1u32,
+        DType::I64 => 2,
+        other => return Err(Error::Invalid(format!("sort: expected float32 or int64, got {}", other.name()))),
+    };
+    let (n, lead) = match x.shape().split_last() {
+        Some((&n, lead)) => (n, lead),
+        None => return Err(Error::Shape("sort: a 0-d tensor has no dimension to sort".into())),
+    };
+    if take > n {
+        return Err(Error::Invalid(format!("sort: take {take} > {n}")));
+    }
+    let rows: usize = lead.iter().product();
+    let mut out_shape = lead.to_vec();
+    out_shape.push(take);
+    let out = Tensor::empty_typed(x.device(), &out_shape, DType::I64)?;
+    if rows == 0 || take == 0 {
+        return Ok(out);
+    }
+    let padded = n.next_power_of_two();
+    let total = rows.checked_mul(padded).filter(|&t| t <= u32::MAX as usize)
+        .ok_or_else(|| Error::Shape(format!("sort: {rows} rows of {padded} exceed u32")))?;
+    let keys = Tensor::empty_typed(x.device(), &[total], x.dtype())?;
+    let idx = Tensor::empty_typed(x.device(), &[total], DType::I32)?;
+    let (rows32, n32, p32) = (rows as u32, u32_of(n, "sort length")?, padded as u32);
+    let dev = x.device();
+    SORT_INIT.launch_flat(dev, &[Arg::Storage(x), Arg::Storage(&keys), Arg::Storage(&idx)], total, &[rows32, n32, p32, u32_of(x.offset(), "offset")?, words])?;
+    let mut k = 2;
+    while k <= padded {
+        let mut j = k / 2;
+        while j > 0 {
+            let push = [rows32, n32, p32, j as u32, k as u32, descending as u32, words];
+            SORT_STEP.launch_flat(dev, &[Arg::Storage(&keys), Arg::Storage(&idx)], total, &push)?;
+            j /= 2;
+        }
+        k *= 2;
+    }
+    SORT_TAKE.launch_flat(dev, &[Arg::Storage(&idx), Arg::Storage(&out)], rows * take, &[rows32, take as u32, p32])?;
     Ok(out)
 }
