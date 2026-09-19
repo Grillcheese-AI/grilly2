@@ -45,6 +45,9 @@ fn main() {
     println!("cargo:rustc-link-lib=static=grilly_core_lib");
     println!("cargo:rustc-link-search=native={}", sdk.join("Lib").display());
     println!("cargo:rustc-link-lib=dylib=vulkan-1");
+    // shaderc, for gc_compile_shader (the same library v1 links for its JIT
+    // shader fusion; it ships with the Vulkan SDK)
+    println!("cargo:rustc-link-lib=static=shaderc_combined");
 
     // Exposed to dependents as DEP_GRILLY_CORE_V1_DIR, so tests and tools can
     // find v1's compiled shaders without a hard-coded path.

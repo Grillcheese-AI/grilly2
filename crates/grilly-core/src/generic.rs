@@ -216,7 +216,7 @@ pub fn broadcast_shape(a: &[usize], b: &[usize]) -> Result<Vec<usize>> {
 
 /// Strides for reading a contiguous tensor of `shape` as if it had
 /// `out_shape` (0 on broadcast and missing leading dims).
-fn broadcast_strides(shape: &[usize], out_shape: &[usize]) -> Vec<usize> {
+pub(crate) fn broadcast_strides(shape: &[usize], out_shape: &[usize]) -> Vec<usize> {
     let own = contiguous_strides(shape);
     let lead = out_shape.len() - shape.len();
     (0..out_shape.len())

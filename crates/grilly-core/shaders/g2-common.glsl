@@ -121,3 +121,87 @@ void pair_add(inout float a_hi, inout float a_lo, float b_hi, float b_lo) {
     a_lo = isinf(t) ? 0.0 : a_lo + b_lo + err;
     a_hi = t;
 }
+
+// ── elementwise ops, shared by g2-unary, g2-binary and fused kernels ─────
+// One definition per op, so a fused kernel (grilly_core::fusion) computes
+// exactly what the unfused kernels do. Results are `precise`: no
+// contraction or reassociation across ops, whatever the call site.
+
+// Unary op codes; keep in sync with grilly_core::generic::Unary.
+const uint UN_NEG = 0, UN_ABS = 1, UN_SIGN = 2, UN_EXP = 3, UN_LOG = 4, UN_SQRT = 5, UN_RSQRT = 6,
+           UN_TANH = 7, UN_SIGMOID = 8, UN_ADD_S = 9, UN_MUL_S = 10, UN_RSUB_S = 11, UN_RDIV_S = 12,
+           UN_POW_S = 13, UN_CLAMP = 14, UN_CLAMP_MASK = 15, UN_GELU = 16, UN_GELU_GRAD = 17,
+           UN_IS_FINITE = 18, UN_IS_INF = 19, UN_IS_NAN = 20, UN_SIN = 21, UN_COS = 22, UN_FLOOR = 23, UN_CEIL = 24,
+           UN_TRUNC = 25, UN_ROUND = 26;
+
+// f(v; a, b)
+float g2_unary(uint op, float v, float a, float b) {
+    precise float r;
+    switch (op) {
+        case UN_NEG: r = -v; break;
+        case UN_ABS: r = abs(v); break;
+        case UN_SIGN: r = sign(v); break;
+        case UN_EXP: r = exp_acc(v); break;
+        case UN_LOG: r = log(v); break;
+        case UN_SQRT: r = sqrt(v); break;
+        case UN_RSQRT: r = 1.0 / sqrt(v); break;
+        case UN_TANH: r = tanh_acc(v); break;
+        case UN_SIGMOID: {
+            float e = exp_acc(-abs(v));
+            r = v >= 0.0 ? 1.0 / (1.0 + e) : e / (1.0 + e);
+            break;
+        }
+        case UN_ADD_S: r = v + a; break;
+        case UN_MUL_S: r = v * a; break;
+        case UN_RSUB_S: r = a - v; break;
+        case UN_RDIV_S: r = a / v; break;
+        case UN_POW_S: r = power(v, a); break;
+        case UN_CLAMP: r = min(max(v, a), b); break;
+        case UN_CLAMP_MASK: r = (v >= a && v <= b) ? 1.0 : 0.0; break;
+        case UN_GELU: r = 0.5 * v * (1.0 + erf_approx(v * 0.70710678118654752)); break;
+        case UN_GELU_GRAD: {
+            float cdf = 0.5 * (1.0 + erf_approx(v * 0.70710678118654752));
+            float pdf = exp_acc(-0.5 * v * v) * 0.39894228040143268;
+            r = cdf + v * pdf;
+            break;
+        }
+        case UN_SIN: r = sin_cos_acc(v, false); break;
+        case UN_COS: r = sin_cos_acc(v, true); break;
+        case UN_IS_FINITE: r = (isnan(v) || isinf(v)) ? 0.0 : 1.0; break;
+        case UN_IS_INF: r = isinf(v) ? 1.0 : 0.0; break;
+        case UN_IS_NAN: r = isnan(v) ? 1.0 : 0.0; break;
+        case UN_FLOOR: r = floor(v); break;
+        case UN_CEIL: r = ceil(v); break;
+        case UN_TRUNC: r = trunc(v); break;
+        case UN_ROUND: r = roundEven(v); break;  // torch rounds half to even
+        default: r = NAN;
+    }
+    return r;
+}
+
+// Binary op codes; keep in sync with grilly_core::generic::Binary.
+// Comparisons give 1.0 / 0.0.
+const uint BIN_ADD = 0, BIN_SUB = 1, BIN_MUL = 2, BIN_DIV = 3, BIN_POW = 4, BIN_MAXIMUM = 5, BIN_MINIMUM = 6,
+           BIN_EQ = 7, BIN_NE = 8, BIN_GT = 9, BIN_GE = 10, BIN_LT = 11, BIN_LE = 12;
+
+// op(x, y)
+float g2_binary(uint op, float x, float y) {
+    precise float r;
+    switch (op) {
+        case BIN_ADD: r = x + y; break;
+        case BIN_SUB: r = x - y; break;
+        case BIN_MUL: r = x * y; break;
+        case BIN_DIV: r = x / y; break;
+        case BIN_POW: r = power(x, y); break;
+        case BIN_MAXIMUM: r = (isnan(x) || isnan(y)) ? NAN : max(x, y); break;
+        case BIN_MINIMUM: r = (isnan(x) || isnan(y)) ? NAN : min(x, y); break;
+        case BIN_EQ: r = x == y ? 1.0 : 0.0; break;
+        case BIN_NE: r = x != y ? 1.0 : 0.0; break;
+        case BIN_GT: r = x > y ? 1.0 : 0.0; break;
+        case BIN_GE: r = x >= y ? 1.0 : 0.0; break;
+        case BIN_LT: r = x < y ? 1.0 : 0.0; break;
+        case BIN_LE: r = x <= y ? 1.0 : 0.0; break;
+        default: r = NAN;
+    }
+    return r;
+}

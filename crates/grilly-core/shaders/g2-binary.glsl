@@ -14,9 +14,6 @@ layout(push_constant) uniform P {
     uint shape[MAX_DIMS]; uint sa[MAX_DIMS]; uint sb[MAX_DIMS];
 } p;
 
-// Op codes; keep in sync with grilly_core::generic::Binary.
-const uint ADD = 0, SUB = 1, MUL = 2, DIV = 3, POW = 4, MAXIMUM = 5, MINIMUM = 6,
-           EQ = 7, NE = 8, GT = 9, GE = 10, LT = 11, LE = 12;
 
 void main() {
     uint i = flat_index();
@@ -28,22 +25,6 @@ void main() {
         ia += c * p.sa[d];
         ib += c * p.sb[d];
     }
-    float x = a[ia], y = b[ib], r;
-    switch (p.op) {
-        case ADD: r = x + y; break;
-        case SUB: r = x - y; break;
-        case MUL: r = x * y; break;
-        case DIV: r = x / y; break;
-        case POW: r = power(x, y); break;
-        case MAXIMUM: r = (isnan(x) || isnan(y)) ? NAN : max(x, y); break;
-        case MINIMUM: r = (isnan(x) || isnan(y)) ? NAN : min(x, y); break;
-        case EQ: r = x == y ? 1.0 : 0.0; break;
-        case NE: r = x != y ? 1.0 : 0.0; break;
-        case GT: r = x > y ? 1.0 : 0.0; break;
-        case GE: r = x >= y ? 1.0 : 0.0; break;
-        case LT: r = x < y ? 1.0 : 0.0; break;
-        case LE: r = x <= y ? 1.0 : 0.0; break;
-        default: r = NAN;
-    }
+    float r = g2_binary(p.op, a[ia], b[ib]);
     o[p.o_off + i] = r;
 }

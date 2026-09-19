@@ -43,6 +43,8 @@ pub(crate) struct Inner {
     ctx: *mut sys::gc_ctx,
     state: Mutex<State>,
     caps: Caps,
+    /// Generated kernels (crate::fusion), by GLSL source: compiled once.
+    generated: Mutex<std::collections::HashMap<String, &'static str>>,
 }
 
 // The shim serialises every call on its own mutex, and `state` serialises
@@ -101,6 +103,7 @@ impl Device {
                 max_push_constants_size: raw.max_push_constants_size,
                 max_workgroup_count: raw.max_compute_workgroup_count,
             },
+            generated: Mutex::new(std::collections::HashMap::new()),
         };
         let device = Device { inner: Arc::new(inner) };
         check(caps_rc)?;
@@ -108,6 +111,25 @@ impl Device {
         device.load_kernels(shader_dir.into())?;
         device.load_kernels(PathBuf::from(env!("GRILLY_CORE_SPV_DIR")))?;
         Ok(device)
+    }
+
+    /// The registered name of a generated kernel (crate::fusion): compiled
+    /// with shaderc and registered in the pipeline cache on first use of
+    /// `source`, then looked up by the source text. Names live for the
+    /// process (a kernel is compiled once per distinct source).
+    pub fn generated_kernel(&self, source: &str) -> Result<&'static str> {
+        let mut generated = self.inner.generated.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(name) = generated.get(source) {
+            return Ok(name);
+        }
+        let name: &'static str = Box::leak(format!("g2-fused-{}", generated.len()).into_boxed_str());
+        let name_c = cstring(name)?;
+        let _state = self.lock();
+        check(unsafe {
+            sys::gc_compile_shader(self.inner.ctx, name_c.as_ptr(), source.as_ptr().cast(), source.len() as u64)
+        })?;
+        generated.insert(source.to_owned(), name);
+        Ok(name)
     }
 
     /// Register every `.spv` in `dir`; a later name replaces an earlier one.

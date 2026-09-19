@@ -11,6 +11,7 @@ pub mod autograd;
 mod device;
 mod dtype;
 mod error;
+pub mod fusion;
 pub mod generic;
 mod kernel;
 pub mod ops;

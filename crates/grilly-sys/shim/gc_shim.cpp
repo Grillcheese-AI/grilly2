@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -20,6 +21,8 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <shaderc/shaderc.h>
 
 #include "grilly/vulkan/vk_buffer_pool.h"
 #include "grilly/vulkan/vk_command_batch.h"
@@ -206,6 +209,34 @@ int32_t gc_load_shader(gc_ctx* ctx, const char* name, const char* spv_path) {
         require(name && spv_path, "null shader name or path");
         std::lock_guard<std::mutex> lock(ctx->mutex);
         ctx->cache.loadSPIRVFile(name, spv_path);
+    });
+}
+
+int32_t gc_compile_shader(gc_ctx* ctx, const char* name, const char* glsl, uint64_t len) {
+    return guarded([&] {
+        requireCtx(ctx);
+        require(name && glsl, "null shader name or source");
+        std::unique_ptr<shaderc_compiler, void (*)(shaderc_compiler_t)> compiler(
+            shaderc_compiler_initialize(), shaderc_compiler_release);
+        std::unique_ptr<shaderc_compile_options, void (*)(shaderc_compile_options_t)> options(
+            shaderc_compile_options_initialize(), shaderc_compile_options_release);
+        require(compiler && options, "shaderc failed to initialize");
+        shaderc_compile_options_set_optimization_level(options.get(), shaderc_optimization_level_performance);
+        shaderc_compile_options_set_target_env(options.get(), shaderc_target_env_vulkan,
+                                               shaderc_env_version_vulkan_1_2);
+        std::unique_ptr<shaderc_compilation_result, void (*)(shaderc_compilation_result_t)> result(
+            shaderc_compile_into_spv(compiler.get(), glsl, static_cast<size_t>(len), shaderc_compute_shader,
+                                     name, "main", options.get()),
+            shaderc_result_release);
+        require(result != nullptr, "shaderc returned no result");
+        if (shaderc_result_get_compilation_status(result.get()) != shaderc_compilation_status_success) {
+            throw std::runtime_error(std::string("compiling ") + name + ": " +
+                                     shaderc_result_get_error_message(result.get()));
+        }
+        const auto* bytes = reinterpret_cast<const uint8_t*>(shaderc_result_get_bytes(result.get()));
+        std::vector<uint8_t> code(bytes, bytes + shaderc_result_get_length(result.get()));
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        ctx->cache.loadSPIRV(name, code);
     });
 }
 
