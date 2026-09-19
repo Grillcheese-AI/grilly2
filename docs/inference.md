@@ -230,10 +230,7 @@ So int4 is smaller, slower and much less accurate, and the text shows it —
 coherent but visibly worse. Two things follow, both open:
 
 - **the accuracy** is plain round-to-nearest, which is the weakest thing one
-  can do at four bits. A Hadamard rotation of the residual stream (QuaRot,
-  QuIP#) spreads the outliers a group's sixteen levels are being wasted on,
-  and fuses into the weights, so it costs nothing at runtime. That is the
-  next step, and the 11% above is the number it has to beat;
+  can do at four bits. What to do about it is measured below;
 - **the speed**: int4 reads half the bytes of int8 and is slower, so it is
   not memory-bound — it is the unpacking and the per-group scale. The
   kernel has already been through this once: holding a second pair of
@@ -244,6 +241,48 @@ The decode kernel structure mirrors `g2-linear-q8` deliberately (64 lanes
 per output feature, `ROWS` rows per workgroup, a fixed tree at the end), and
 a group is a multiple of 32 so that each 16-byte load of 32 levels lies in
 one group and reads one scale.
+
+#### A Hadamard rotation does not fix it here (measured)
+
+Quantization is free to work in any orthogonal basis: for `y = W x`, insert
+`Q Q^T = I` and get `y = (W Q)(Q^T x)`. A Hadamard `Q` spreads an outlier
+across every channel, so the grid is no longer spent on it, and the
+rotation folds into the weight when it is quantized — nothing at runtime.
+This is what QuaRot, QuIP# and SpinQuant are built on, and it was the
+obvious next step for the 11%.
+
+`python tools/int4_rotation.py` measures it instead of assuming it, on the
+real weights:
+
+| weights | int4 | rotated | gain |
+|---|---:|---:|---:|
+| Qwen2.5-0.5B, mean over 19 weights | 1.07e-01 | 9.94e-02 | **1.07x** |
+| synthetic gaussian | 9.66e-02 | 9.87e-02 | 0.98x |
+| synthetic, 1% outliers x20 | 2.15e-01 | 9.19e-02 | **2.34x** |
+| synthetic heavy-tailed (t, df 2) | 2.16e-01 | 9.73e-02 | **2.22x** |
+
+The bottom rows are the control, and they say the method and the script
+both work: where there are outliers, rotation removes them. **These weights
+simply have few.** Within a group of 128 they are already close to
+gaussian, so what four bits cost here is the sixteen levels themselves, not
+a handful of large values.
+
+Two things this does *not* say. Rotation is still the right tool for
+quantizing **activations** (W8A8, W4A4) and the **KV cache**, where the
+outliers are famously large — it just has nothing to do for these weights.
+And the accuracy gap has other levers that this measurement points at
+instead: a smaller group (32 instead of 128 measured 7.8% against 10.0%,
+for 25% more parameter bytes), and error-compensated rounding (GPTQ-style),
+which is the usual way weight-only int4 gets close to int8.
+
+One practical note for anyone extending this: a Hadamard matrix of order
+`n` needs `n` to be 1, 2 or a multiple of 4, and a *construction* to exist
+for it. 896 = 4 x 224 works (Sylvester times Paley over GF(223)), but
+Qwen's intermediate size 4864 = 2^8 x 19 has none of the usual ones, so a
+full-width rotation there would have to be block-diagonal. The script
+checks `H H^T = I` before using a matrix — the first version of this
+measurement used a Hadamard that was not orthogonal (off by 9e-03) and
+quietly reported the same conclusion for the wrong reason.
 
 ### Measured, RX 6750 XT
 
