@@ -68,6 +68,8 @@ fn torch_inplace_rules() {
     let c = t(&[0.0, 0.0], &[2]);
     assert!(matches!(c.add_(&w), Err(Error::NotImplemented(_))));
 
-    // no multiply kernel yet: says so
-    assert!(matches!(c.mul_(0.1), Err(Error::NotImplemented(_))));
+    // mul_ follows the same rules, and works
+    assert!(w.mul_(2.0).is_err());
+    c.fill_(3.0).unwrap().mul_(0.5).unwrap();
+    assert_eq!(c.to_vec().unwrap(), [1.5, 1.5]);
 }

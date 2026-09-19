@@ -26,8 +26,11 @@ pub struct Kernel {
 /// One storage-buffer argument to a launch.
 #[derive(Clone, Copy)]
 pub enum Arg<'a> {
-    /// A tensor's elements.
+    /// A tensor's elements, bound at their byte offset.
     Tensor(&'a Tensor),
+    /// A tensor's whole storage buffer; the kernel locates the tensor by an
+    /// element offset in its push constants (see `Tensor::offset`).
+    Storage(&'a Tensor),
     /// A whole buffer.
     Buffer(&'a Buffer),
 }
@@ -40,6 +43,23 @@ impl Kernel {
             groups[d] = threads[d].div_ceil(self.local_size[d]).max(1);
         }
         groups
+    }
+
+    /// Record a launch of one invocation per element for `n` elements, over a
+    /// 2-D grid so large `n` stays within dispatch limits. The kernel must
+    /// compute its index as `y * num_groups_x * local_x + x` (g2-common.glsl).
+    pub fn launch_flat(&self, device: &Device, args: &[Arg<'_>], n: usize, push: &[u32]) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let local = self.local_size[0] as usize;
+        let groups = n.div_ceil(local);
+        let gx = groups.min(65_535);
+        let gy = groups.div_ceil(gx);
+        let (gx, gy) = (u32::try_from(gx).unwrap(), u32::try_from(gy).map_err(|_| {
+            Error::Shape(format!("{n} elements exceed the dispatch limit"))
+        })?);
+        self.launch(device, args, [gx * self.local_size[0], gy, 1], push)
     }
 
     /// Record a launch covering `threads` invocations. Arguments bind in
@@ -65,6 +85,7 @@ impl Kernel {
         for arg in args {
             let (buffer, offset, range) = match arg {
                 Arg::Tensor(t) => (t.storage(), t.byte_offset(), t.byte_len()),
+                Arg::Storage(t) => (t.storage(), 0, t.storage().len_bytes()),
                 Arg::Buffer(b) => (*b, 0, b.len_bytes()),
             };
             if !buffer.device().same(device) {

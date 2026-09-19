@@ -10,6 +10,7 @@
 pub mod autograd;
 mod device;
 mod error;
+pub mod generic;
 mod kernel;
 pub mod ops;
 pub mod rng;

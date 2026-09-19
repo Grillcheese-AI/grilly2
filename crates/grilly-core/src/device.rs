@@ -80,7 +80,8 @@ pub struct Device {
 }
 
 impl Device {
-    /// Open the GPU and register the SPIR-V kernels in `shader_dir`.
+    /// Open the GPU and register the SPIR-V kernels in `shader_dir`. grilly2's
+    /// own kernels (the `g2-*` generics) are registered too.
     pub fn open(shader_dir: impl Into<PathBuf>) -> Result<Device> {
         let mut ctx = ptr::null_mut();
         check(unsafe { sys::gc_create(&mut ctx) })?;
@@ -104,16 +105,23 @@ impl Device {
         let device = Device { inner: Arc::new(inner) };
         check(caps_rc)?;
 
-        let dir = shader_dir.into();
+        device.load_kernels(shader_dir.into())?;
+        device.load_kernels(PathBuf::from(env!("GRILLY_CORE_SPV_DIR")))?;
+        Ok(device)
+    }
+
+    /// Register every `.spv` in `dir`; a later name replaces an earlier one.
+    pub fn load_kernels(&self, dir: PathBuf) -> Result<u32> {
         let dir_c = cstring(dir.to_str().ok_or_else(|| {
             Error::Invalid(format!("shader directory is not UTF-8: {}", dir.display()))
         })?)?;
         let mut loaded = 0u32;
-        check(unsafe { sys::gc_load_shader_dir(ctx, dir_c.as_ptr(), &mut loaded) })?;
+        let _state = self.lock();
+        check(unsafe { sys::gc_load_shader_dir(self.inner.ctx, dir_c.as_ptr(), &mut loaded) })?;
         if loaded == 0 {
             return Err(Error::Device(format!("no .spv kernels in {}", dir.display())));
         }
-        Ok(device)
+        Ok(loaded)
     }
 
     /// The process-wide default device, opened on first use.

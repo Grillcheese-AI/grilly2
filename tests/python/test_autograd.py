@@ -183,7 +183,6 @@ def test_seeded_normal_matches_itself():
 
 @pytest.mark.parametrize("call", [
     lambda: grilly.relu(grilly.ones(2, requires_grad=True)).backward(grilly.ones(2), create_graph=True),
-    lambda: grilly.zeros(3).mul_(0.1),
     lambda: grilly.relu(grilly.ones(2, requires_grad=True)).add_(grilly.ones(2)),
 ])
 def test_not_yet_implemented(call):

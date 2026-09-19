@@ -291,9 +291,11 @@ impl Tensor {
         self.overwrite(&values)
     }
 
-    /// torch's `mul_`: needs an elementwise-multiply kernel, which v1 lacks.
-    pub fn mul_(&self, _other: f32) -> Result<&Tensor> {
-        Err(Error::NotImplemented("mul_ (no elementwise multiply kernel yet)".into()))
+    /// `self *= value` (torch's `mul_` with a scalar).
+    pub fn mul_(&self, value: f32) -> Result<&Tensor> {
+        self.check_inplace(&[])?;
+        crate::generic::unary_inplace(self, crate::generic::Unary::MulScalar, value, 0.0)?;
+        Ok(self)
     }
 
     // ── crate internals ─────────────────────────────────────────────────
@@ -313,6 +315,12 @@ impl Tensor {
     /// Nothing but this handle can reach this data.
     pub(crate) fn is_sole_owner(&self) -> bool {
         Arc::strong_count(&self.storage) == 1 && Arc::strong_count(&self.meta) == 1
+    }
+
+    /// Offset of the first element within the storage, in elements; for
+    /// kernels bound with [`crate::Arg::Storage`].
+    pub fn offset(&self) -> usize {
+        self.offset
     }
 
     pub(crate) fn storage(&self) -> &Buffer {
