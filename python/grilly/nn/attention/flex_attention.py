@@ -6,9 +6,11 @@ h: (1,H,1,1), q_idx: (1,1,Q,1), kv_idx: (1,1,1,KV)), where torch vmaps them
 over scalars. Any mod written with tensor ops works either way; Python
 control flow on the index values does not (torch rejects it too).
 
-Without a ``score_mod`` (and head dims <= 128) it runs a fused block-sparse
-kernel (g2-flash-fwd): only the 32x32 tiles the mask touches are computed,
-and no score matrix reaches memory. A ``score_mod`` runs on the dense path
+Without a ``score_mod`` (and head dims <= 128) it runs fused block-sparse
+kernels, forward (g2-flash-fwd) and backward (g2-flash-bwd-kv, -q, without
+atomics, so gradients are bitwise repeatable): only the 32x32 tiles the
+mask touches are computed, and no score matrix reaches memory. The
+log-sum-exp it returns is not differentiable. A ``score_mod`` runs on the dense path
 (the full (Q, KV) score matrix, as torch's uncompiled flex_attention), with
 a one-time warning: a Python function cannot be compiled into the kernel.
 ``BLOCK_SIZE``, ``kernel_options`` and ``_compile`` are accepted and have no
@@ -232,13 +234,12 @@ def _warn_score_mod() -> None:
 
 
 def _fused(q: Tensor, k: Tensor, v: Tensor, block_mask, scale: float):
-    """The fused kernel's (out, lse)."""
+    """The fused kernels' (out, lse); differentiable through out."""
     from ... import _C
     L, S = q.shape[2], k.shape[2]
     tiles = block_mask.tiles() if block_mask is not None else _unmasked(L, S)
-    bits, kv_count, kv_list, _, _ = tiles.on_device()
-    out, lse = _C.flash_forward(q._t, k._t, v._t, bits._t, kv_count._t, kv_list._t, tiles.shape[0], tiles.shape[1],
-                                float(scale))
+    handles = [t._t for t in tiles.on_device()]
+    out, lse = _C.flex_attention(q._t, k._t, v._t, handles, tiles.shape[0], tiles.shape[1], float(scale))
     return Tensor._wrap(out), Tensor._wrap(lse)
 
 
@@ -267,9 +268,7 @@ def flex_attention(query: Tensor, key: Tensor, value: Tensor, score_mod=None, bl
                          f"q_len={L} and kv_len={S}. Create a new block mask for these sequence lengths.")
     if score_mod is not None:
         _warn_score_mod()
-    from ... import is_grad_enabled
-    needs_grad = is_grad_enabled() and any(t.requires_grad for t in (q, k, v))
-    fusable = (score_mod is None and E <= 128 and v.shape[-1] <= 128 and not needs_grad
+    fusable = (score_mod is None and E <= 128 and v.shape[-1] <= 128
                and not (return_aux is not None and return_aux.max_scores))
     if fusable:
         out, lse = _fused(q, k, v, block_mask, scale)

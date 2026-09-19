@@ -329,27 +329,26 @@ fn logcumsumexp(py: Python<'_>, x: &PyTensor, dim: usize) -> PyResult<PyTensor> 
     run(py, move || math::logcumsumexp(&x, dim))
 }
 
-/// Fused block-sparse attention forward: (out, lse), not recorded.
+/// flex_attention's fused block-sparse path: (out, lse), with autograd
+/// through `out`. `tiles` is (bits, kv_count, kv_list, q_count, q_list).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-fn flash_forward(
+fn flex_attention(
     py: Python<'_>,
     q: &PyTensor,
     k: &PyTensor,
     v: &PyTensor,
-    bits: &PyTensor,
-    kv_count: &PyTensor,
-    kv_list: &PyTensor,
+    tiles: Vec<PyRef<'_, PyTensor>>,
     mb: usize,
     mh: usize,
     scale: f32,
 ) -> PyResult<(PyTensor, PyTensor)> {
+    let [bits, kv_count, kv_list, q_count, q_list] = <[_; 5]>::try_from(tiles)
+        .map_err(|_| PyValueError::new_err("tiles is (bits, kv_count, kv_list, q_count, q_list)"))?
+        .map(|t| t.inner.clone());
     let (q, k, v) = (q.inner.clone(), k.inner.clone(), v.inner.clone());
-    let (bits, kv_count, kv_list) = (bits.inner.clone(), kv_count.inner.clone(), kv_list.inner.clone());
-    run2(py, move || {
-        let tiles = attention::Tiles { bits: &bits, kv_count: &kv_count, kv_list: &kv_list, mb, mh };
-        attention::flash_forward(&q, &k, &v, &tiles, scale)
-    })
+    let tiles = attention::Tiles { bits, kv_count, kv_list, q_count, q_list, mb, mh };
+    run2(py, move || attention::flex_attention(&q, &k, &v, &tiles, scale))
 }
 
 #[pyfunction]
@@ -367,7 +366,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(index_select, m)?)?;
     m.add_function(wrap_pyfunction!(index_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(embedding, m)?)?;
-    m.add_function(wrap_pyfunction!(flash_forward, m)?)?;
+    m.add_function(wrap_pyfunction!(flex_attention, m)?)?;
     m.add_function(wrap_pyfunction!(scatter, m)?)?;
     m.add_function(wrap_pyfunction!(scatter_, m)?)?;
     m.add_function(wrap_pyfunction!(cumsum, m)?)?;

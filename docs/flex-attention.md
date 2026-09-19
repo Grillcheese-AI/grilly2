@@ -7,7 +7,15 @@
 - Shader fusion must build on grilly v1's (see "v1's attention kernels and
   shader fusion" below; one choice there is still open).
 
-Built so far: see the stages under "Recommendation".
+Built so far:
+- Stages 1-3. Tile lists; the fused forward (1a71112); the deterministic
+  two-kernel backward. flex_attention takes the fused path whenever there
+  is no score_mod and head dims are <= 128.
+- Measured forward + backward at 16 heads x dim 128, window 512, on the
+  RX 6750 XT: 20 / 44 / 94 / 193 ms at S = 1K / 2K / 4K / 8K. The cost
+  is linear in S. The dense path took 41 ms and 132 ms at 1K and 2K and
+  could not finish 4K.
+- Stage 4 (routing SDPA) is next.
 
 ## Where it stands
 

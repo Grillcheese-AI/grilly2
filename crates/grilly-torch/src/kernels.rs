@@ -56,3 +56,24 @@ pub const FLASH_FWD: Kernel = Kernel {
     push_words: 14,
     local_size: [256, 1, 1],
 };
+
+/// Block-sparse attention backward, dK and dV (g2-flash-bwd-kv.glsl).
+/// Bindings: q, k, v, dout, lse, drow, bits, q_count, q_list, dk, dv. Push:
+/// {B, H, L, S, D, Dv, scale, mb, mh, nq, nk, q_off, k_off, v_off, do_off}.
+/// One workgroup per (key tile, head, batch).
+pub const FLASH_BWD_KV: Kernel = Kernel {
+    shader: "g2-flash-bwd-kv",
+    bindings: 11,
+    push_words: 15,
+    local_size: [256, 1, 1],
+};
+
+/// Block-sparse attention backward, dQ (g2-flash-bwd-q.glsl). Bindings: q,
+/// k, v, dout, lse, drow, bits, kv_count, kv_list, dq. Push: as
+/// FLASH_BWD_KV. One workgroup per (query tile, head, batch).
+pub const FLASH_BWD_Q: Kernel = Kernel {
+    shader: "g2-flash-bwd-q",
+    bindings: 10,
+    push_words: 15,
+    local_size: [256, 1, 1],
+};

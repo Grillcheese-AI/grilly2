@@ -239,3 +239,44 @@ def test_score_mod_warns_once():
         for _ in range(3):
             gfa.flex_attention(q, q, q, score_mod=lambda s, b, h, qi, ki: s)
     assert sum("dense path" in str(w.message) for w in caught) == 1
+
+
+# ── the fused backward (g2-flash-bwd-kv, g2-flash-bwd-q) ────────────────
+# test_block_masks_match_torch and the other compare() tests above run it:
+# without a score_mod, gradients flow through the fused kernels.
+
+def test_fused_backward_is_one_node_and_bitwise_repeatable():
+    x = grilly.tensor(rand(1, 2, 70, 32), requires_grad=True)
+    bm = gfa.create_block_mask(causal, None, None, 70, 70)
+    out = gfa.flex_attention(x, x, x, block_mask=bm)
+    assert out.grad_fn.name() == "FlexAttentionBackward0"
+    grads = []
+    w = grilly.tensor(rand(1, 2, 70, 32))
+    for _ in range(3):
+        x.grad = None
+        (gfa.flex_attention(x, x, x, block_mask=bm) * w).sum().backward()
+        grads.append(x.grad.numpy().tobytes())
+    assert grads[0] == grads[1] == grads[2]
+
+
+def test_long_window_matches_the_dense_path():
+    """Many tiles, partial and full, against grilly's own dense path (which
+    test_score_mods_match_torch checks against torch)."""
+    n, win = 300, 70
+    q, k, v, w = (rand(1, 2, n, 32) for _ in range(4))
+    mask = lambda b, h, qi, ki: (qi >= ki) & (qi - ki < win)  # noqa: E731
+    bm = gfa.create_block_mask(mask, None, None, n, n)
+    results = []
+    for score_mod in (None, lambda s, b, h, qi, ki: s):  # fused, then dense
+        gfa._SCORE_MOD_WARNED = True
+        Q, K, V = (grilly.tensor(a, requires_grad=True) for a in (q, k, v))
+        out = gfa.flex_attention(Q, K, V, score_mod=score_mod, block_mask=bm)
+        (out * grilly.tensor(w)).sum().backward()
+        results.append([out.detach().numpy()] + [t.grad.numpy() for t in (Q, K, V)])
+    for a, b in zip(*results):
+        np.testing.assert_allclose(a, b, rtol=1e-5, atol=2e-6)
+    assert bm.sparsity() > 50
+
+
+def test_large_head_dim_gradients_use_the_dense_path():
+    compare(lambda lib: causal, q_shape=(1, 2, 20, 160), kv_shape=(1, 2, 20, 160))
