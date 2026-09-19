@@ -156,9 +156,58 @@ def mul(input, other) -> Tensor:
                   lambda t, v, _: _unary(t, "mul_scalar", v))
 
 
+def _int_division(input, other, op, name) -> Tensor:
+    """Exact integer floor/trunc division or remainder (torch's semantics);
+    float operands are not implemented yet."""
+    rt = result_type(input, other)
+    if rt is None:
+        raise TypeError("expected at least one Tensor operand")
+    if _is_float(rt):
+        raise _not_yet(f"{name} of floating-point tensors")
+    return _arith(input, other, None, op)
+
+
+def floor_divide(input, other) -> Tensor:
+    return _int_division(input, other, "floor_divide", "floor_divide")
+
+
+def remainder(input, other) -> Tensor:
+    """``input - floor(input / other) * other``: the result takes the
+    divisor's sign, as Python's ``%`` does."""
+    return _int_division(input, other, "remainder", "remainder")
+
+
+def _rounded(input, op) -> Tensor:
+    x = _require_tensor("input", input)
+    return _unary(x, op) if _is_float(x.dtype) else x.clone()
+
+
+def floor(input) -> Tensor:
+    return _rounded(input, "floor")
+
+
+def ceil(input) -> Tensor:
+    return _rounded(input, "ceil")
+
+
+def trunc(input) -> Tensor:
+    return _rounded(input, "trunc")
+
+
+def round(input, *, decimals=0) -> Tensor:  # noqa: A001
+    """To the nearest integer, halves to even (torch.round)."""
+    if decimals:
+        raise _not_yet("round(decimals=...)")
+    return _rounded(input, "round")
+
+
 def div(input, other, *, rounding_mode=None) -> Tensor:
+    if rounding_mode == "floor":
+        return floor_divide(input, other)
+    if rounding_mode == "trunc":
+        return _int_division(input, other, "trunc_divide", "div(rounding_mode='trunc')")
     if rounding_mode is not None:
-        raise _not_yet(f"div(rounding_mode={rounding_mode!r})")
+        raise ValueError(f"div expected rounding_mode to be one of None, 'trunc', or 'floor' but found '{rounding_mode}'")
     f32 = _dt()[3]
     if _is_number(input):  # true division is always floating
         return _unary(_as(other, f32), "rdiv_scalar", input)
@@ -986,13 +1035,18 @@ def _install() -> None:
     for name in ("sin", "cos", "add", "sub", "mul", "div", "pow", "neg", "abs", "sign", "exp", "log",
                  "sqrt", "rsqrt", "tanh", "sigmoid", "square", "clamp", "clip", "clamp_min",
                  "clamp_max", "sum", "mean", "amax", "amin", "max", "min", "argmax", "argmin", "sort",
-                 "argsort", "topk", "cumsum", "logcumsumexp", "scatter", "softmax",
+                 "argsort", "topk", "cumsum", "logcumsumexp", "scatter", "floor_divide", "remainder",
+                 "floor", "ceil", "trunc", "round", "softmax",
                  "log_softmax", "transpose", "swapaxes", "t", "permute", "unsqueeze",
                  "squeeze", "flatten", "expand", "narrow", "select", "chunk", "split",
                  "matmul", "mm", "bmm", "contiguous", "maximum", "minimum", "true_divide",
                  "multiply", "subtract", "negative", "divide"):
         setattr(T, name, globals()[name])
     T.scatter_ = _scatter_
+    T.__mod__ = remainder
+    T.__rmod__ = lambda self, other: remainder(other, self)
+    T.__floordiv__ = floor_divide
+    T.__rfloordiv__ = lambda self, other: floor_divide(other, self)
     T.__add__ = add
     T.__radd__ = lambda self, other: add(other, self)
     T.__sub__ = sub

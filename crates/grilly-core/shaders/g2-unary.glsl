@@ -13,7 +13,8 @@ layout(push_constant) uniform P { uint n; uint op; float a; float b; uint x_off;
 const uint NEG = 0, ABS = 1, SIGN = 2, EXP = 3, LOG = 4, SQRT = 5, RSQRT = 6,
            TANH = 7, SIGMOID = 8, ADD_S = 9, MUL_S = 10, RSUB_S = 11, RDIV_S = 12,
            POW_S = 13, CLAMP = 14, CLAMP_MASK = 15, GELU = 16, GELU_GRAD = 17,
-           IS_FINITE = 18, IS_INF = 19, IS_NAN = 20, SIN = 21, COS = 22;
+           IS_FINITE = 18, IS_INF = 19, IS_NAN = 20, SIN = 21, COS = 22, FLOOR = 23, CEIL = 24,
+           TRUNC = 25, ROUND = 26;
 
 void main() {
     uint i = flat_index();
@@ -53,6 +54,10 @@ void main() {
         case IS_FINITE: r = (isnan(v) || isinf(v)) ? 0.0 : 1.0; break;
         case IS_INF: r = isinf(v) ? 1.0 : 0.0; break;
         case IS_NAN: r = isnan(v) ? 1.0 : 0.0; break;
+        case FLOOR: r = floor(v); break;
+        case CEIL: r = ceil(v); break;
+        case TRUNC: r = trunc(v); break;
+        case ROUND: r = roundEven(v); break;  // torch rounds half to even
         default: r = NAN;
     }
     y[p.y_off + i] = r;

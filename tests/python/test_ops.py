@@ -174,3 +174,17 @@ def test_cross_entropy_with_minus_inf_logits_matches_torch():
     got = grilly.nn.functional.cross_entropy(grilly.tensor(x), grilly.tensor(target))
     want = torch.nn.functional.cross_entropy(torch.tensor(x), torch.tensor(target))
     assert got.item() == want.item() == float("inf")
+
+
+@pytest.mark.parametrize("op", ["floor", "ceil", "trunc", "round"])
+def test_rounding_matches_torch_exactly(op):
+    """Halves round to even (torch.round); signed zeros, inf and NaN kept.
+    The gradient is zero, as in torch."""
+    v = [0.5, 1.5, 2.5, -0.5, -1.5, 2.7, -2.7, 1e30, -0.0, float("inf"), float("-inf"), float("nan"), 8388607.5]
+    g, t = getattr(grilly.tensor(v), op)().numpy(), getattr(torch.tensor(v), op)().numpy()
+    np.testing.assert_array_equal(g, t)
+    assert np.array_equal(np.signbit(g), np.signbit(t))
+    x = grilly.tensor([1.3, -2.6], requires_grad=True)
+    getattr(grilly, op)(x).sum().backward()
+    np.testing.assert_array_equal(x.grad.numpy(), [0.0, 0.0])
+    assert getattr(grilly, op)(grilly.tensor([3, -4])).tolist() == [3, -4]  # integers pass through

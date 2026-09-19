@@ -99,6 +99,11 @@ pub enum Unary {
     Sin,
     /// cosine (accurate for |x| <= 8192)
     Cos,
+    Floor,
+    Ceil,
+    Trunc,
+    /// to nearest, half to even (torch.round)
+    Round,
 }
 
 /// int64 ops with broadcasting (g2-binary-int.glsl); comparisons and the
@@ -120,6 +125,12 @@ pub enum IntBinary {
     And,
     Or,
     Xor,
+    /// `floor(a / b)`; b must be nonzero
+    FloorDiv,
+    /// `a - floor(a / b) * b` (the divisor's sign, as in torch); b nonzero
+    Remainder,
+    /// `a / b` rounded toward zero; b nonzero
+    TruncDiv,
 }
 
 /// Elementwise `op(a, b)` with broadcasting. Codes match g2-binary.glsl.

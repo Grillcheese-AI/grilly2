@@ -33,6 +33,10 @@ fn unary_op(name: &str) -> PyResult<Unary> {
         "gelu" => Unary::Gelu,
         "sin" => Unary::Sin,
         "cos" => Unary::Cos,
+        "floor" => Unary::Floor,
+        "ceil" => Unary::Ceil,
+        "trunc" => Unary::Trunc,
+        "round" => Unary::Round,
         _ => return Err(PyValueError::new_err(format!("unknown unary op {name:?}"))),
     })
 }
@@ -219,6 +223,9 @@ fn integer(py: Python<'_>, a: &PyTensor, b: &PyTensor, op: &str, out: u32) -> Py
         "and" => IntBinary::And,
         "or" => IntBinary::Or,
         "xor" => IntBinary::Xor,
+        "floor_divide" => IntBinary::FloorDiv,
+        "remainder" => IntBinary::Remainder,
+        "trunc_divide" => IntBinary::TruncDiv,
         _ => return Err(PyValueError::new_err(format!("unknown integer op {op:?}"))),
     };
     let (a, b, out) = (a.inner.clone(), b.inner.clone(), dtype_of(out)?);

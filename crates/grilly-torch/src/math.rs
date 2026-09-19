@@ -173,6 +173,16 @@ pub fn unary(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<Tensor> {
         Unary::Gelu => record("GeluBackward0", &[x], o, &[x], false, |g, s, _| {
             Ok(vec![Some(mul(g, &k::unary(&s[0], Unary::GeluGrad, 0.0, 0.0)?)?)])
         })?,
+        // piecewise constant: a zero gradient, as in torch
+        Unary::Floor | Unary::Ceil | Unary::Trunc | Unary::Round => {
+            let name = match op {
+                Unary::Floor => "FloorBackward0",
+                Unary::Ceil => "CeilBackward0",
+                Unary::Trunc => "TruncBackward0",
+                _ => "RoundBackward0",
+            };
+            record(name, &[x], o, &[], false, |g, _, _| Ok(vec![Some(Tensor::zeros(g.device(), g.shape())?)]))?
+        }
         // internal helpers and predicates: not differentiable
         Unary::ClampMask | Unary::GeluGrad | Unary::IsFinite | Unary::IsInf | Unary::IsNan => {}
     }
@@ -375,8 +385,17 @@ pub fn compare(a: &Tensor, b: &Tensor, op: Binary) -> Result<Tensor> {
 /// integer or bool tensors, computed exactly in int64 and returned in
 /// `out` (the promoted dtype chosen by the caller).
 pub fn integer(a: &Tensor, b: &Tensor, op: IntBinary, out: DType) -> Result<Tensor> {
-    let r = k::binary_int(&a.cast(DType::I64)?, &b.cast(DType::I64)?, op, false)?;
-    r.cast(out)
+    let (a, b) = (a.cast(DType::I64)?, b.cast(DType::I64)?);
+    if matches!(op, IntBinary::FloorDiv | IntBinary::Remainder | IntBinary::TruncDiv) {
+        // torch raises for an integer zero divisor; a GPU cannot, so look first
+        // (one small download, like the index bounds checks)
+        let zero = Tensor::zeros(b.device(), &[])?.cast(DType::I64)?;
+        let hits = k::binary_int(&b, &zero, IntBinary::Eq, true)?;
+        if integer_reduce(&hits, &[], Reduce::Max, false)?.to_bytes()?.iter().any(|&byte| byte != 0) {
+            return Err(Error::Invalid("ZeroDivisionError".into()));
+        }
+    }
+    k::binary_int(&a, &b, op, false)?.cast(out)
 }
 
 /// Integer sum / max / min over dims (all when empty), computed in int64;

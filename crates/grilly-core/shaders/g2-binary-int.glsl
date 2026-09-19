@@ -18,12 +18,28 @@ layout(push_constant) uniform P {
 
 // Op codes; keep in sync with grilly_core::generic::IntBinary.
 const uint ADD = 0, SUB = 1, MUL = 2, MAXIMUM = 3, MINIMUM = 4, EQ = 5, NE = 6, GT = 7,
-           GE = 8, LT = 9, LE = 10, AND = 11, OR = 12, XOR = 13;
+           GE = 8, LT = 9, LE = 10, AND = 11, OR = 12, XOR = 13, FLOOR_DIV = 14, REMAINDER = 15,
+           TRUNC_DIV = 16;
 
 int64_t load(uint k, bool from_a) {
     uint lo = from_a ? a[2u * k] : b[2u * k];
     uint hi = from_a ? a[2u * k + 1u] : b[2u * k + 1u];
     return int64_t(uint64_t(lo) | (uint64_t(hi) << 32));
+}
+
+// Division on magnitudes (unsigned, so every int64 including the minimum
+// works), rounded toward zero; floor division and remainder then follow
+// Python and torch: the remainder takes the divisor's sign. The caller
+// rejects zero divisors (torch raises ZeroDivisionError).
+int64_t trunc_div(int64_t x, int64_t y) {
+    uint64_t ax = x < 0l ? uint64_t(-x) : uint64_t(x), ay = y < 0l ? uint64_t(-y) : uint64_t(y);
+    int64_t q = int64_t(ax / ay);
+    return (x < 0l) != (y < 0l) ? -q : q;
+}
+
+int64_t floor_div(int64_t x, int64_t y) {
+    int64_t q = trunc_div(x, y);
+    return (q * y != x && (x < 0l) != (y < 0l)) ? q - 1l : q;
 }
 
 void main() {
@@ -52,6 +68,9 @@ void main() {
         case AND: r = x & y; break;
         case OR: r = x | y; break;
         case XOR: r = x ^ y; break;
+        case FLOOR_DIV: r = floor_div(x, y); break;
+        case REMAINDER: r = x - floor_div(x, y) * y; break;
+        case TRUNC_DIV: r = trunc_div(x, y); break;
         default: r = 0l;
     }
     if (p.out_bool != 0u) {

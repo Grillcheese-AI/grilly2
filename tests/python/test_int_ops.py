@@ -137,3 +137,37 @@ def test_errors_match_torch(call, exc):
         call(torch)
     with pytest.raises(exc):
         call(grilly)
+
+
+@pytest.mark.parametrize("op", ["floor_divide", "remainder", "trunc"])
+@pytest.mark.parametrize("dtype", ["int64", "int32"])
+def test_integer_division_matches_torch(op, dtype):
+    """Exact, with torch's signs: floor division rounds down, the remainder
+    takes the divisor's sign, trunc division rounds toward zero."""
+    big = 2**62 if dtype == "int64" else 2**30
+    a = [7, -7, 7, -7, 0, big, -big + 1, 5, 6, -6]
+    b = [2, 2, -2, -2, 3, 7, 3, -1, 3, 4]
+    ga, gb = pair(a, dtype)[0], pair(b, dtype)[0]
+    ta, tb = pair(a, dtype)[1], pair(b, dtype)[1]
+    if op == "trunc":
+        same(grilly.div(ga, gb, rounding_mode="trunc"), torch.div(ta, tb, rounding_mode="trunc"))
+        return
+    same(getattr(grilly, op)(ga, gb), getattr(torch, op)(ta, tb))
+    sym = "//" if op == "floor_divide" else "%"
+    same(eval(f"ga {sym} gb"), eval(f"ta {sym} tb"))
+    same(eval(f"ga {sym} 3"), eval(f"ta {sym} 3"))
+    same(eval(f"17 {sym} gb"), eval(f"17 {sym} tb"))
+    same(grilly.div(ga, gb, rounding_mode="floor"), torch.div(ta, tb, rounding_mode="floor"))
+
+
+def test_integer_division_by_zero_raises_like_torch():
+    for lib in (torch, grilly):
+        with pytest.raises(RuntimeError, match="ZeroDivisionError"):
+            lib.tensor([1, 2]) % lib.tensor([1, 0])
+        with pytest.raises(RuntimeError, match="ZeroDivisionError"):
+            lib.tensor([1, 2]) // 0
+
+
+def test_float_floor_division_is_not_implemented_yet():
+    with pytest.raises(NotImplementedError):
+        grilly.tensor([1.5]) % 1.0
