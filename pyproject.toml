@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "grilly"
+version = "0.1.0"
+description = "The torch API on Vulkan, for GPUs torch will not train on"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["numpy"]
+
+[tool.maturin]
+manifest-path = "crates/grilly-py/Cargo.toml"
+python-source = "python"
+module-name = "grilly._C"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
