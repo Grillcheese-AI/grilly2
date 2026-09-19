@@ -1,6 +1,13 @@
 # flex_attention: from dense to a real kernel
 
-**Status: options for the owner to decide.** Nothing below is built.
+**Decided (owner, 2026-09-19):**
+- Option A: fused block-sparse kernels.
+- A `score_mod` falls back to the dense path with a one-time warning.
+- The backward is two deterministic kernels, with no atomics.
+- Shader fusion must build on grilly v1's (see "v1's attention kernels and
+  shader fusion" below; one choice there is still open).
+
+Built so far: see the stages under "Recommendation".
 
 ## Where it stands
 
@@ -39,11 +46,11 @@ Work is proportional to the blocks kept.
 
 Four constraints are specific to grilly:
 
-1. **No JIT from Python to SPIR-V.** grilly cannot compile an arbitrary
-   Python `score_mod` / `mask_mod` into a shader. A mask can still be
-   evaluated once, densely, at `create_block_mask` time (as now) and
-   stored as block indices plus bitmaps for partial blocks. A `score_mod`
-   cannot be moved into a kernel unless it is one grilly recognizes.
+1. **No general JIT from Python mods.** v1 has a JIT shader-fusion engine
+   (below), but it generates elementwise chains of five known ops, not
+   arbitrary Python. So a `mask_mod` is evaluated once, densely, at
+   `create_block_mask` time (as now) and stored as block lists plus a bit
+   mask. A `score_mod` stays on the dense path.
 2. **Float atomics are broken on this driver stack.** Float `atomicAdd`
    lands every add at index 0 (measured in v1 and again in grilly2). The
    standard FlashAttention-2 backward accumulates dQ with atomics. Here
@@ -111,7 +118,7 @@ scores exists at a time. This fixes the memory ceiling and nothing else.
 Compute stays quadratic. It could also serve as the stopgap for the
 fence timeout.
 
-## Recommendation
+## Recommendation (A was chosen)
 
 **A, staged:**
 
@@ -138,6 +145,67 @@ stays as the reference and as the `score_mod` fallback.
    atomic dQ?** They cost about 40% more backward matmul work (7 matmuls
    instead of 5). An atomic dQ would be a CAS loop on this GPU and
    nondeterministic.
+
+## v1's attention kernels and shader fusion
+
+An earlier version of this document said v1 has no flash kernel. That was
+wrong: the search that concluded it was cut short. v1 ships these,
+compiled:
+
+- **`flash-attention2`: not usable.** Every thread in a query row does
+  unsynchronized read-modify-writes of the same running max, sum and
+  accumulator (a race). It divides each weight by a partial sum and then
+  again by the final sum. Its only mask is per-key padding.
+- **`flash-attention3`: not usable here.** It has subgroup reductions and
+  double-buffered tiles, but one workgroup per query row. It takes no
+  mask (not even causal), writes no log-sum-exp for a backward, and its
+  shared tiles cap the head dim at 64.
+- **`chunked-sw-attention`: correct for one mask.** It computes the
+  causal window [q-W+1, q] (CubbyLLM's), one workgroup per query row,
+  walking the window a key at a time with a 7-barrier reduction per key.
+  It uses native `exp` (measured 14 ULP off) and has no general masks,
+  no GQA and no log-sum-exp.
+- **`chunked-sw-attention-backward`: not usable on this GPU.**
+  - It accumulates dK and dV with float `atomicAdd`, which lands every
+    add at index 0 on this driver stack.
+  - It keeps scores in `float scores[256]`, so CubbyLLM's window of 512
+    writes past the array.
+
+None of them does block-sparse attention with arbitrary masks, a saved
+log-sum-exp and a deterministic backward, so A's kernels are new. They
+follow `chunked-sw-attention`'s layout (BHSD) and online softmax.
+
+**Shader fusion.** v1's `ShaderFusionEngine` (`cpp/src/shader_fusion.cpp`,
+driven by `backend/jit.py`) works like this:
+- It traces an op sequence and generates one GLSL compute shader that
+  chains elementwise ops in registers.
+- It compiles the shader at runtime with shaderc, and caches the pipeline
+  by a BLAKE3 hash of the graph in v1's `PipelineCache`.
+- shaderc is linked into grilly2's build of v1 (`SHADERC_LIB` found in
+  the Vulkan SDK), so the engine is available.
+
+Its code generator knows five ops: gelu, relu, silu, add/residual and
+dropout. It silently skips any other op, and its dropout has its own RNG,
+not grilly's Philox. Growing that list means editing v1's C++, which is
+frozen.
+
+**Open question: how grilly2 uses it.**
+
+- **F1: call v1's engine through the shim, as is.**
+  - Fuses chains of those five ops.
+  - Smallest change.
+  - The silent skip has to be guarded on grilly2's side.
+- **F2: keep v1's design and machinery, generate in grilly2** (recommended).
+  - One new shim entry compiles GLSL through the shaderc already linked
+    into v1.
+  - Pipelines are cached in v1's `PipelineCache`, so the one dispatch
+    spine holds.
+  - A Rust generator emits chains of grilly2's own elementwise ops from
+    `g2-common`, so a fused result is bitwise the unfused one. Those ops
+    are the torch-accurate ones (Cephes exp and tanh, sin and cos).
+  - The entry point is torch's name, `torch.compile`, not a new API.
+
+Either way, the flex kernels do not depend on it.
 
 ## Also found
 
