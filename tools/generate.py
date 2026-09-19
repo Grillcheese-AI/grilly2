@@ -36,7 +36,7 @@ from pathlib import Path
 
 import grilly
 from grilly.huggingface import AutoModelForCausalLM, AutoTokenizer
-from grilly.infer.quantization import Int8WeightOnlyConfig
+from grilly.infer.quantization import Int4WeightOnlyConfig, Int8WeightOnlyConfig
 
 REPO = "Qwen/Qwen2.5-0.5B-Instruct"
 FILES = ("config.json", "generation_config.json", "model.safetensors", "tokenizer.json")
@@ -120,6 +120,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--check-hf", action="store_true", help="compare greedy float32 tokens with transformers first")
     ap.add_argument("--no-quantize", action="store_true")
+    ap.add_argument("--int4", action="store_true", help="int4 weight-only (group 128) instead of int8")
     args = ap.parse_args()
     args.prompt *= args.repeat_prompt
 
@@ -132,7 +133,8 @@ def main() -> None:
         t0 = time.perf_counter()
         # float32 first when comparing with transformers; otherwise each weight
         # is quantized as it is read, and no float32 copy of the model exists
-        quantization = None if args.no_quantize or args.check_hf else Int8WeightOnlyConfig()
+        scheme = Int4WeightOnlyConfig() if args.int4 else Int8WeightOnlyConfig()
+        quantization = None if args.no_quantize or args.check_hf else scheme
         model = AutoModelForCausalLM.from_pretrained(path, quantization_config=quantization)
         grilly._C.synchronize()
         print(f"loaded {model.config.num_hidden_layers} layers, "
@@ -145,7 +147,7 @@ def main() -> None:
         if quantization is None and not args.no_quantize:
             from grilly.infer.quantization import quantize_
             t0 = time.perf_counter()
-            quantize_(model, Int8WeightOnlyConfig())
+            quantize_(model, scheme)
             grilly._C.synchronize()
             print(f"quantized to int8 in {time.perf_counter() - t0:.2f} s")
         load_peak = grilly._C.submit_stats()["persistent_peak"]

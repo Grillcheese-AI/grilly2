@@ -1,10 +1,11 @@
-"""int8 weight-only quantization, with torchao's API. To port code, change
-the import::
+"""int8 and int4 weight-only quantization, with torchao's API. To port code,
+change the import::
 
     from torchao.quantization import quantize_, Int8WeightOnlyConfig      # torch
     from grilly.infer.quantization import quantize_, Int8WeightOnlyConfig  # grilly
 
     quantize_(model, Int8WeightOnlyConfig())
+    quantize_(model, Int4WeightOnlyConfig())      # group_size 128, half the bytes
 
 ``quantize_`` replaces the weight of every ``nn.Linear`` (or of the modules
 ``filter_fn`` picks) with an ``Int8Tensor``: int8 values with one float32
@@ -12,9 +13,17 @@ scale per output row, in persistent device memory. ``F.linear`` then runs it
 with the weight dequantized inside the matmul kernel, as torchao's
 weight-only path computes it: ``(x @ q.T) * scale + bias``.
 
-The quantized values are exactly torchao's for a float32 model:
+The int8 values are exactly torchao's for a float32 model:
 - ``scale = max|w| / 127.5`` per row, at least float32 eps;
 - ``q = clamp(round(w * (1 / scale)), -128, 127)``, rounding half to even.
+
+``Int4WeightOnlyConfig`` is torchao's group-wise asymmetric scheme, which is
+what makes four bits usable — one scale for a whole row would spend them all
+on its largest value:
+- ``scale = (max - min) / 15`` over each group of ``group_size`` (128);
+- ``zero = min + 8 * scale`` (torchao's float zero-point domain);
+- ``q = clamp(round((w - min) / scale), 0, 15)``, rounding half to even;
+- ``dequantize(q) = (q - 8) * scale + zero``.
 
 The weight is frozen. Gradients still reach the layer's input and bias, so a
 quantized model runs with or without ``no_grad``. Any use of the weight
@@ -30,7 +39,8 @@ from .. import Size, Tensor, _C, _DEVICE, _not_yet, _require_tensor, _resolve_de
 from ..nn.modules.layers import Linear
 from ..nn.parameter import Parameter
 
-__all__ = ["Int8Tensor", "Int8WeightOnlyConfig", "PerRow", "load_quantized_", "quantize_"]
+__all__ = ["Int4Tensor", "Int4WeightOnlyConfig", "Int8Tensor", "Int8WeightOnlyConfig", "PerRow",
+           "QuantizedTensor", "load_quantized_", "quantize_"]
 
 
 @dataclass(frozen=True)
@@ -62,35 +72,32 @@ class Int8WeightOnlyConfig:
             raise _not_yet(f"Int8WeightOnlyConfig(granularity={self.granularity!r}) (grilly has PerRow())")
 
 
-class Int8Tensor(Parameter):
-    """A linear weight quantized by ``Int8WeightOnlyConfig`` (torchao's
-    ``Int8Tensor``). Its shape and dtype are the original weight's, and it
-    never requires grad. ``F.linear`` uses the int8 values directly; anything
-    else sees ``dequantize()``."""
+@dataclass
+class Int4WeightOnlyConfig:
+    """torchao's ``Int4WeightOnlyConfig``: group-wise, asymmetric, with
+    ``group_size`` values sharing a scale and a zero point."""
+
+    group_size: int = 128
+    version: int = 2
+
+    def __post_init__(self) -> None:
+        if self.version == 1:
+            raise ValueError("version 1 of Int4WeightOnlyConfig has been removed, please use version 2")
+        # 32 values share a 16-byte vector in the kernel, and a vector must
+        # lie in one group
+        if not isinstance(self.group_size, int) or self.group_size <= 0 or self.group_size % 32:
+            raise ValueError(f"group_size must be a positive multiple of 32, got {self.group_size}")
+
+
+class QuantizedTensor(Parameter):
+    """What the quantized weights share: the original weight's shape and
+    dtype, no gradient, and a ``_q`` holding the device data. ``F.linear``
+    uses that data directly; every other use sees ``dequantize()``."""
 
     __slots__ = ("_q",)
 
     def __new__(cls, *args, **kwargs):
-        raise TypeError("create an Int8Tensor with Int8Tensor.from_hp(weight, PerRow())")
-
-    @classmethod
-    def from_hp(cls, hp_tensor, granularity=None) -> "Int8Tensor":
-        """Quantize a float32 ``(out_features, in_features)`` weight."""
-        if granularity is not None and granularity != PerRow():
-            raise _not_yet(f"Int8Tensor.from_hp(granularity={granularity!r}) (grilly has PerRow())")
-        t = object.__new__(cls)
-        t._q = _C.Int8Weight.quantize(_require_tensor("hp_tensor", hp_tensor)._t)
-        t._grad = None
-        return t
-
-    @classmethod
-    def _cat(cls, parts) -> "Int8Tensor":
-        """One weight holding the parts' rows: a fused q/k/v or gate/up
-        projection. Per-row scales make it exact."""
-        t = object.__new__(cls)
-        t._q = _C.Int8Weight.cat([p._q for p in parts])
-        t._grad = None
-        return t
+        raise TypeError(f"create a {cls.__name__} with {cls.__name__}.from_hp(weight)")
 
     def __init__(self, *args, **kwargs) -> None:
         pass
@@ -106,13 +113,8 @@ class Int8Tensor(Parameter):
         return Tensor._wrap(self._q.dequantize())
 
     @property
-    def scale(self) -> Tensor:
-        """The per-row scales, ``(out_features,)``."""
-        return Tensor._wrap(self._q.scale())
-
-    @property
     def nbytes(self) -> int:
-        """Device bytes held by the int8 values and scales."""
+        """Device bytes held by the quantized values and their parameters."""
         return self._q.nbytes
 
     def _grilly_linear(self, input, bias):
@@ -148,9 +150,10 @@ class Int8Tensor(Parameter):
     def requires_grad(self, value) -> None:
         self.requires_grad_(value)
 
-    def requires_grad_(self, requires_grad: bool = True) -> "Int8Tensor":
+    def requires_grad_(self, requires_grad: bool = True) -> "QuantizedTensor":
         if requires_grad:
-            raise RuntimeError("an Int8Tensor weight is frozen: gradients reach the layer's input and bias only")
+            raise RuntimeError(f"an {type(self).__name__} weight is frozen: gradients reach the layer's "
+                               "input and bias only")
         return self
 
     @property
@@ -168,17 +171,101 @@ class Int8Tensor(Parameter):
     @grad.setter
     def grad(self, value) -> None:
         if value is not None:
-            raise RuntimeError("an Int8Tensor weight has no gradient")
+            raise RuntimeError(f"an {type(self).__name__} weight has no gradient")
+
+class Int8Tensor(QuantizedTensor):
+    """A linear weight quantized by ``Int8WeightOnlyConfig`` (torchao's
+    ``Int8Tensor``): int8 values with one float32 scale per output row."""
+
+    __slots__ = ()
+
+    @classmethod
+    def from_hp(cls, hp_tensor, granularity=None) -> "Int8Tensor":
+        """Quantize a float32 ``(out_features, in_features)`` weight."""
+        if granularity is not None and granularity != PerRow():
+            raise _not_yet(f"Int8Tensor.from_hp(granularity={granularity!r}) (grilly has PerRow())")
+        t = object.__new__(cls)
+        t._q = _C.Int8Weight.quantize(_require_tensor("hp_tensor", hp_tensor)._t)
+        t._grad = None
+        return t
+
+    @classmethod
+    def _cat(cls, parts) -> "Int8Tensor":
+        """One weight holding the parts' rows: a fused q/k/v or gate/up
+        projection. Per-row scales make it exact."""
+        t = object.__new__(cls)
+        t._q = _C.Int8Weight.cat([p._q for p in parts])
+        t._grad = None
+        return t
+
+    @property
+    def scale(self) -> Tensor:
+        """The per-row scales, ``(out_features,)``."""
+        return Tensor._wrap(self._q.scale())
 
     def __repr__(self) -> str:
         out_features, in_features = self._q.shape
         return f"Int8Tensor(shape=({out_features}, {in_features}), granularity=PerRow(), nbytes={self.nbytes})"
 
 
+class Int4Tensor(QuantizedTensor):
+    """A linear weight quantized by ``Int4WeightOnlyConfig`` (torchao's
+    ``Int4Tensor``): 4-bit levels with a float32 scale and zero point per
+    group of ``group_size``."""
+
+    __slots__ = ()
+
+    @classmethod
+    def from_hp(cls, hp_tensor, group_size: int = 128) -> "Int4Tensor":
+        """Quantize a float32 ``(out_features, in_features)`` weight."""
+        t = object.__new__(cls)
+        t._q = _C.Int4Weight.quantize(_require_tensor("hp_tensor", hp_tensor)._t, int(group_size))
+        t._grad = None
+        return t
+
+    @classmethod
+    def _cat(cls, parts) -> "Int4Tensor":
+        """One weight holding the parts' rows: a fused q/k/v or gate/up
+        projection. Each row keeps its groups' scales, so it is exact."""
+        t = object.__new__(cls)
+        t._q = _C.Int4Weight.cat([p._q for p in parts])
+        t._grad = None
+        return t
+
+    @property
+    def group_size(self) -> int:
+        return self._q.group_size
+
+    @property
+    def scale(self) -> Tensor:
+        """The per-group scales, ``(out_features, groups)``."""
+        return Tensor._wrap(self._q.scale())
+
+    @property
+    def zero(self) -> Tensor:
+        """The per-group zero points, ``(out_features, groups)``."""
+        return Tensor._wrap(self._q.zero())
+
+    def __repr__(self) -> str:
+        out_features, in_features = self._q.shape
+        return (f"Int4Tensor(shape=({out_features}, {in_features}), group_size={self.group_size}, "
+                f"nbytes={self.nbytes})")
+
+
 def _is_linear(mod, *args) -> bool:
     """torchao's default filter: an ``nn.Linear`` whose weight is not
     quantized yet."""
-    return isinstance(mod, Linear) and hasattr(mod, "weight") and not isinstance(mod.weight, Int8Tensor)
+    return isinstance(mod, Linear) and hasattr(mod, "weight") and not isinstance(mod.weight, QuantizedTensor)
+
+
+def _quantized(weight, config):
+    """``weight`` under ``config``: the quantized tensor a filter picked."""
+    if isinstance(config, Int8WeightOnlyConfig):
+        return Int8Tensor.from_hp(weight, config.granularity)
+    if isinstance(config, Int4WeightOnlyConfig):
+        return Int4Tensor.from_hp(weight, config.group_size)
+    raise _not_yet(f"quantizing with {type(config).__name__} "
+                   "(grilly has Int8WeightOnlyConfig and Int4WeightOnlyConfig)")
 
 
 def load_quantized_(model, filename, config, filter_fn=_is_linear, strict: bool = True) -> set[str]:
@@ -207,8 +294,6 @@ def load_quantized_(model, filename, config, filter_fn=_is_linear, strict: bool 
 
     Returns the names the file held.
     """
-    if not isinstance(config, Int8WeightOnlyConfig):
-        raise _not_yet(f"load_quantized_ with {type(config).__name__} (grilly has Int8WeightOnlyConfig)")
     from .safetensors import stream_into
 
     targets = {f"{name}.weight" if name else "weight": module
@@ -216,7 +301,7 @@ def load_quantized_(model, filename, config, filter_fn=_is_linear, strict: bool 
 
     def quantize(key, value):
         module = targets.get(key)
-        return None if module is None else Int8Tensor.from_hp(value, config.granularity)
+        return None if module is None else _quantized(value, config)
 
     return stream_into(model, filename, strict=strict, convert=quantize)
 
@@ -226,10 +311,11 @@ def quantize_(model, config, filter_fn=_is_linear, device=None) -> None:
     included) for which ``filter_fn(module, fully_qualified_name)`` is true.
     ``device`` accepts grilly's device (or its ``"cpu"`` alias); there is
     nowhere else to move to."""
-    if not isinstance(config, Int8WeightOnlyConfig):
-        raise _not_yet(f"quantize_ with {type(config).__name__} (grilly has Int8WeightOnlyConfig)")
+    if not isinstance(config, (Int8WeightOnlyConfig, Int4WeightOnlyConfig)):
+        raise _not_yet(f"quantize_ with {type(config).__name__} "
+                       "(grilly has Int8WeightOnlyConfig and Int4WeightOnlyConfig)")
     if device is not None:
         _resolve_device(device)
     for name, module in list(model.named_modules()):
         if filter_fn(module, name):
-            module.weight = Int8Tensor.from_hp(module.weight, config.granularity)
+            module.weight = _quantized(module.weight, config)

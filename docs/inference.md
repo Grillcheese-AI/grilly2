@@ -200,6 +200,51 @@ agree to within 5e-7 of the output's magnitude.
     (rtol 1e-5);
   - the API: filters, the configs torchao refuses, and memory.
 
+### int4: half the bytes again, at a price
+
+`Int4WeightOnlyConfig(group_size=128)` is torchao's group-wise asymmetric
+scheme, and group-wise is what makes four bits usable at all — one scale
+for a whole row would spend its sixteen levels on that row's largest value:
+
+    scale = (max - min) / 15        over each group of `group_size`
+    zero  = min + 8 * scale         (torchao's float zero-point domain)
+    q     = clamp(round((w - min) / scale), 0, 15)
+
+torchao is not installed here, so unlike the int8 transcription — which was
+checked against torchao 0.18 itself — this one follows the published formula
+only. What the tests assert is that grilly computes *that* formula exactly:
+the levels, scales and zero points are bit-exact against it, because both
+divisions are correctly rounded on the GPU (`div_rn`), and the linear is
+measured against float64 under a bound derived from the kernel's summation.
+
+Measured on Qwen2.5-0.5B-Instruct, end to end:
+
+| | int8 | int4 (group 128) |
+|---|---:|---:|
+| weights + cache, persistent | 1.19 GiB | **0.89 GiB** |
+| peak VRAM while generating | 1.24 GiB | **0.94 GiB** |
+| decode | **157 tokens/s** | 104 tokens/s |
+| relative error of a linear's output, real weights | **~1%** | ~11% |
+
+So int4 is smaller, slower and much less accurate, and the text shows it —
+coherent but visibly worse. Two things follow, both open:
+
+- **the accuracy** is plain round-to-nearest, which is the weakest thing one
+  can do at four bits. A Hadamard rotation of the residual stream (QuaRot,
+  QuIP#) spreads the outliers a group's sixteen levels are being wasted on,
+  and fuses into the weights, so it costs nothing at runtime. That is the
+  next step, and the 11% above is the number it has to beat;
+- **the speed**: int4 reads half the bytes of int8 and is slower, so it is
+  not memory-bound — it is the unpacking and the per-group scale. The
+  kernel has already been through this once: holding a second pair of
+  per-row accumulators spilled them to scratch and cost 40%, and reading
+  the weight per row rather than per 16-byte vector cost another 60%.
+
+The decode kernel structure mirrors `g2-linear-q8` deliberately (64 lanes
+per output feature, `ROWS` rows per workgroup, a fixed tree at the end), and
+a group is a multiple of 32 so that each 16-byte load of 32 levels lies in
+one group and reads one scale.
+
 ### Measured, RX 6750 XT
 
 GPU time per call at Qwen2.5-0.5B's shapes (`tools/int8_linear.py`: 200

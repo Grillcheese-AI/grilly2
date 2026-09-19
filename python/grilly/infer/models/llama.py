@@ -38,7 +38,7 @@ from ... import nn
 from ...nn import functional as F
 from ..cache import KVCache
 from ..generation import CausalLMOutput, GenerationMixin
-from ..quantization import Int8Tensor
+from ..quantization import QuantizedTensor
 
 __all__ = ["LlamaConfig", "LlamaForCausalLM"]
 
@@ -109,8 +109,9 @@ def _fused_weight(cache: dict, modules) -> tuple:
         cache.clear()
         cache["key"] = key
         cache["weight"] = cache["bias"] = None
-        if all(isinstance(w, Int8Tensor) for w in weights):
-            cache["weight"] = Int8Tensor._cat(weights)
+        kinds = {type(w) for w in weights}
+        if len(kinds) == 1 and issubclass(next(iter(kinds)), QuantizedTensor):
+            cache["weight"] = next(iter(kinds))._cat(weights)
             biases = [m.bias for m in modules]
             if all(b is not None for b in biases):
                 cache["bias"] = cat([b.detach() for b in biases], 0)

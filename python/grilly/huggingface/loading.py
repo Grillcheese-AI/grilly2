@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 
 from .. import _not_yet
-from ..infer.quantization import Int8WeightOnlyConfig, load_quantized_, quantize_
+from ..infer.quantization import Int4WeightOnlyConfig, Int8WeightOnlyConfig, load_quantized_, quantize_
 from ..infer.safetensors import stream_into
 
 __all__ = ["load_weights", "repo_files", "shard_files"]
@@ -115,14 +115,18 @@ def load_weights(model, shards, quantization_config=None, strict: bool = True) -
                                f"\n\tMissing key(s) in state_dict: {names}")
 
 
-def quantization_config_of(config) -> Int8WeightOnlyConfig | None:
+def quantization_config_of(config):
     """What ``quantization_config=`` means, accepting torchao's wrapper
-    (``TorchAoConfig(Int8WeightOnlyConfig())``) as transformers does."""
+    (``TorchAoConfig(Int8WeightOnlyConfig())``) as transformers does, and
+    torchao's string names."""
     if config is None:
         return None
     inner = getattr(config, "quant_type", config)  # transformers' TorchAoConfig
-    if isinstance(inner, Int8WeightOnlyConfig):
+    if isinstance(inner, (Int8WeightOnlyConfig, Int4WeightOnlyConfig)):
         return inner
-    if inner in ("int8_weight_only", "int8"):
-        return Int8WeightOnlyConfig()
-    raise _not_yet(f"quantization_config={config!r} (grilly has Int8WeightOnlyConfig and TorchAoConfig of it)")
+    named = {"int8_weight_only": Int8WeightOnlyConfig, "int8": Int8WeightOnlyConfig,
+             "int4_weight_only": Int4WeightOnlyConfig, "int4": Int4WeightOnlyConfig}
+    if isinstance(inner, str) and inner in named:
+        return named[inner]()
+    raise _not_yet(f"quantization_config={config!r} (grilly has Int8WeightOnlyConfig, "
+                   "Int4WeightOnlyConfig, and TorchAoConfig of either)")

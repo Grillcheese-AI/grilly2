@@ -1,4 +1,4 @@
-"""int8 weight-only linear against float32 linear (CLAUDE.md §11, step 2).
+"""int8 and int4 weight-only linears against float32 (CLAUDE.md §11, step 2).
 
 Two measurements, each separate:
 
@@ -20,7 +20,7 @@ import numpy as np
 
 import grilly
 import grilly.nn.functional as F
-from grilly.infer.quantization import Int8Tensor
+from grilly.infer.quantization import Int4Tensor, Int8Tensor
 
 SHAPES = {  # name: (out_features, in_features)
     "q_proj / o_proj": (896, 896),
@@ -79,13 +79,16 @@ def real_weight_error() -> None:
                 continue
             x = grilly.from_numpy(rng.standard_normal((4, w.shape[1])).astype(np.float32))
             y = F.linear(x, w).numpy()
-            yq = F.linear(x, Int8Tensor.from_hp(w)).numpy()
             kind = key.split(".")[-2] if "layers" in key else key
-            errors.setdefault(kind, []).append(float(np.linalg.norm(yq - y) / np.linalg.norm(y)))
-    print("\nQwen2.5-0.5B-Instruct real weights: relative error of the int8 linear's output")
-    print(f"{'weight':32} {'count':>5} {'mean':>9} {'max':>9}")
+            row = errors.setdefault(kind, {"int8": [], "int4": []})
+            for name, q in (("int8", Int8Tensor.from_hp(w)), ("int4", Int4Tensor.from_hp(w))):
+                yq = F.linear(x, q).numpy()
+                row[name].append(float(np.linalg.norm(yq - y) / np.linalg.norm(y)))
+    print("\nQwen2.5-0.5B-Instruct real weights: relative error of the quantized linear's output")
+    print(f"{'weight':32} {'count':>5} {'int8 mean':>10} {'int8 max':>9} {'int4 mean':>10} {'int4 max':>9}")
     for kind, e in errors.items():
-        print(f"{kind:32} {len(e):>5} {np.mean(e):>9.2e} {np.max(e):>9.2e}")
+        print(f"{kind:32} {len(e['int8']):>5} {np.mean(e['int8']):>10.2e} {np.max(e['int8']):>9.2e} "
+              f"{np.mean(e['int4']):>10.2e} {np.max(e['int4']):>9.2e}")
 
 
 if __name__ == "__main__":

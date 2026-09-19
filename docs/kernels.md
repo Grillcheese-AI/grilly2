@@ -41,6 +41,9 @@ applies to v1's modules.
 | `g2-rms-norm` | `x * rsqrt(mean(x^2) + eps) * w`, a workgroup per row, optionally adding a residual first and writing the sum out too; compensated sum, correctly rounded mean and reciprocal | `F.rms_norm`, `nn.RMSNorm`, a decoder layer's add-then-normalize |
 | `g2-rope` | rotary embedding of `heads` heads read from one projection's columns, written as (batch, heads, T, dim) | `grilly.infer` decode and prefill; also straight into the KV cache |
 | `g2-swiglu` | `silu(gate) * up`, each read from its own source and column (two projections, or the halves of a fused one) | the SwiGLU MLP of `grilly.infer.models` |
+| `g2-quantize-q4` | group-wise asymmetric int4 of a float32 weight, torchao's formula, correctly rounded division | `quantize_(model, Int4WeightOnlyConfig())` |
+| `g2-linear-q4` | `x @ dequantize(q)^T + bias`, a scale and zero point per group, unpacked in the kernel; 64 threads per output feature, 32 levels per 16-byte load | `F.linear` on an `Int4Tensor` weight |
+| `g2-dequantize-q4` | `q * scale + min` back to float32 | any other use of an `Int4Tensor`; its linear's input gradient |
 | `g2-attn-decode` | one query token against a KV cache's filled positions, a workgroup per (batch, head), grouped-query attention by index | `grilly.infer.cache.KVCache.attend` |
 | `g2-attn-decode-split`, `g2-attn-decode-merge` | the same over a slice of the cache per workgroup, returning each slice's (max, sum, unnormalized output), then combining them ("flash decoding") | `KVCache.attend` once the cache is long enough to split |
 | `g2-sample` | next-token sampling, a workgroup of 1024 per row: repetition penalty, temperature, top-k (radix select), top-p (binary search over values), inverse-CDF draw; no sort; candidates in shared memory when they fit | `grilly.infer.sampling`, `torch.multinomial` |

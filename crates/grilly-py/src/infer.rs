@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use grilly_infer::{ops, sampling, Heads, Int8Weight, KvCache, LoadError, Rotary, SafeTensorsFile, Sampling};
+use grilly_infer::{ops, sampling, Heads, Int4Weight, Int8Weight, KvCache, LoadError, Rotary, SafeTensorsFile, Sampling};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyFileNotFoundError, PyOSError};
 use pyo3::prelude::*;
@@ -113,6 +113,70 @@ impl PyInt8Weight {
     fn cat(py: Python<'_>, parts: Vec<PyRef<'_, PyInt8Weight>>) -> PyResult<PyInt8Weight> {
         let parts: Vec<&Int8Weight> = parts.iter().map(|p| &p.inner).collect();
         py.detach(|| Int8Weight::cat(&parts)).map(|inner| PyInt8Weight { inner }).map_err(err)
+    }
+
+    fn dequantize(&self, py: Python<'_>) -> PyResult<PyTensor> {
+        py.detach(|| self.inner.dequantize()).map(wrap).map_err(err)
+    }
+
+    #[pyo3(signature = (input, bias=None))]
+    fn linear(&self, py: Python<'_>, input: &PyTensor, bias: Option<&PyTensor>) -> PyResult<PyTensor> {
+        py.detach(|| self.inner.linear(&input.inner, bias.map(|b| &b.inner))).map(wrap).map_err(err)
+    }
+}
+
+/// A linear weight quantized to int4 per group (grilly_infer::Int4Weight).
+#[pyclass(name = "Int4Weight", module = "grilly._C", frozen)]
+struct PyInt4Weight {
+    inner: Int4Weight,
+}
+
+#[pymethods]
+impl PyInt4Weight {
+    #[staticmethod]
+    fn quantize(py: Python<'_>, weight: &PyTensor, group_size: usize) -> PyResult<PyInt4Weight> {
+        py.detach(|| Int4Weight::quantize(&weight.inner, group_size)).map(|inner| PyInt4Weight { inner }).map_err(err)
+    }
+
+    /// (out_features, in_features)
+    #[getter]
+    fn shape(&self) -> Vec<usize> {
+        self.inner.shape().to_vec()
+    }
+
+    #[getter]
+    fn group_size(&self) -> usize {
+        self.inner.group_size()
+    }
+
+    /// Device bytes held by the levels, scales and zero points.
+    #[getter]
+    fn nbytes(&self) -> usize {
+        self.inner.nbytes()
+    }
+
+    /// (out_features, groups)
+    fn scale(&self) -> PyTensor {
+        wrap(self.inner.scale().clone())
+    }
+
+    /// (out_features, groups)
+    fn zero(&self) -> PyTensor {
+        wrap(self.inner.zero().clone())
+    }
+
+    /// The 4-bit levels, two per byte, the earlier value in the low nibble.
+    fn qdata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let q = py.detach(|| self.inner.qdata()).map_err(err)?;
+        Ok(PyBytes::new(py, &q))
+    }
+
+    /// One weight holding several weights' rows: a fused q/k/v or gate/up
+    /// projection, computing each row exactly as the separate ones did.
+    #[staticmethod]
+    fn cat(py: Python<'_>, parts: Vec<PyRef<'_, PyInt4Weight>>) -> PyResult<PyInt4Weight> {
+        let parts: Vec<&Int4Weight> = parts.iter().map(|p| &p.inner).collect();
+        py.detach(|| Int4Weight::cat(&parts)).map(|inner| PyInt4Weight { inner }).map_err(err)
     }
 
     fn dequantize(&self, py: Python<'_>) -> PyResult<PyTensor> {
@@ -294,6 +358,7 @@ fn swiglu(py: Python<'_>, gate: &PyTensor, gate_col: usize, up: &PyTensor, up_co
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySafeFile>()?;
     m.add_class::<PyInt8Weight>()?;
+    m.add_class::<PyInt4Weight>()?;
     m.add_class::<PyKvCache>()?;
     m.add_function(wrap_pyfunction!(next_tokens, m)?)?;
     m.add_function(wrap_pyfunction!(processed_scores, m)?)?;

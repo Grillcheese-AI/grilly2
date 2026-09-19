@@ -1,4 +1,4 @@
-"""grilly.infer.quantization: int8 weight-only, against torchao's math.
+"""grilly.infer.quantization: int8 and int4 weight-only, against torchao's math.
 
 The reference is torchao's formula (version 0.18: Int8Tensor.from_hp,
 choose_qparams_affine, quantize_affine and the weight-only linear) written
@@ -29,7 +29,8 @@ import torch
 
 import grilly
 import grilly.nn as gnn
-from grilly.infer.quantization import Int8Tensor, Int8WeightOnlyConfig, PerRow, quantize_
+from grilly.infer.quantization import (Int4Tensor, Int4WeightOnlyConfig, Int8Tensor,
+                                       Int8WeightOnlyConfig, PerRow, quantize_)
 
 RNG = np.random.default_rng(3)
 
@@ -163,3 +164,94 @@ def test_quantized_weights_are_int8_in_persistent_memory():
     quantize_(lin, Int8WeightOnlyConfig())
     assert lin.weight.nbytes == 70 * 912 + 70 * 4
     assert persistent() - before == lin.weight.nbytes + 4 * 70  # the float weight is freed; the bias stays
+
+
+# ── int4 ────────────────────────────────────────────────────────────────
+
+
+def torchao_quantize_int4(w: torch.Tensor, group_size: int = 128):
+    """torchao's int4 group-wise asymmetric quantization: (levels, scale, zero).
+
+    Transcribed from torchao's published formula (`Int4WeightOnlyConfig`,
+    asymmetric, float zero-point domain). torchao is not installed here, so
+    unlike the int8 transcription above this one was not run against the
+    package; what the tests below assert is that grilly computes *this*
+    formula exactly.
+    """
+    rows, k = w.shape
+    groups = (k + group_size - 1) // group_size
+    padded = torch.nn.functional.pad(w, (0, groups * group_size - k), value=float("nan"))
+    blocks = padded.reshape(rows, groups, group_size)
+    lo = blocks.nan_to_num(float("inf")).amin(dim=2)
+    hi = blocks.nan_to_num(float("-inf")).amax(dim=2)
+    scale = torch.clamp((hi - lo) / 15.0, min=torch.finfo(torch.float32).eps)
+    zero = lo + 8.0 * scale
+    levels = torch.clamp(torch.round((blocks - lo[..., None]) / scale[..., None]), 0, 15)
+    return levels.reshape(rows, -1)[:, :k].to(torch.uint8), scale, zero
+
+
+def grilly_int4_levels(weight) -> np.ndarray:
+    """The 4-bit levels, unpacked: two per byte, earlier value low."""
+    rows, k = weight.shape
+    raw = np.frombuffer(weight._q.qdata(), dtype=np.uint8).reshape(rows, (k + 1) // 2)
+    both = np.empty((rows, ((k + 1) // 2) * 2), dtype=np.uint8)
+    both[:, 0::2] = raw & 0xF
+    both[:, 1::2] = raw >> 4
+    return both[:, :k]
+
+
+@pytest.mark.parametrize("group_size", [32, 64, 128])
+def test_int4_values_follow_torchaos_formula(group_size):
+    for rows, k in [(4, 128), (3, 896), (2, 4864)]:
+        w = torch.from_numpy(RNG.standard_normal((rows, k)).astype(np.float32))
+        got = Int4Tensor.from_hp(grilly.from_numpy(w.numpy()), group_size)
+        levels, scale, zero = torchao_quantize_int4(w, group_size)
+        np.testing.assert_array_equal(grilly_int4_levels(got), levels.numpy(), f"({rows}, {k}) levels")
+        np.testing.assert_array_equal(got.scale.numpy(), scale.numpy(), f"({rows}, {k}) scales")
+        np.testing.assert_array_equal(got.zero.numpy(), zero.numpy(), f"({rows}, {k}) zero points")
+        assert got.group_size == group_size
+        assert got.shape == (rows, k) and got.dtype is grilly.float32
+
+
+def test_int4_is_smaller_and_says_so():
+    w = grilly.from_numpy(RNG.standard_normal((512, 1024)).astype(np.float32))
+    four, eight = Int4Tensor.from_hp(w), Int8Tensor.from_hp(w)
+    assert four.nbytes < 0.6 * eight.nbytes
+    assert "group_size=128" in repr(four)
+    assert four.requires_grad is False
+    with pytest.raises(RuntimeError, match="frozen"):
+        four.requires_grad_(True)
+
+
+def test_int4_quantize_and_load_take_the_config():
+    model = gnn.Sequential(gnn.Linear(64, 32), gnn.LayerNorm(32))
+    quantize_(model, Int4WeightOnlyConfig(group_size=32))
+    assert isinstance(model[0].weight, Int4Tensor)
+    assert not isinstance(model[0].weight, Int8Tensor), "int4 is not a kind of int8"
+    assert model[0].weight.group_size == 32
+    assert not isinstance(model[1].weight, Int4Tensor), "a LayerNorm is not a linear"
+    quantize_(model, Int8WeightOnlyConfig())  # already quantized: the filter skips it
+    assert isinstance(model[0].weight, Int4Tensor)
+
+    with pytest.raises(ValueError, match="multiple of 32"):
+        Int4WeightOnlyConfig(group_size=30)
+    with pytest.raises(RuntimeError, match="multiple of 32"):
+        Int4Tensor.from_hp(grilly.zeros(4, 64), 8)
+
+
+def test_int4_linear_matches_its_dequantized_weight():
+    """F.linear on an Int4Tensor must equal the float32 linear of the weight
+    it dequantizes to: same values, different order of summation. Bound as
+    in crates/grilly-infer/tests/quant4.rs, from the kernel's chain."""
+    rows, k, n = 3, 896, 64
+    x = grilly.from_numpy(RNG.standard_normal((rows, k)).astype(np.float32))
+    w = grilly.from_numpy((RNG.standard_normal((n, k)) * 0.1).astype(np.float32))
+    q = Int4Tensor.from_hp(w)
+    got = grilly.nn.functional.linear(x, q).numpy().astype(np.float64)
+    dequantized = q.dequantize().numpy().astype(np.float64)
+    want = x.numpy().astype(np.float64) @ dequantized.T
+    magnitude = np.abs(x.numpy().astype(np.float64)) @ np.abs(dequantized).T
+    bound = (k // 64 + 14) * 2.0**-24 * magnitude
+    worst = float((np.abs(got - want) / bound).max())
+    print(f"int4 linear vs its dequantized weight: worst {worst:.3f} of the bound")
+    assert worst <= 1.0
