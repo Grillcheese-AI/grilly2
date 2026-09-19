@@ -7,9 +7,10 @@ from .modules import (
 )
 from .parameter import Parameter
 from . import utils
+from . import attention
 
 __all__ = [
     "Dropout", "Embedding", "GELU", "Identity", "LayerNorm", "Linear", "Module", "ModuleDict",
     "ModuleList", "Parameter", "ReLU", "Sequential", "SiLU", "Sigmoid", "Softmax", "Tanh",
-    "functional", "init", "utils",
+    "attention", "functional", "init", "utils",
 ]
