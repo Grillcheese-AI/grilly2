@@ -100,6 +100,18 @@ At a compiled callable's exit, every `LazyTensor` still lazy in the return
 value (walking tuples, lists and dicts) is materialized, so callers only
 ever see real tensors.
 
+**In-place writes.** A lazy node records the version counter of each real
+tensor it reads. If one of them is written in place before the node runs
+(`y = x * 2; x.add_(1); return y`), materializing raises instead of reading
+the new values. torch.compile would return the old-x result here; grilly
+refuses loudly rather than return a wrong one. The common optimizer shape
+`p.add_(expr of p)` is unaffected: the argument is materialized before `p`
+is written.
+
+**Size.** An expression past 64 ops (`_lazy.MAX_NODES`) is materialized
+before it is used again. That bounds recursion, generated-shader size and
+compile time, and stops `x = x + x` in a loop from doubling each step.
+
 **Scalars stay parameters.** A Python float threaded through as a
 learning rate, a dropout scale, or an Adam `beta`/`eps` becomes a
 `Node::Param`, not a literal in the generated GLSL (`fusion.rs`, already
@@ -116,13 +128,10 @@ off, but `grilly.compiler.is_compiling()` is still `True` inside, matching
 torch); an unrecognised name raises `RuntimeError`, as torch's does.
 `fullgraph`, `dynamic`, `mode` and `options` are accepted and have no
 effect — there is no graph-breaking tracer here to hand them to.
-Compiling an `nn.Module` returns an `OptimizedModule` wrapping it as
-`_orig_mod`, sharing its parameters and forwarding attribute access, like
-torch's. **Unlike torch's**, `OptimizedModule.state_dict()` keys are the
-wrapped module's own, not prefixed `"_orig_mod."` — that prefix is a
-well-known drop-in break in torch itself (a checkpoint saved from a
-compiled model doesn't load into an uncompiled one without renaming keys),
-and CLAUDE.md §10 makes usability the acceptance criterion. `Module.compile
+Compiling an `nn.Module` returns an `OptimizedModule` holding it as the
+child `_orig_mod`, as torch's does: parameters are shared, `state_dict()`
+keys carry torch's `"_orig_mod."` prefix, and other attributes are read
+from the original. `Module.compile
 (*args, **kwargs)` compiles `self.forward` in place instead (torch >= 2.2):
 `self` keeps its own type. `grilly.compiler` provides `is_compiling()`,
 `disable(fn=None, recursive=True)` and `reset()` (Hugging Face's usual

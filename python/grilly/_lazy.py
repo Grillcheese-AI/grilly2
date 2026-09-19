@@ -24,6 +24,13 @@ __all__ = ["LazyTensor", "materialize"]
 
 _local = threading.local()
 
+# Largest expression kept lazy, in ops (a DAG's shared parts count once per
+# use, so this over-counts): past it, an operand is materialized before it is
+# used again. Bounds recursion in materialize(), generated-shader size
+# and compile time, and stops expressions like `x = x + x` in a loop from
+# doubling each step.
+MAX_NODES = 64
+
 
 class _Stats:
     __slots__ = ("materializations", "node_counts")
@@ -118,7 +125,7 @@ class LazyTensor(Tensor):
     """An uncomputed float32 elementwise result. Only ``_unary``/``_binary``
     (python/grilly/_ops.py) construct one, and only while capturing."""
 
-    __slots__ = ("_op", "_x", "_y", "_a", "_b", "_bshape", "_handle")
+    __slots__ = ("_op", "_x", "_y", "_a", "_b", "_bshape", "_handle", "_vx", "_vy", "_size")
 
     @classmethod
     def _unary(cls, x, op: str, a: float, b: float) -> "LazyTensor":
@@ -128,6 +135,8 @@ class LazyTensor(Tensor):
         t._bshape = tuple(x.shape)
         t._handle = None
         t._grad = None
+        t._vx, sx = _operand(x)
+        t._vy, t._size = None, 1 + sx
         return t
 
     @classmethod
@@ -138,6 +147,8 @@ class LazyTensor(Tensor):
         t._bshape = _broadcast_shape(tuple(x.shape), tuple(y.shape))
         t._handle = None
         t._grad = None
+        (t._vx, sx), (t._vy, sy) = _operand(x), _operand(y)
+        t._size = 1 + sx + sy
         return t
 
     # -- answer without materializing --
@@ -180,6 +191,22 @@ class LazyTensor(Tensor):
         return self._handle
 
 
+def _pending(t) -> bool:
+    return isinstance(t, LazyTensor) and t._handle is None
+
+
+def _operand(t):
+    """(version, size) of an operand of a new node. A real operand's version
+    counter is recorded, so an in-place write to it before the node runs is
+    caught (materialize() raises rather than read the new values). A lazy
+    operand past MAX_NODES is materialized first and becomes a real input."""
+    if _pending(t) and t._size >= MAX_NODES:
+        t._t  # noqa: B018 - materializes
+    if _pending(t):
+        return None, t._size
+    return t._t.version, 0
+
+
 def materialize(root: LazyTensor) -> Tensor:
     """Walk ``root``'s expression into one fusion graph and run it as a
     single kernel, caching the result on ``root``. An operand that was
@@ -205,6 +232,12 @@ def materialize(root: LazyTensor) -> Tensor:
         if key in node_of:
             return node_of[key]
         if isinstance(operand, LazyTensor) and operand._handle is None:
+            for real, seen in ((operand._x, operand._vx), (operand._y, operand._vy)):
+                if seen is not None and real._t.version != seen:
+                    raise RuntimeError(
+                        "a tensor used in a compiled (fused) computation was modified in place before that "
+                        "computation ran; grilly defers elementwise work inside grilly.compile until its "
+                        "result is used. Use the result before the in-place write, or write out of place.")
             x_idx = emit(operand._x)
             if operand._y is not None:
                 y_idx = emit(operand._y)  # must run before `idx` is fixed: it may append nodes

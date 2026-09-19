@@ -82,20 +82,16 @@ def compile(model=None, *, fullgraph=False, dynamic=None, backend="inductor",  #
 
 
 class OptimizedModule(Module):
-    """Wraps a compiled ``nn.Module``: forwards attribute access to it and
-    shares its parameters and buffers, like torch's ``OptimizedModule``.
-
-    Unlike torch's, ``state_dict()`` keys are the wrapped module's own, with
-    no ``"_orig_mod."`` prefix: that prefix is a well-known drop-in gotcha in
-    torch itself (a checkpoint saved from a compiled model won't load into
-    an uncompiled one, or vice versa, without renaming keys), and usability
-    is the acceptance criterion here (CLAUDE.md §10).
-    """
+    """What ``grilly.compile(module)`` returns, as torch's: the original
+    module is a registered child named ``_orig_mod``, so parameters are
+    shared, ``state_dict()`` keys carry torch's ``"_orig_mod."`` prefix (a
+    checkpoint moves between compiled and uncompiled models exactly as it
+    does in torch), and any other attribute is read from the original."""
 
     def __init__(self, mod: Module, compiled_forward) -> None:
         super().__init__()
-        object.__setattr__(self, "_orig_mod", mod)
-        object.__setattr__(self, "_compiled_forward", compiled_forward)
+        self._orig_mod = mod
+        self._compiled_forward = compiled_forward
 
     def forward(self, *args, **kwargs):
         return self._compiled_forward(*args, **kwargs)
@@ -104,62 +100,6 @@ class OptimizedModule(Module):
         try:
             return super().__getattr__(name)
         except AttributeError:
-            return getattr(self._orig_mod, name)
-
-    def __setattr__(self, name, value) -> None:
-        if name in ("_orig_mod", "_compiled_forward"):
-            object.__setattr__(self, name, value)
-        else:
-            setattr(self._orig_mod, name, value)
-
-    def __delattr__(self, name) -> None:
-        if name in self.__dict__:
-            object.__delattr__(self, name)
-        else:
-            delattr(self._orig_mod, name)
-
-    # traversal, state and mode delegate to the wrapped module, so
-    # parameters are shared and state_dict keys are unchanged.
-    def parameters(self, recurse: bool = True):
-        return self._orig_mod.parameters(recurse)
-
-    def named_parameters(self, prefix: str = "", recurse: bool = True, remove_duplicate: bool = True):
-        return self._orig_mod.named_parameters(prefix, recurse, remove_duplicate)
-
-    def buffers(self, recurse: bool = True):
-        return self._orig_mod.buffers(recurse)
-
-    def named_buffers(self, prefix: str = "", recurse: bool = True, remove_duplicate: bool = True):
-        return self._orig_mod.named_buffers(prefix, recurse, remove_duplicate)
-
-    def children(self):
-        return self._orig_mod.children()
-
-    def named_children(self):
-        return self._orig_mod.named_children()
-
-    def modules(self):
-        return self._orig_mod.modules()
-
-    def named_modules(self, memo=None, prefix: str = "", remove_duplicate: bool = True):
-        return self._orig_mod.named_modules(memo, prefix, remove_duplicate)
-
-    def state_dict(self, *args, **kwargs):
-        return self._orig_mod.state_dict(*args, **kwargs)
-
-    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
-        return self._orig_mod.load_state_dict(state_dict, strict, assign)
-
-    def train(self, mode: bool = True) -> "OptimizedModule":
-        self._orig_mod.train(mode)
-        object.__setattr__(self, "training", mode)
-        return self
-
-    def eval(self) -> "OptimizedModule":
-        return self.train(False)
-
-    def zero_grad(self, set_to_none: bool = True) -> None:
-        self._orig_mod.zero_grad(set_to_none)
-
-    def __repr__(self) -> str:
-        return "OptimizedModule(\n  (_orig_mod): " + repr(self._orig_mod).replace("\n", "\n  ") + "\n)"
+            if name == "_orig_mod":
+                raise
+            return getattr(super().__getattr__("_orig_mod"), name)

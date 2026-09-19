@@ -272,8 +272,13 @@ def test_compile_on_module_returns_optimized_module():
     m.extra_attr = 42
     assert om.extra_attr == 42
 
-    # state_dict keys are the wrapped module's own (no "_orig_mod." prefix)
-    assert list(om.state_dict().keys()) == list(m.state_dict().keys()) == ["lin.weight", "lin.bias"]
+    # state_dict keys carry torch's "_orig_mod." prefix, as torch's OptimizedModule
+    import torch
+    tm = torch.nn.Module()
+    tm.lin = torch.nn.Linear(3, 3)
+    torch_keys = list(torch.compile(tm).state_dict().keys())
+    assert list(om.state_dict().keys()) == torch_keys == ["_orig_mod.lin.weight", "_orig_mod.lin.bias"]
+    assert list(m.state_dict().keys()) == ["lin.weight", "lin.bias"]
 
     x = grilly.tensor(rand(2, 3, seed=4))
     with grilly.no_grad():
@@ -427,3 +432,58 @@ def test_returned_values_are_real_tensors_in_tuples_and_dicts():
     for t in (b0, b1, b2):
         assert type(t) is grilly.Tensor
         assert not isinstance(t, LazyTensor)
+
+
+# ── review fixes: in-place writes, expression size ───────────────────────
+
+def test_in_place_write_to_a_pending_input_raises_instead_of_reading_new_values():
+    """y = x * 2 is deferred; writing x in place before y runs would make y
+    read the new x. torch.compile computes the old-x result; grilly refuses
+    loudly rather than return a wrong one."""
+    x = grilly.tensor(rand(8, seed=11))
+
+    @grilly.compile
+    def f(x):
+        y = x * 2.0
+        x.add_(grilly.ones(8))
+        return y
+
+    with pytest.raises(RuntimeError, match="modified in place"):
+        f(x)
+
+
+def test_in_place_update_from_a_lazy_argument_works():
+    """The optimizer pattern p.add_(expr of p): the argument is materialized
+    before p is written, so this is fine and matches eager."""
+    p0 = rand(16, seed=12)
+    pc, pe = grilly.tensor(p0), grilly.tensor(p0)
+
+    def step(p):
+        p.add_(p * -0.1 + 0.01)
+        return p
+
+    with grilly.no_grad():
+        grilly.compile(step)(pc)
+        step(pe)
+    bitwise(pc, pe)
+
+
+def test_long_chains_are_split_and_stay_exact():
+    """A 300-op chain in one compiled call: expressions past MAX_NODES are
+    materialized along the way (bounded recursion and kernel size), and the
+    result is still bitwise eager's."""
+    from grilly import _lazy
+    x = grilly.tensor(rand(1000, seed=13))
+
+    def chain(x):
+        for i in range(300):
+            x = x * 1.001 + 0.001 * (i % 7)
+        return x
+
+    _lazy.reset_stats()
+    out = grilly.compile(chain)(x)
+    stats = _lazy.stats()
+    assert stats["materializations"] >= 300 * 2 // _lazy.MAX_NODES
+    # MAX_NODES counts ops; a unary op is 3 graph nodes (itself and its two params)
+    assert max(stats["node_counts"]) <= 3 * _lazy.MAX_NODES + 2
+    bitwise(out, chain(x))
