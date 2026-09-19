@@ -1,0 +1,9 @@
+[package]
+name = "grilly-torch"
+version = "0.1.0"
+description = "torch-compatible ops for grilly2"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+grilly-core = { path = "../grilly-core" }

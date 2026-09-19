@@ -26,7 +26,9 @@ The first build compiles v1's `grilly_core_lib` with v1's own CMake project
 |---|---|
 | `GRILLY_V1_DIR` | v1 checkout to build against |
 | `GRILLY_CORE_LIB_DIR` | directory with an already-built `grilly_core_lib`; skips the CMake build |
-| `GRILLY_SHADER_DIR` | SPIR-V directory for the tests; default is v1's `shaders/spv` |
+| `GRILLY_SHADER_DIR` | SPIR-V kernel directory for the default device; default is v1's `shaders/spv` |
+| `GRILLY_PYTHON` | interpreter with torch and numpy, used by the op tests as the reference; default `python` |
 | `CMAKE_GENERATOR` | CMake generator, e.g. `Visual Studio 17 2022` when a newer Visual Studio is installed without its C++ tools |
 
-The GPU tests need a Vulkan 1.2 device.
+The GPU tests need a Vulkan 1.2 device. The op tests compare every op against
+torch on CPU, so they also need torch installed for `GRILLY_PYTHON`.
