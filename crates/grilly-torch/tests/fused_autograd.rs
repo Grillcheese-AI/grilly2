@@ -5,7 +5,9 @@
 //! applies eager's formulas term for term in one kernel, so gradients are
 //! bit for bit eager's. With reuse (a node feeding several ops) or
 //! broadcasting, eager sums contributions and reduces broadcast dims in a
-//! different order than the fused kernel does: those match within rtol 1e-5.
+//! different order than the fused kernel may: those are held to rtol 1e-7
+//! (CLAUDE.md §9 case (a): reassociation is all that bound absorbs). The one
+//! chain below measured bit-exact (0 ulp on dx, dw and db, RX 6750 XT).
 
 use grilly_core::fusion::Graph;
 use grilly_core::generic::{Binary, Unary};
@@ -45,7 +47,15 @@ fn same_bits(a: &[f32], b: &[f32], what: &str) {
     }
 }
 
+/// Asserts |fused - eager| <= rtol * max(|eager|, 1) and prints the worst
+/// ratio of the difference to that bound, and the worst difference in ULPs.
 fn close(a: &[f32], b: &[f32], rtol: f32, what: &str) {
+    let (mut worst, mut ulps) = (0.0f64, 0u32);
+    for (x, y) in a.iter().zip(b) {
+        worst = worst.max(((x - y).abs() / (rtol * y.abs().max(1.0))) as f64);
+        ulps = ulps.max((x.to_bits() as i64 - y.to_bits() as i64).unsigned_abs() as u32);
+    }
+    println!("{what}: worst ratio to the rtol {rtol:e} bound {worst:.3}, worst {ulps} ulp");
     for (i, (x, y)) in a.iter().zip(b).enumerate() {
         assert!((x - y).abs() <= rtol * y.abs().max(1.0), "{what}: element {i}: fused {x:e} vs eager {y:e}");
     }
@@ -144,7 +154,7 @@ fn chains_with_reuse_and_broadcasting_match_eager() {
     out.backward(Some(&g), false).unwrap();
     let got = grads(&[&xf, &wf, &bf]);
     for (i, name) in ["dx", "dw", "db"].iter().enumerate() {
-        close(&got[i], &eager[i], 1e-5, name);
+        close(&got[i], &eager[i], 1e-7, name);
     }
 }
 
