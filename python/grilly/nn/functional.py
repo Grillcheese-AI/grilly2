@@ -11,7 +11,8 @@ from .. import relu as _relu
 
 __all__ = [
     "cosine_similarity", "cross_entropy", "dropout", "embedding", "gelu", "layer_norm", "linear",
-    "log_softmax", "mse_loss", "nll_loss", "normalize", "relu", "sigmoid", "silu", "softmax", "tanh",
+    "log_softmax", "mse_loss", "nll_loss", "normalize", "relu", "scaled_dot_product_attention", "sigmoid",
+    "silu", "softmax", "tanh",
 ]
 
 
@@ -187,3 +188,58 @@ def dropout(input: Tensor, p: float = 0.5, training: bool = True, inplace: bool 
     from .. import rand
     keep = Tensor._wrap(_C.binary(rand(*x.shape)._t, _ops._const(p)._t, "ge"))
     return x * keep * (1.0 / (1.0 - p))
+
+
+def _safe_softmax(x: Tensor, dim: int) -> Tensor:
+    """softmax, but 0 (with a zero gradient) on rows that are entirely -inf,
+    as torch's SDPA does (its _safe_softmax); plain softmax gives NaN there.
+    The dead rows are zeroed before the softmax too, so no NaN reaches the
+    backward."""
+    dead = x.detach().amax(dim, keepdim=True) == float("-inf")  # the row max is -inf
+    return _ops.where(dead, 0.0, _ops.softmax(_ops.where(dead, 0.0, x), dim))
+
+
+def _repeat_heads(t: Tensor, r: int) -> Tensor:
+    """torch's repeat_interleave(r, dim=-3): each head r times in a row."""
+    shape = list(t.shape)
+    wide = t.unsqueeze(-3).expand(*shape[:-2], r, *shape[-2:])
+    return wide.reshape(*shape[:-3], shape[-3] * r, *shape[-2:])
+
+
+def scaled_dot_product_attention(query: Tensor, key: Tensor, value: Tensor, attn_mask=None, dropout_p: float = 0.0,
+                                 is_causal: bool = False, scale=None, enable_gqa: bool = False) -> Tensor:
+    """``softmax(query @ key^T * scale + mask) @ value``, as torch's math
+    backend computes it. Masks follow torch 2.10: a bool mask keeps True
+    positions, a float mask is added, ``is_causal`` keeps the top-left
+    triangle (combined with a bool mask when both are given, as torch does on
+    CPU), and fully-masked rows give 0. The (L, S) score matrix is
+    materialized: this is not a fused flash kernel."""
+    q, k, v = _require_tensor("query", query), _require_tensor("key", key), _require_tensor("value", value)
+    L, S, E = q.shape[-2], k.shape[-2], q.shape[-1]
+    if enable_gqa and q.dim() >= 3 and q.shape[-3] != k.shape[-3]:
+        hq, hk = q.shape[-3], k.shape[-3]
+        if hq % hk or hq % v.shape[-3]:
+            raise RuntimeError(f"number of heads in key/value must divide number of heads in query ({hk} vs {hq})")
+        k, v = _repeat_heads(k, hq // hk), _repeat_heads(v, hq // v.shape[-3])
+    scores = _ops.matmul(q, k.transpose(-2, -1)) * (1.0 / math.sqrt(E) if scale is None else float(scale))
+    keep = None
+    if is_causal:
+        from .. import arange
+        keep = arange(L).unsqueeze(1) >= arange(S).unsqueeze(0)
+    if attn_mask is not None:
+        m = _require_tensor("attn_mask", attn_mask)
+        if m.dtype is _bool_dtype():
+            keep = m if keep is None else m & keep
+        else:
+            scores = scores + m
+    if keep is not None:
+        scores = _ops.where(keep, scores, float("-inf"))
+    attn = _safe_softmax(scores, -1)
+    if dropout_p > 0.0:
+        attn = dropout(attn, dropout_p)
+    return _ops.matmul(attn, v)
+
+
+def _bool_dtype():
+    from .. import bool as b_
+    return b_
