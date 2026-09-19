@@ -37,6 +37,7 @@ EXPRS = [
     ("broadcast", lambda L, x, y: x * y[0] - y[:, :1] / (y + 2), True),
     ("pow", lambda L, x, y: x ** 2 + x.pow(3) + L.pow(x, 0.5) + y ** x[:1], True),
     ("unary", lambda L, x, y: x.exp() + x.log() + x.sqrt() + x.rsqrt() + x.tanh() + x.sigmoid() + x.abs() + (-x), True),
+    ("trig", lambda L, x, y: (x * 30).sin() * L.cos(y * 7) + L.outer(x[0], y[1]).cos().sum(0), False),
     ("clamp", lambda L, x, y: x.clamp(-0.3, 0.2) + L.clamp(x, min=0.1) + x.clamp_max(0.0), False),
     ("reductions", lambda L, x, y: x.sum() + x.sum(-1).sum() + x.mean((0, 1)) + x.sum(0, keepdim=True).mean(), False),
     ("amax/amin", lambda L, x, y: x.amax(-1).sum() + L.amin(x, 0).sum() + x.max() - x.min(), False),

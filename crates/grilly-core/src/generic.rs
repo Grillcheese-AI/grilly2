@@ -62,6 +62,10 @@ pub enum Unary {
     IsInf,
     /// `1` where NaN, else `0`
     IsNan,
+    /// sine (accurate for |x| <= 8192)
+    Sin,
+    /// cosine (accurate for |x| <= 8192)
+    Cos,
 }
 
 /// int64 ops with broadcasting (g2-binary-int.glsl); comparisons and the

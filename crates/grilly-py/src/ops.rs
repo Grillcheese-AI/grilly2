@@ -31,6 +31,8 @@ fn unary_op(name: &str) -> PyResult<Unary> {
         "pow_scalar" => Unary::PowScalar,
         "clamp" => Unary::Clamp,
         "gelu" => Unary::Gelu,
+        "sin" => Unary::Sin,
+        "cos" => Unary::Cos,
         _ => return Err(PyValueError::new_err(format!("unknown unary op {name:?}"))),
     })
 }

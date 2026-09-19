@@ -164,6 +164,12 @@ pub fn unary(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<Tensor> {
         Unary::Clamp => record("ClampBackward1", &[x], o, &[x], false, move |g, s, _| {
             Ok(vec![Some(mul(g, &k::unary(&s[0], Unary::ClampMask, a, b)?)?)])
         })?,
+        Unary::Sin => record("SinBackward0", &[x], o, &[x], false, |g, s, _| {
+            Ok(vec![Some(mul(g, &k::unary(&s[0], Unary::Cos, 0.0, 0.0)?)?)])
+        })?,
+        Unary::Cos => record("CosBackward0", &[x], o, &[x], false, |g, s, _| {
+            Ok(vec![Some(neg(&mul(g, &k::unary(&s[0], Unary::Sin, 0.0, 0.0)?)?)?)])
+        })?,
         Unary::Gelu => record("GeluBackward0", &[x], o, &[x], false, |g, s, _| {
             Ok(vec![Some(mul(g, &k::unary(&s[0], Unary::GeluGrad, 0.0, 0.0)?)?)])
         })?,

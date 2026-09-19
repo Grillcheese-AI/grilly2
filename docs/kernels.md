@@ -12,7 +12,7 @@ applies to v1's modules.
 
 | kernel | does | covers |
 |---|---|---|
-| `g2-unary` | `f(x; a, b)` per element, in place or not | neg, abs, sign, exp, log, sqrt, rsqrt, tanh, sigmoid, scalar + - * / pow, clamp, gelu |
+| `g2-unary` | `f(x; a, b)` per element, in place or not | neg, abs, sign, exp, log, sqrt, rsqrt, tanh, sigmoid, sin, cos, scalar + - * / pow, clamp, gelu, isfinite/isinf/isnan |
 | `g2-binary` | `op(a, b)` with torch broadcasting (up to 6 dims) | + - * / pow, maximum, minimum, comparisons |
 | `g2-reduce` | sum / mean / max / min along one axis | sum, mean, amax, amin, the backward of broadcasting |
 | `g2-copy` | strided gather/scatter | transpose, permute, expand, slicing, cat, stack, `__setitem__` |
@@ -26,3 +26,5 @@ Accuracy is measured against a float64 reference and bounded in
 torch, transcendental ops are within 2 ULP (GPU-native `exp` was 14 ULP off, so
 `exp`/`tanh` use Cephes-style implementations), and sums use Kahan
 compensation. Non-integer `pow` is the known weak spot (32 ULP bound).
+`sin`/`cos` are within 1 ULP for |x| <= 8192 (Cephes reduction); larger
+arguments would need Payne-Hanek reduction.

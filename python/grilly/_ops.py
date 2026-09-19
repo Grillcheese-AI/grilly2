@@ -233,6 +233,8 @@ sqrt = _float_unary("sqrt")
 rsqrt = _float_unary("rsqrt")
 tanh = _float_unary("tanh")
 sigmoid = _float_unary("sigmoid")
+sin = _float_unary("sin")
+cos = _float_unary("cos")
 
 
 def square(input) -> Tensor:
@@ -714,7 +716,7 @@ def _setitem(x: Tensor, idx, value) -> None:
 
 def _install() -> None:
     T = Tensor
-    for name in ("add", "sub", "mul", "div", "pow", "neg", "abs", "sign", "exp", "log",
+    for name in ("sin", "cos", "add", "sub", "mul", "div", "pow", "neg", "abs", "sign", "exp", "log",
                  "sqrt", "rsqrt", "tanh", "sigmoid", "square", "clamp", "clip", "clamp_min",
                  "clamp_max", "sum", "mean", "amax", "amin", "max", "min", "softmax",
                  "log_softmax", "transpose", "swapaxes", "t", "permute", "unsqueeze",

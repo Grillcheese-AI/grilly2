@@ -117,6 +117,8 @@ const CASES: &[Case] = cases! {
     "rsqrt", &[&[8]], true, "lambda a: a.rsqrt()", |x| math::unary(&x[0], Unary::Rsqrt, 0.0, 0.0);
     "tanh", &[&[8]], false, "lambda a: a.tanh()", |x| math::unary(&x[0], Unary::Tanh, 0.0, 0.0);
     "sigmoid", &[&[8]], false, "lambda a: a.sigmoid()", |x| math::unary(&x[0], Unary::Sigmoid, 0.0, 0.0);
+    "sin", &[&[8]], false, "lambda a: a.sin()", |x| math::unary(&x[0], Unary::Sin, 0.0, 0.0);
+    "cos", &[&[8]], false, "lambda a: a.cos()", |x| math::unary(&x[0], Unary::Cos, 0.0, 0.0);
     "gelu", &[&[8]], false, "lambda a: torch.nn.functional.gelu(a)", |x| math::unary(&x[0], Unary::Gelu, 0.0, 0.0);
     "silu", &[&[8]], false, "lambda a: torch.nn.functional.silu(a)", |x| math::silu(&x[0]);
     "sum dim 1", &[&[3, 4, 5]], false, "lambda a: a.sum(1)", |x| math::sum(&x[0], &[1], false);

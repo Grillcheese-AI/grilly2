@@ -75,3 +75,28 @@ float power(float v, float e) {
     }
     return pow(v, e);
 }
+
+// Cephes sinf/cosf: reduce |x| by pi/4 in three parts (Cody-Waite), then a
+// minimax polynomial on [-pi/4, pi/4]; about 1 ULP for |x| <= 8192. Larger
+// arguments would need Payne-Hanek reduction.
+float sin_cos_acc(float v, bool want_cos) {
+    float a = abs(v);
+    float sgn = (!want_cos && v < 0.0) ? -1.0 : 1.0;
+    int j = int(a * 1.27323954473516);
+    float y = float(j);
+    if ((j & 1) != 0) { j += 1; y += 1.0; }
+    j &= 7;
+    if (j > 3) { sgn = -sgn; j -= 4; }
+    if (want_cos && j > 1) sgn = -sgn;
+    float x = ((a - y * 0.78515625) - y * 2.4187564849853515625e-4) - y * 3.77489497744594108e-8;
+    float z = x * x;
+    bool use_cos_poly = want_cos ? (j == 0 || j == 3) : (j == 1 || j == 2);
+    float r;
+    if (use_cos_poly) {
+        r = ((2.443315711809948E-005 * z - 1.388731625493765E-003) * z + 4.166664568298827E-002) * z * z
+            - 0.5 * z + 1.0;
+    } else {
+        r = ((-1.9515295891E-4 * z + 8.3321608736E-3) * z - 1.6666654611E-1) * z * x + x;
+    }
+    return sgn * r;
+}

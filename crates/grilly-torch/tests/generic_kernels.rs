@@ -5,7 +5,7 @@
 //! | ops | bound | measured grilly | torch f32 (same metric) |
 //! |---|---|---|---|
 //! | neg, abs, sign, +a, *a, a-x, pow(2), clamp, add, sub, mul, max, min, comparisons, copies | bit-identical to torch | | |
-//! | exp, log, sqrt, rsqrt, tanh, sigmoid, a/x, integer pow, div | 2 ULP of the float64 truth | 0.95-1.57 | 0-1.13 |
+//! | exp, log, sqrt, rsqrt, tanh, sigmoid, a/x, integer pow, div, sin/cos (abs(x) <= 8192) | 2 ULP of the float64 truth | 0.95-1.57 | 0-1.13 |
 //! | pow with a non-integer exponent (native GLSL pow) | 32 ULP | 16.6 (x^1.7), 7.4 (tensor exponents) | 0-1 |
 //! | gelu, gelu' (erf approximation) | 3e-7 * max(1, abs(x)) absolute | 2.0e-7 | 2.1e-7 |
 //! | sum, mean over K elements (Kahan) | (sqrt(K) + 2) * eps * sum(abs(x)) | within | |
@@ -96,6 +96,8 @@ fn transcendental_unary_ops_within_2_ulp() {
     let x = wide(4099, 2);
     let pos: Vec<f32> = x.iter().map(|v| v.abs() + 1e-3).collect();
     let neg_int_pow: Vec<f32> = x.iter().map(|v| v.clamp(-8.0, 8.0)).collect();
+    // RoPE-like angles, up to the documented 8192 limit
+    let angles: Vec<f32> = data(4099, 9).iter().enumerate().map(|(i, v)| v * [1.0, 30.0, 700.0, 8000.0][i % 4]).collect();
     let cases: &[(Unary, f32, &[f32], &str)] = &[
         (Unary::Exp, 0.0, &x, "x.double().exp()"),
         (Unary::Log, 0.0, &pos, "x.double().log()"),
@@ -108,6 +110,8 @@ fn transcendental_unary_ops_within_2_ulp() {
         (Unary::PowScalar, -2.0, &pos, "x.double().pow(-2)"),
         (Unary::PowScalar, 0.5, &pos, "x.double().pow(0.5)"),
         (Unary::PowScalar, 1.7, &pos, "x.double().pow(1.7)"),
+        (Unary::Sin, 0.0, &angles, "x.double().sin()"),
+        (Unary::Cos, 0.0, &angles, "x.double().cos()"),
     ];
     for &(op, a, input, truth_expr) in cases {
         let n = input.len();

@@ -13,7 +13,7 @@ layout(push_constant) uniform P { uint n; uint op; float a; float b; uint x_off;
 const uint NEG = 0, ABS = 1, SIGN = 2, EXP = 3, LOG = 4, SQRT = 5, RSQRT = 6,
            TANH = 7, SIGMOID = 8, ADD_S = 9, MUL_S = 10, RSUB_S = 11, RDIV_S = 12,
            POW_S = 13, CLAMP = 14, CLAMP_MASK = 15, GELU = 16, GELU_GRAD = 17,
-           IS_FINITE = 18, IS_INF = 19, IS_NAN = 20;
+           IS_FINITE = 18, IS_INF = 19, IS_NAN = 20, SIN = 21, COS = 22;
 
 void main() {
     uint i = flat_index();
@@ -48,6 +48,8 @@ void main() {
             r = cdf + v * pdf;
             break;
         }
+        case SIN: r = sin_cos_acc(v, false); break;
+        case COS: r = sin_cos_acc(v, true); break;
         case IS_FINITE: r = (isnan(v) || isinf(v)) ? 0.0 : 1.0; break;
         case IS_INF: r = isinf(v) ? 1.0 : 0.0; break;
         case IS_NAN: r = isnan(v) ? 1.0 : 0.0; break;

@@ -700,6 +700,7 @@ from ._ops import (  # noqa: E402,F401
     bitwise_and, bitwise_not, bitwise_or, bitwise_xor, eq, equal, ge, ger, greater,
     greater_equal, gt, isfinite, isinf, isnan, le, less, less_equal, logical_and, logical_not,
     logical_or, logical_xor, lt, masked_fill, ne, not_equal, outer, result_type, where,
+    cos, sin,
 )
 from ._ops import (  # noqa: E402,F401
     abs, add, allclose, amax, amin, bmm, cat, chunk, clamp, clamp_max, clamp_min, clip,
