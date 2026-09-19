@@ -14,8 +14,11 @@
 //! grilly has no half-precision dtypes yet. A bf16 or f16 checkpoint therefore
 //! loads with its values unchanged, but reports its dtype as float32. Any other
 //! dtype is refused (`Error::NotImplemented`) rather than converted with a loss.
+//!
+//! Loaded tensors are weights, so they go in `MemClass::Persistent` memory:
+//! exactly their size, and freed back to the driver rather than pooled.
 
-use grilly_core::{DType, Device, Error, Tensor};
+use grilly_core::{DType, Device, Error, MemClass, Tensor};
 use half::f16;
 use memmap2::Mmap;
 use safetensors::tensor::{Dtype, Metadata, SafeTensors};
@@ -124,7 +127,8 @@ impl SafeTensorsFile {
         Some(m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
     }
 
-    /// Upload one tensor to `device` (see the module doc for dtypes).
+    /// Upload one tensor to `device`, in persistent memory (see the module
+    /// doc for dtypes).
     pub fn tensor(&self, device: &Device, name: &str) -> Result<Tensor, LoadError> {
         let info = self
             .metadata
@@ -133,24 +137,16 @@ impl SafeTensorsFile {
         let (start, end) = info.data_offsets;
         let data = &self.bytes.as_slice()[self.data_start + start..self.data_start + end];
         let shape = &info.shape;
+        let upload = |bytes: &[u8], dtype| Tensor::from_bytes_in(device, bytes, shape, dtype, MemClass::Persistent);
         let halves = || data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]));
         Ok(match info.dtype {
-            Dtype::F32 => Tensor::from_bytes(device, data, shape, DType::F32)?,
-            Dtype::I64 => Tensor::from_bytes(device, data, shape, DType::I64)?,
-            Dtype::I32 => Tensor::from_bytes(device, data, shape, DType::I32)?,
+            Dtype::F32 => upload(data, DType::F32)?,
+            Dtype::I64 => upload(data, DType::I64)?,
+            Dtype::I32 => upload(data, DType::I32)?,
             // bf16 is the top half of a float32
-            Dtype::BF16 => {
-                let wide: Vec<f32> = halves().map(|h| f32::from_bits((h as u32) << 16)).collect();
-                Tensor::from_slice(device, &wide, shape)?
-            }
-            Dtype::F16 => {
-                let wide: Vec<f32> = halves().map(|h| f16::from_bits(h).to_f32()).collect();
-                Tensor::from_slice(device, &wide, shape)?
-            }
-            Dtype::BOOL => {
-                let words: Vec<u8> = data.iter().flat_map(|&b| u32::from(b != 0).to_le_bytes()).collect();
-                Tensor::from_bytes(device, &words, shape, DType::Bool)?
-            }
+            Dtype::BF16 => upload(&words(halves().map(|h| (h as u32) << 16)), DType::F32)?,
+            Dtype::F16 => upload(&words(halves().map(|h| f16::from_bits(h).to_f32().to_bits())), DType::F32)?,
+            Dtype::BOOL => upload(&words(data.iter().map(|&b| u32::from(b != 0))), DType::Bool)?,
             other => {
                 return Err(Error::NotImplemented(format!(
                     "loading tensor {name:?} of safetensors dtype {other:?} (grilly loads F32, BF16 and F16 \
@@ -160,4 +156,13 @@ impl SafeTensorsFile {
             }
         })
     }
+}
+
+/// 32-bit words as little-endian bytes.
+fn words(values: impl ExactSizeIterator<Item = u32>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 4);
+    for w in values {
+        out.extend_from_slice(&w.to_le_bytes());
+    }
+    out
 }

@@ -379,6 +379,8 @@ fn submit_stats(py: Python<'_>) -> PyResult<Bound<'_, pyo3::types::PyDict>> {
         ("buffer_allocations", s.buffer_allocations),
         ("buffers_outstanding", s.buffers_outstanding),
         ("batch_reuses", s.batch_reuses),
+        ("persistent_buffers", s.persistent_buffers),
+        ("persistent_bytes", s.persistent_bytes),
     ] {
         d.set_item(k, v)?;
     }

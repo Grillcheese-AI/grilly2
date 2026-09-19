@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use grilly_core::autograd::{PackedTensor, SavedTensorHooks};
-use grilly_core::{autograd, rng, DType, Device, Error, Tensor};
+use grilly_core::{autograd, rng, DType, Device, Error, MemClass, Tensor};
 use pyo3::exceptions::{PyIndexError, PyNotImplementedError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -69,10 +69,11 @@ impl PyTensor {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (shape, dtype=0))]
-    fn empty(py: Python<'_>, shape: Vec<usize>, dtype: u32) -> PyResult<PyTensor> {
+    #[pyo3(signature = (shape, dtype=0, persistent=false))]
+    fn empty(py: Python<'_>, shape: Vec<usize>, dtype: u32, persistent: bool) -> PyResult<PyTensor> {
         let (dev, dtype) = (device()?, DType::from_code(dtype).map_err(err)?);
-        py.detach(|| Tensor::empty_typed(&dev, &shape, dtype)).map(wrap).map_err(err)
+        let mem = if persistent { MemClass::Persistent } else { MemClass::Device };
+        py.detach(|| Tensor::empty_in(&dev, &shape, dtype, mem)).map(wrap).map_err(err)
     }
 
     #[staticmethod]

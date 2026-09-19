@@ -263,8 +263,11 @@ class Module:
         return destination
 
     def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
-        if assign:
-            raise _not_yet("load_state_dict(assign=True)")
+        """Copy ``state_dict`` into this module's parameters and buffers, as
+        torch does. With ``assign=True`` the state dict's tensors become the
+        parameters and buffers, with no copy; each parameter keeps its
+        ``requires_grad``. That is how a checkpoint from
+        ``grilly.infer.safetensors.load_file`` is held with no second copy."""
         own = self.state_dict(keep_vars=True)
         missing = [k for k in own if k not in state_dict]
         unexpected = [k for k in state_dict if k not in own]
@@ -283,7 +286,16 @@ class Module:
                     errors.append(f"size mismatch for {key}: copying a param with shape {value.shape} from "
                                   f"checkpoint, the shape in current model is {target.shape}.")
                     continue
-                target.copy_(value)
+                if not assign:
+                    target.copy_(value)
+                    continue
+                owner, _, name = key.rpartition(".")
+                module = self.get_submodule(owner) if owner else self
+                if isinstance(target, Parameter):
+                    if not isinstance(value, Parameter):
+                        value = Parameter(value, requires_grad=target.requires_grad)
+                    value.requires_grad_(target.requires_grad)
+                setattr(module, name, value)
         if errors:
             raise RuntimeError(f"Error(s) in loading state_dict for {type(self).__name__}:\n\t" + "\n\t".join(errors))
         return _IncompatibleKeys(missing, unexpected)

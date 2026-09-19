@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -35,6 +36,10 @@ namespace {
 thread_local std::string g_last_error;
 
 constexpr uint32_t kSetsPerPool = 1024;
+// GC_MEM_DEVICE_PERSISTENT buffers this large get a device memory allocation of their own
+constexpr size_t kDedicatedMin = size_t(1) << 20;
+// Host <-> device-local transfers are staged this many bytes at a time
+constexpr uint64_t kStagingBytes = uint64_t(64) << 20;
 constexpr uint32_t kMaxBindings = 32;
 
 struct Signature {
@@ -89,14 +94,137 @@ struct gc_ctx {
         return pool.acquireDeviceLocal(bytes);
     }
 
-    // After a batch has finished: everything freed during it goes back to v1.
+    // After a batch has finished: everything freed during it goes back to v1,
+    // or is destroyed if persistent.
     void releaseAfterBatch() {
         for (auto& buf : deferredRelease) pool.release(buf);
         deferredRelease.clear();
+        for (auto& buf : deferredDestroy) destroy(buf);
+        deferredDestroy.clear();
         for (auto& [bucket, bufs] : batchFree) {
             for (auto& buf : bufs) pool.release(buf);
         }
         batchFree.clear();
+    }
+
+    // GC_MEM_DEVICE_PERSISTENT buffers: allocated at their exact size and
+    // destroyed when released, never handed to v1's pool. The pool rounds up
+    // to a power of two and keeps up to 32 released buffers per size, which
+    // held Qwen2.5-0.5B's 1.84 GiB of float32 weights in 3.00 GiB of VRAM.
+    std::unordered_set<gc_buf> persistent;
+    uint64_t persistentBytes = 0;
+    // released while a batch was recording: destroyed once it has run
+    std::vector<grilly::GrillyBuffer> deferredDestroy;
+
+    grilly::GrillyBuffer allocatePersistent(size_t bytes) {
+        // as v1's BufferPool::acquireDeviceLocal, at the exact size
+        VkBufferCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        info.size = bytes;
+        info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VmaAllocationCreateInfo alloc{};
+        alloc.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+        alloc.priority = 1.0f;
+        // A large buffer gets device memory of its own: freeing it returns
+        // exactly that memory, where a sub-allocation would share a block
+        // with pooled buffers that keep the block alive. Small ones (biases,
+        // norm weights) share blocks, to stay far below the driver's
+        // allocation-count limit (4096 on Windows).
+        if (bytes >= kDedicatedMin) alloc.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+        grilly::GrillyBuffer buf{};
+        buf.size = bytes;
+        buf.bucketSize = bytes;
+        buf.deviceLocal = true;
+        VkResult r = vmaCreateBuffer(pool.allocator(), &info, &alloc, &buf.handle, &buf.allocation, &buf.info);
+        if (r != VK_SUCCESS)
+            throw std::runtime_error("allocating " + std::to_string(bytes) +
+                                     " bytes of persistent device memory failed (VkResult " +
+                                     std::to_string(static_cast<int>(r)) + ")");
+        return buf;
+    }
+
+    void destroy(grilly::GrillyBuffer& buf) { vmaDestroyBuffer(pool.allocator(), buf.handle, buf.allocation); }
+
+    // Transfers between the host and device-local memory go through two
+    // staging buffers of kStagingBytes owned here, a chunk at a time. v1's
+    // BufferPool::uploadStaged / downloadStaged instead keep a per-thread
+    // staging buffer as large as the largest transfer ever made, never freed
+    // (0.51 GiB of system RAM after one upload of Qwen2.5-0.5B's embedding),
+    // and upload only at offset 0.
+    struct Staging {
+        VkBuffer handle = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+    };
+    Staging upStage, downStage;
+
+    Staging& staging(Staging& s, bool readback) {
+        if (s.handle) return s;
+        VkBufferCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        info.size = kStagingBytes;
+        info.usage = readback ? VK_BUFFER_USAGE_TRANSFER_DST_BIT : VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VmaAllocationCreateInfo alloc{};
+        alloc.usage = VMA_MEMORY_USAGE_AUTO;
+        // dedicated: exactly kStagingBytes of system memory each, sharing no block
+        alloc.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT |
+                      (readback ? VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+                                : VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+        VmaAllocationInfo got{};
+        VkResult r = vmaCreateBuffer(pool.allocator(), &info, &alloc, &s.handle, &s.allocation, &got);
+        if (r != VK_SUCCESS)
+            throw std::runtime_error("allocating a staging buffer failed (VkResult " +
+                                     std::to_string(static_cast<int>(r)) + ")");
+        s.mapped = got.pMappedData;
+        return s;
+    }
+
+    // Record one copy and a barrier making it visible to `dstStage` /
+    // `dstAccess`, run it and wait. No batch may be open.
+    void copyNow(VkBuffer from, uint64_t fromOffset, VkBuffer to, uint64_t toOffset, uint64_t bytes,
+                 VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) {
+        batch.begin();
+        VkBufferCopy region{fromOffset, toOffset, bytes};
+        vkCmdCopyBuffer(batch.cmdBuffer(), from, to, 1, &region);
+        VkMemoryBarrier mb{};
+        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = dstAccess;
+        vkCmdPipelineBarrier(batch.cmdBuffer(), VK_PIPELINE_STAGE_TRANSFER_BIT, dstStage, 0, 1, &mb, 0, nullptr, 0,
+                             nullptr);
+        batch.submitDeferred();
+        VkResult r = vkQueueWaitIdle(device.computeQueue());  // no timeout, as in gc_submit
+        if (r != VK_SUCCESS)
+            throw std::runtime_error("vkQueueWaitIdle failed (VkResult=" + std::to_string(r) + ")");
+        batch.waitForCompletion();
+    }
+
+    void uploadDevice(const grilly::GrillyBuffer& dst, uint64_t offset, const char* src, uint64_t bytes) {
+        Staging& s = staging(upStage, false);
+        for (uint64_t done = 0; done < bytes;) {
+            uint64_t n = std::min(bytes - done, kStagingBytes);
+            std::memcpy(s.mapped, src + done, n);
+            vmaFlushAllocation(pool.allocator(), s.allocation, 0, n);
+            copyNow(s.handle, 0, dst.handle, offset + done, n,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT |
+                        VK_ACCESS_TRANSFER_WRITE_BIT);
+            done += n;
+        }
+    }
+
+    void downloadDevice(const grilly::GrillyBuffer& src, uint64_t offset, char* out, uint64_t bytes) {
+        Staging& s = staging(downStage, true);
+        for (uint64_t done = 0; done < bytes;) {
+            uint64_t n = std::min(bytes - done, kStagingBytes);
+            copyNow(src.handle, offset + done, s.handle, 0, n, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+            vmaInvalidateAllocation(pool.allocator(), s.allocation, 0, n);
+            std::memcpy(out + done, s.mapped, n);
+            done += n;
+        }
     }
 
     std::unordered_map<std::string, Signature> signatures;
@@ -122,7 +250,14 @@ struct gc_ctx {
             }
         }
         vkDeviceWaitIdle(device.device());
-        for (auto& [h, buf] : buffers) pool.release(buf);
+        for (auto& [h, buf] : buffers) {
+            if (persistent.count(h))
+                destroy(buf);
+            else
+                pool.release(buf);
+        }
+        for (Staging* s : {&upStage, &downStage})
+            if (s->handle) vmaDestroyBuffer(pool.allocator(), s->handle, s->allocation);
         releaseAfterBatch();
         for (VkDescriptorPool p : descPools)
             vkDestroyDescriptorPool(device.device(), p, nullptr);
@@ -326,10 +461,15 @@ int32_t gc_buffer_create(gc_ctx* ctx, uint64_t bytes, uint32_t mem, gc_buf* out)
             case GC_MEM_DEVICE: buf = ctx->acquireDeviceLocal(bytes); break;
             case GC_MEM_UPLOAD: buf = ctx->pool.acquire(bytes); break;
             case GC_MEM_READBACK: buf = ctx->pool.acquireReadback(bytes); break;
+            case GC_MEM_DEVICE_PERSISTENT: buf = ctx->allocatePersistent(bytes); break;
             default: throw std::runtime_error("unknown memory class " + std::to_string(mem));
         }
         gc_buf h = ctx->nextHandle++;
         ctx->buffers.emplace(h, buf);
+        if (mem == GC_MEM_DEVICE_PERSISTENT) {
+            ctx->persistent.insert(h);
+            ctx->persistentBytes += bytes;
+        }
         *out = h;
     });
 }
@@ -342,6 +482,14 @@ int32_t gc_buffer_release(gc_ctx* ctx, gc_buf h) {
         require(it != ctx->buffers.end(), "invalid buffer handle " + std::to_string(h));
         grilly::GrillyBuffer buf = it->second;
         ctx->buffers.erase(it);
+        if (ctx->persistent.erase(h)) {
+            ctx->persistentBytes -= buf.size;
+            if (!ctx->recording)
+                ctx->destroy(buf);
+            else
+                ctx->deferredDestroy.push_back(buf);  // recorded commands may still use it
+            return;
+        }
         if (!ctx->recording)
             ctx->pool.release(buf);
         else if (buf.deviceLocal)
@@ -375,9 +523,7 @@ int32_t gc_upload(gc_ctx* ctx, gc_buf dst, uint64_t offset, const void* src,
             std::memcpy(static_cast<char*>(buf.mappedPtr) + offset, src, bytes);
             vmaFlushAllocation(ctx->pool.allocator(), buf.allocation, offset, bytes);
         } else {
-            require(offset == 0, "upload at a nonzero offset into device memory "
-                                 "is not supported yet");
-            ctx->pool.uploadStaged(buf, src, bytes);
+            ctx->uploadDevice(buf, offset, static_cast<const char*>(src), bytes);
         }
     });
 }
@@ -396,7 +542,7 @@ int32_t gc_download(gc_ctx* ctx, gc_buf srcBuf, uint64_t offset, void* dst,
         if (buf.mappedPtr)
             ctx->pool.download(buf, static_cast<float*>(dst), bytes, offset);
         else
-            ctx->pool.downloadStaged(buf, dst, bytes, offset);
+            ctx->downloadDevice(buf, offset, static_cast<char*>(dst), bytes);
     });
 }
 
@@ -534,7 +680,8 @@ int32_t gc_submit_stats_get(gc_ctx* ctx, gc_submit_stats* out) {
         auto pool = ctx->pool.stats();
         *out = gc_submit_stats{ctx->submits, ctx->dispatches, ctx->submitNs, ctx->waitNs, ctx->waitNsMax,
                                ctx->waitNsLast, static_cast<uint64_t>(ctx->descPools.size()),
-                               pool.allocations, pool.totalAcquired - pool.totalReleased, ctx->batchReuses};
+                               pool.allocations, pool.totalAcquired - pool.totalReleased, ctx->batchReuses,
+                               static_cast<uint64_t>(ctx->persistent.size()), ctx->persistentBytes};
     });
 }
 

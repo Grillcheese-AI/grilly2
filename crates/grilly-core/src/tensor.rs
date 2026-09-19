@@ -71,11 +71,18 @@ impl Tensor {
 
     /// A tensor of `dtype` with undefined contents.
     pub fn empty_typed(device: &Device, shape: &[usize], dtype: DType) -> Result<Tensor> {
+        Tensor::empty_in(device, shape, dtype, MemClass::Device)
+    }
+
+    /// A tensor of `dtype` with undefined contents, in `mem`: `Device` for
+    /// working tensors, `Persistent` for ones that live as long as the
+    /// program (weights).
+    pub fn empty_in(device: &Device, shape: &[usize], dtype: DType, mem: MemClass) -> Result<Tensor> {
         let bytes = numel_of(shape)?
             .checked_mul(dtype.size())
             .ok_or_else(|| Error::Shape(format!("shape {shape:?} is too large")))?;
         // Zero-element tensors still get a minimal allocation.
-        let storage = device.alloc(bytes.max(8) as u64, MemClass::Device)?;
+        let storage = device.alloc(bytes.max(8) as u64, mem)?;
         Ok(Tensor::from_parts(Arc::new(storage), shape.to_vec(), 0, dtype))
     }
 
@@ -87,6 +94,11 @@ impl Tensor {
     /// A new tensor from its elements as stored (little-endian; bool as one
     /// u32 0/1 per element), row-major.
     pub fn from_bytes(device: &Device, data: &[u8], shape: &[usize], dtype: DType) -> Result<Tensor> {
+        Tensor::from_bytes_in(device, data, shape, dtype, MemClass::Device)
+    }
+
+    /// [`Tensor::from_bytes`] into memory of class `mem` (see [`Tensor::empty_in`]).
+    pub fn from_bytes_in(device: &Device, data: &[u8], shape: &[usize], dtype: DType, mem: MemClass) -> Result<Tensor> {
         let n = numel_of(shape)?;
         if data.len() != n * dtype.size() {
             return Err(Error::Shape(format!(
@@ -96,7 +108,7 @@ impl Tensor {
                 data.len()
             )));
         }
-        let t = Tensor::empty_typed(device, shape, dtype)?;
+        let t = Tensor::empty_in(device, shape, dtype, mem)?;
         if n > 0 {
             t.storage.write(0, data)?;
         }
@@ -347,10 +359,14 @@ impl Tensor {
         Ok(self)
     }
 
-    /// Overwrite with host-computed values, in place.
+    /// Overwrite with host-computed values, in place. Written straight into
+    /// the storage after the work recorded so far has run: no temporary,
+    /// which would be a pooled buffer rounded up to a power of two and kept
+    /// by the pool afterwards (docs/inference.md).
     fn overwrite(&self, values: &[f32]) -> Result<&Tensor> {
-        let src = Tensor::from_slice(self.device(), values, &self.shape)?;
-        self.device().record_copy(&src.storage, 0, &self.storage, self.byte_offset(), self.byte_len())?;
+        if !values.is_empty() {
+            self.storage.write(self.byte_offset(), as_bytes(values))?;
+        }
         self.bump_version();
         Ok(self)
     }

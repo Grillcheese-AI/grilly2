@@ -79,31 +79,61 @@ adapter.
 
 ### Measured: Qwen2.5-0.5B-Instruct
 
-RX 6750 XT, the file already in the OS cache.
+On the RX 6750 XT, with the file already in the OS cache: 290 tensors, all
+BF16, 0.92 GiB on disk and 1.84 GiB as float32 (494M parameters).
+`load_file` takes 1.5 s.
 
-| | |
-|---|---:|
-| file | 290 tensors, all BF16, 0.92 GiB |
-| weights as float32 | 494M parameters, 1.84 GiB |
-| `load_file` | 1.7 s (1.1 GiB/s of float32 uploaded) |
-| dedicated VRAM after the load | **3.00 GiB** |
-| shared (system RAM) after the load | 0.51 GiB above the baseline |
+## Memory for weights (option A)
 
-The 1.16 GiB of VRAM above the weights' size is v1's buffer pool. It
-rounds every device allocation up to a power of two below 256 MB. Summing
-those rounded sizes over Qwen's tensors predicts 2.97 GiB, which matches
-the measurement.
+**The problem, measured on the first loader.** The weights occupied
+3.00 GiB of VRAM for 1.84 GiB of data. v1's buffer pool rounds every
+device allocation up to a power of two below 256 MB, and summing those
+rounded sizes over Qwen's tensors predicts 2.97 GiB. A 4864×896 MLP weight
+(17.4 MB) sat in a 32 MB bucket. Quantization would not have fixed this:
+an int8 copy of that weight is 4.4 MB, which rounds to 8 MB.
 
-The largest waste is in the MLP weights:
-- `gate_proj` and `up_proj`: 4864×896 float32 is 17.4 MB, held in a 32 MB
-  bucket; 0.72 GiB across the model;
-- `down_proj`: 0.36 GiB.
+**The decision (owner).** Weights get memory of exactly their size, never
+pooled. Activations keep the pool's reuse.
 
-The 0.51 GiB of system RAM is the staging buffer for the 545 MB embedding.
-It is larger than 256 MB, so the pool keeps it at its exact size after the
-upload.
+**What changed.**
+- `MemClass::Persistent` (`GC_MEM_DEVICE_PERSISTENT` in the shim)
+  allocates exactly the requested size through v1's VMA allocator, not
+  through its pool. It is destroyed when released. If a batch is recording
+  at that moment, the release is deferred until the batch has run.
+- Buffers of 1 MiB or more get a device-memory allocation of their own.
+  Freeing one returns exactly that memory. A sub-allocation would share a
+  VMA block with pooled buffers, which keep the block alive.
+- Loaded tensors and the parameters of `nn.Linear`, `nn.LayerNorm` and
+  `nn.Embedding` are persistent.
+- `load_state_dict(assign=True)` is implemented as in torch: the loaded
+  tensors become the parameters, with no copy, and each keeps the module's
+  `requires_grad`.
+- Transfers between the host and device memory are staged by the shim
+  through two 64 MiB buffers, one chunk at a time, at any offset.
+  - v1's `uploadStaged` and `downloadStaged` keep a per-thread staging
+    buffer as large as the largest transfer ever made, and never free it.
+    That was 0.51 GiB of system RAM after the embedding alone.
+  - In-place RNG (`uniform_`, `normal_`, so every `nn.init`) now writes
+    straight into the tensor. It used to upload into a pooled temporary
+    and copy from it, and each parameter's temporary stayed in the pool.
 
-Quantization will not remove this. An int8 `gate_proj` is 4.4 MB and would
-sit in an 8 MB bucket. Rounding suits short-lived activations, which are
-reused. It is the wrong policy for weights, which are allocated once and
-held for the whole run.
+**Measured**, on a grilly model with Qwen2.5-0.5B's parameter names and
+shapes, built and then loaded from the checkpoint. The memory is the
+process's own, from Windows' GPU counters.
+
+| held after loading | first loader, `load_file` alone | model + copy, before the fix | model + `assign=True`, before the fix | model + copy or `assign=True`, now |
+|---|---:|---:|---:|---:|
+| dedicated VRAM | 3.00 GiB | 2.75 GiB | 3.51 GiB | **1.94 GiB** |
+| shared (system RAM) | 0.54 GiB | 0.54 GiB | 0.54 GiB | **0.13 GiB** |
+
+The weights are 1.84 GiB. The 0.13 GiB of system RAM is the two staging
+buffers, and it no longer grows with the largest tensor.
+
+The peak is 3.79 GiB, reached while the model's own parameters and the
+loaded dict both exist. Streaming tensors from the file into the model
+one at a time would remove it. That belongs with the decode-loop step.
+
+Building the model takes about 3.7 s. I have not profiled it. The likely
+cost is drawing 494M random initial values on the host, which a load then
+overwrites. torch avoids this with meta-device initialisation, which
+grilly does not have yet.

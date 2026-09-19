@@ -34,6 +34,11 @@ pub enum MemClass {
     Upload,
     /// Host-visible, cached: for data the CPU reads back.
     Readback,
+    /// VRAM of exactly the requested size, never pooled: returned to the
+    /// driver when freed. For tensors that live as long as the program, such
+    /// as weights. `Device` memory is rounded up to a power of two and kept
+    /// by v1's pool after release (docs/inference.md).
+    Persistent,
 }
 
 /// What the device can do.
@@ -203,6 +208,7 @@ impl Device {
             MemClass::Device => sys::GC_MEM_DEVICE,
             MemClass::Upload => sys::GC_MEM_UPLOAD,
             MemClass::Readback => sys::GC_MEM_READBACK,
+            MemClass::Persistent => sys::GC_MEM_DEVICE_PERSISTENT,
         };
         let mut handle = 0;
         let _state = self.lock();

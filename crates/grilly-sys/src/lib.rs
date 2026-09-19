@@ -11,6 +11,7 @@ pub const GC_ERR: i32 = 1;
 pub const GC_MEM_DEVICE: u32 = 0;
 pub const GC_MEM_UPLOAD: u32 = 1;
 pub const GC_MEM_READBACK: u32 = 2;
+pub const GC_MEM_DEVICE_PERSISTENT: u32 = 3;
 
 #[repr(C)]
 pub struct gc_ctx {
@@ -53,6 +54,8 @@ pub struct gc_submit_stats {
     pub buffer_allocations: u64,
     pub buffers_outstanding: u64,
     pub batch_reuses: u64,
+    pub persistent_buffers: u64,
+    pub persistent_bytes: u64,
 }
 
 extern "C" {

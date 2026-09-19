@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from ... import empty, ones, zeros
+from ... import _parameter_storage
 from .. import functional as F
 from .. import init
 from ..parameter import Parameter
@@ -34,9 +34,9 @@ class Linear(Module):
         _no_device(device, dtype)
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = Parameter(empty(out_features, in_features))
+        self.weight = Parameter(_parameter_storage(out_features, in_features))
         if bias:
-            self.bias = Parameter(empty(out_features))
+            self.bias = Parameter(_parameter_storage(out_features))
         else:
             self.register_parameter("bias", None)
         self.reset_parameters()
@@ -65,8 +65,8 @@ class LayerNorm(Module):
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         if elementwise_affine:
-            self.weight = Parameter(ones(*self.normalized_shape))
-            self.bias = Parameter(zeros(*self.normalized_shape)) if bias else None
+            self.weight = Parameter(_parameter_storage(*self.normalized_shape, fill=1.0))
+            self.bias = Parameter(_parameter_storage(*self.normalized_shape, fill=0.0)) if bias else None
             if not bias:
                 self.register_parameter("bias", None)
         else:
@@ -160,7 +160,7 @@ class Embedding(Module):
         self.embedding_dim = embedding_dim
         self.padding_idx = padding_idx
         if _weight is None:
-            self.weight = Parameter(empty(num_embeddings, embedding_dim), requires_grad=not _freeze)
+            self.weight = Parameter(_parameter_storage(num_embeddings, embedding_dim), requires_grad=not _freeze)
             init.normal_(self.weight)
             if padding_idx is not None:
                 from ... import no_grad

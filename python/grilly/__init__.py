@@ -592,6 +592,14 @@ def ones(*size, dtype=None, device=None, requires_grad=False) -> Tensor:
     return _leaf(t, requires_grad)
 
 
+def _parameter_storage(*size, fill=None) -> Tensor:
+    """A float32 tensor for a module parameter, filled with ``fill`` if given.
+    It is in persistent device memory: exactly its size and never pooled,
+    because a parameter lives as long as its module (docs/inference.md)."""
+    t = Tensor._wrap(_C.Tensor.empty(list(_size_args(size)), _code(float32), True))
+    return t if fill is None else t.fill_(fill)
+
+
 def arange(start=0, end=None, step=1, *, out=None, dtype=None, layout=None, device=None,
            requires_grad=False) -> Tensor:
     """Like ``torch.arange``: int64 when every argument is an int, else float32;

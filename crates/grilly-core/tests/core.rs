@@ -90,3 +90,23 @@ fn buffers_round_trip_at_offsets() {
     assert_eq!(out, [1, 2, 3, 4]);
     assert!(matches!(d.alloc(0, MemClass::Device), Err(Error::Invalid(_))));
 }
+
+#[test]
+fn device_memory_transfers_at_offsets_and_across_staging_chunks() {
+    // Device-local transfers are staged by the shim 64 MiB at a time: 80 MiB
+    // crosses a chunk boundary, and the offsets are not chunk- or word-aligned.
+    let d = dev();
+    for mem in [MemClass::Device, MemClass::Persistent] {
+        let n = 80 << 20;
+        let b = d.alloc(n as u64 + 64, mem).unwrap();
+        let data: Vec<u8> = (0..n).map(|i| (i * 7 + i / 251) as u8).collect();
+        b.write(3, &data).unwrap();
+        b.write(n as u64 + 5, &[9, 8, 7]).unwrap();
+        let mut back = vec![0u8; n];
+        b.read(3, &mut back).unwrap();
+        assert!(back == data, "{mem:?}: the 80 MiB round trip differs");
+        let mut tail = [0u8; 5];
+        b.read(n as u64 + 3, &mut tail).unwrap();
+        assert_eq!(tail[2..], [9, 8, 7], "{mem:?}");
+    }
+}

@@ -34,6 +34,11 @@ typedef uint64_t gc_buf; /* 0 is never a valid handle */
 #define GC_MEM_DEVICE 0   /* VRAM, fastest for kernels; staged transfers */
 #define GC_MEM_UPLOAD 1   /* host-visible, write-combined; CPU writes */
 #define GC_MEM_READBACK 2 /* host-visible, cached; CPU reads */
+/* VRAM of exactly the size asked for, never pooled: destroyed when released
+   (after the open batch, if one is recording). For buffers that live as long
+   as the program, such as weights: the pool rounds sizes up to a power of
+   two and keeps what is released (docs/inference.md). */
+#define GC_MEM_DEVICE_PERSISTENT 3
 
 typedef struct gc_caps {
     char device_name[256];
@@ -64,6 +69,8 @@ typedef struct gc_submit_stats {
     uint64_t buffer_allocations;   /* v1 BufferPool: fresh allocations (pool misses) */
     uint64_t buffers_outstanding;  /* v1 BufferPool: acquired - released */
     uint64_t batch_reuses;         /* device buffers reused within a batch */
+    uint64_t persistent_buffers;   /* GC_MEM_DEVICE_PERSISTENT buffers alive */
+    uint64_t persistent_bytes;     /* and their total size */
 } gc_submit_stats;
 
 const char* gc_last_error(void);
