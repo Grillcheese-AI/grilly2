@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/grilly-sys"]
+members = ["crates/grilly-sys", "crates/grilly-core"]
 
 [workspace.package]
 edition = "2021"

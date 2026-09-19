@@ -1,0 +1,9 @@
+[package]
+name = "grilly-core"
+version = "0.1.0"
+description = "Device, memory, kernel dispatch and tensor storage for grilly2"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+grilly-sys = { path = "../grilly-sys" }
