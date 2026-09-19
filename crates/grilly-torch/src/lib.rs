@@ -3,6 +3,7 @@
 //! formula for autograd.
 
 pub mod attention;
+pub mod fused;
 pub mod kernels;
 pub mod math;
 pub mod shape;

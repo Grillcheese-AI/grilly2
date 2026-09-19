@@ -211,3 +211,259 @@ impl Graph {
         Ok(outputs)
     }
 }
+
+// ── the backward of a graph ─────────────────────────────────────────────
+
+/// A graph's backward, as another elementwise graph ([`Graph::backward`]).
+#[derive(Debug, Clone)]
+pub struct Backward {
+    /// Inputs: the forward graph's inputs, then the upstream gradient.
+    pub graph: Graph,
+    /// Its parameters: the forward's, then constants the rules need.
+    pub params: Vec<f32>,
+    /// For each forward input, the backward output holding its gradient (at
+    /// the output shape; the caller sums it down to the input's shape), or
+    /// None when no path reaches it (a zero gradient).
+    pub grads: Vec<Option<usize>>,
+}
+
+impl Graph {
+    /// Reverse mode through output `out` for the inputs flagged in `wanted`,
+    /// with `params` the values the forward runs with. The rules are the
+    /// eager backward formulas of grilly_torch::math term for term, so the
+    /// gradients match eager up to the order contributions are summed in.
+    /// Values a rule needs (y = tanh(x), say) are recomputed in the kernel.
+    pub fn backward(&self, out: usize, params: &[f32], wanted: &[bool]) -> Result<Backward> {
+        self.check()?;
+        if out >= self.nodes.len() || params.len() != self.params || wanted.len() != self.inputs {
+            return Err(Error::Invalid("fusion backward: bad output, params or wanted flags".into()));
+        }
+        // which nodes depend on a wanted input
+        let mut reaches = vec![false; self.nodes.len()];
+        for (k, node) in self.nodes.iter().enumerate() {
+            reaches[k] = match *node {
+                Node::Input(i) => wanted[i],
+                Node::Param(_) => false,
+                Node::Unary(_, x, _, _) => reaches[x],
+                Node::Binary(_, x, y) => reaches[x] || reaches[y],
+            };
+        }
+        let forward = Graph { nodes: self.nodes[..=out].to_vec(), outputs: vec![], inputs: self.inputs + 1, params: self.params };
+        let mut b = Rules { g: forward, params: params.to_vec(), constants: Vec::new() };
+        let grad = b.g.push(Node::Input(self.inputs));
+        let mut adj: Vec<Option<usize>> = vec![None; out + 1];
+        adj[out] = Some(grad);
+        let mut input_grad: Vec<Option<usize>> = vec![None; self.inputs];
+        for k in (0..=out).rev() {
+            let Some(gk) = adj[k] else { continue };
+            if !reaches[k] {
+                continue;
+            }
+            match self.nodes[k] {
+                Node::Input(i) => input_grad[i] = Some(b.sum(input_grad[i], gk)),
+                Node::Param(_) => {}
+                Node::Unary(op, x, a, pb) => {
+                    if let Some(c) = b.unary_rule(op, gk, x, k, a, pb) {
+                        adj[x] = Some(b.sum(adj[x], c));
+                    }
+                }
+                Node::Binary(op, x, y) => {
+                    let (cx, cy) = b.binary_rule(op, gk, [x, y, k], reaches[x], reaches[y]);
+                    if let Some(c) = cx {
+                        adj[x] = Some(b.sum(adj[x], c));
+                    }
+                    if let Some(c) = cy {
+                        adj[y] = Some(b.sum(adj[y], c));
+                    }
+                }
+            }
+        }
+        let mut grads = vec![None; self.inputs];
+        for (i, g) in input_grad.into_iter().enumerate() {
+            if let (Some(node), true) = (g, wanted[i]) {
+                grads[i] = Some(b.g.outputs.len());
+                b.g.outputs.push(node);
+            }
+        }
+        Ok(Backward { graph: b.g, params: b.params, grads })
+    }
+}
+
+/// Builds a backward graph: the derivative rules, and constants as params.
+struct Rules {
+    g: Graph,
+    params: Vec<f32>,
+    constants: Vec<(u32, usize)>,
+}
+
+impl Rules {
+    fn constant(&mut self, v: f32) -> usize {
+        if let Some(&(_, node)) = self.constants.iter().find(|(bits, _)| *bits == v.to_bits()) {
+            return node;
+        }
+        self.params.push(v);
+        self.g.params += 1;
+        let node = self.g.push(Node::Param(self.g.params - 1));
+        self.constants.push((v.to_bits(), node));
+        node
+    }
+
+    fn un(&mut self, op: Unary, x: usize, a: Option<usize>, b: Option<usize>) -> usize {
+        self.g.unary(op, x, a, b)
+    }
+
+    fn bin(&mut self, op: Binary, x: usize, y: usize) -> usize {
+        self.g.binary(op, x, y)
+    }
+
+    fn scalar(&mut self, op: Unary, x: usize, v: f32) -> usize {
+        let c = self.constant(v);
+        self.un(op, x, Some(c), None)
+    }
+
+    /// Adjoint accumulation, in reverse topological order.
+    fn sum(&mut self, acc: Option<usize>, c: usize) -> usize {
+        match acc {
+            None => c,
+            Some(a) => self.bin(Binary::Add, a, c),
+        }
+    }
+
+    fn param_value(&self, node: Option<usize>) -> f32 {
+        match node.map(|n| self.g.nodes[n]) {
+            Some(Node::Param(i)) => self.params[i],
+            _ => 0.0,
+        }
+    }
+
+    /// The contribution to x of y = op(x; a, b) with upstream g (None: zero).
+    fn unary_rule(&mut self, op: Unary, g: usize, x: usize, y: usize, a: Option<usize>, b: Option<usize>) -> Option<usize> {
+        let c = match op {
+            Unary::Neg => self.un(Unary::Neg, g, None, None),
+            Unary::Abs => {
+                let s = self.un(Unary::Sign, x, None, None);
+                self.bin(Binary::Mul, g, s)
+            }
+            Unary::Exp => self.bin(Binary::Mul, g, y),
+            Unary::Log => self.bin(Binary::Div, g, x),
+            Unary::Sqrt => {
+                let twice = self.scalar(Unary::MulScalar, y, 2.0);
+                self.bin(Binary::Div, g, twice)
+            }
+            Unary::Rsqrt => {
+                let cube = self.scalar(Unary::PowScalar, y, 3.0);
+                let m = self.bin(Binary::Mul, g, cube);
+                self.scalar(Unary::MulScalar, m, -0.5)
+            }
+            Unary::Tanh => {
+                let sq = self.scalar(Unary::PowScalar, y, 2.0);
+                let d = self.scalar(Unary::RsubScalar, sq, 1.0);
+                self.bin(Binary::Mul, g, d)
+            }
+            Unary::Sigmoid => {
+                let one_minus = self.scalar(Unary::RsubScalar, y, 1.0);
+                let d = self.bin(Binary::Mul, y, one_minus);
+                self.bin(Binary::Mul, g, d)
+            }
+            Unary::AddScalar => g,
+            Unary::MulScalar => self.un(Unary::MulScalar, g, a, None),
+            Unary::RsubScalar => self.un(Unary::Neg, g, None, None),
+            Unary::RdivScalar => {
+                let q = self.bin(Binary::Div, y, x);
+                let m = self.bin(Binary::Mul, g, q);
+                self.un(Unary::Neg, m, None, None)
+            }
+            Unary::PowScalar => {
+                let e = self.param_value(a);
+                if e == 0.0 {
+                    return None;
+                }
+                let lower = self.scalar(Unary::PowScalar, x, e - 1.0);
+                let m = self.bin(Binary::Mul, g, lower);
+                self.un(Unary::MulScalar, m, a, None)
+            }
+            Unary::Clamp => {
+                let mask = self.un(Unary::ClampMask, x, a, b);
+                self.bin(Binary::Mul, g, mask)
+            }
+            Unary::Sin => {
+                let c = self.un(Unary::Cos, x, None, None);
+                self.bin(Binary::Mul, g, c)
+            }
+            Unary::Cos => {
+                let s = self.un(Unary::Sin, x, None, None);
+                let m = self.bin(Binary::Mul, g, s);
+                self.un(Unary::Neg, m, None, None)
+            }
+            Unary::Gelu => {
+                let d = self.un(Unary::GeluGrad, x, None, None);
+                self.bin(Binary::Mul, g, d)
+            }
+            // piecewise constant, or masks with no gradient (as eager)
+            Unary::Sign
+            | Unary::Floor
+            | Unary::Ceil
+            | Unary::Trunc
+            | Unary::Round
+            | Unary::ClampMask
+            | Unary::GeluGrad
+            | Unary::IsFinite
+            | Unary::IsInf
+            | Unary::IsNan => return None,
+        };
+        Some(c)
+    }
+
+    /// The contributions to x and y of z = op(x, y) with upstream g;
+    /// `xyz` is [x, y, z].
+    fn binary_rule(&mut self, op: Binary, g: usize, xyz: [usize; 3], need_x: bool, need_y: bool) -> (Option<usize>, Option<usize>) {
+        let [x, y, z] = xyz;
+        match op {
+            Binary::Add => (need_x.then_some(g), need_y.then_some(g)),
+            Binary::Sub => (need_x.then_some(g), need_y.then(|| self.un(Unary::Neg, g, None, None))),
+            Binary::Mul => (need_x.then(|| self.bin(Binary::Mul, g, y)), need_y.then(|| self.bin(Binary::Mul, g, x))),
+            Binary::Div => {
+                let ga = self.bin(Binary::Div, g, y);
+                let gb = need_y.then(|| {
+                    let q = self.bin(Binary::Div, x, y);
+                    let m = self.bin(Binary::Mul, ga, q);
+                    self.un(Unary::Neg, m, None, None)
+                });
+                (need_x.then_some(ga), gb)
+            }
+            Binary::Pow => {
+                let ga = need_x.then(|| {
+                    let em1 = self.scalar(Unary::AddScalar, y, -1.0);
+                    let lower = self.bin(Binary::Pow, x, em1);
+                    let d = self.bin(Binary::Mul, y, lower);
+                    self.bin(Binary::Mul, g, d)
+                });
+                // torch zeroes the exponent's gradient where the base is 0
+                let gb = need_y.then(|| {
+                    let zero = self.constant(0.0);
+                    let is_zero = self.bin(Binary::Eq, x, zero);
+                    let safe = self.bin(Binary::Add, x, is_zero);
+                    let ln = self.un(Unary::Log, safe, None, None);
+                    let d = self.bin(Binary::Mul, z, ln);
+                    self.bin(Binary::Mul, g, d)
+                });
+                (ga, gb)
+            }
+            Binary::Maximum | Binary::Minimum => {
+                // the larger (smaller) input gets the gradient; ties split it, as torch
+                let win = if op == Binary::Maximum { Binary::Gt } else { Binary::Lt };
+                let eq = self.bin(Binary::Eq, x, y);
+                let tie = self.scalar(Unary::MulScalar, eq, 0.5);
+                let w = self.bin(win, x, y);
+                let wa = self.bin(Binary::Add, w, tie);
+                let ga = need_x.then(|| self.bin(Binary::Mul, g, wa));
+                let gb = need_y.then(|| {
+                    let wb = self.scalar(Unary::RsubScalar, wa, 1.0);
+                    self.bin(Binary::Mul, g, wb)
+                });
+                (ga, gb)
+            }
+            Binary::Eq | Binary::Ne | Binary::Gt | Binary::Ge | Binary::Lt | Binary::Le => (None, None),
+        }
+    }
+}
