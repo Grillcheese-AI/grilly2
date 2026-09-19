@@ -5,7 +5,7 @@
 use grilly_core::generic::{self as k, Binary, Reduce};
 use grilly_core::{require_float, Arg, DType, Error, Result, Tensor};
 
-use crate::kernels::{FLASH_BWD_KV, FLASH_BWD_Q, FLASH_FWD};
+use crate::kernels::{FLASH_BWD_KV, FLASH_BWD_Q, FLASH_FWD, FLASH_TILES};
 use crate::math::record;
 
 /// The kernels' tile: 32 queries x 32 keys.
@@ -25,6 +25,50 @@ pub struct Tiles {
     pub q_list: Tensor,
     pub mb: usize,
     pub mh: usize,
+}
+
+impl Tiles {
+    /// The tile lists of a bool mask (mb, mh, L, S), built on the device
+    /// (g2-flash-tiles): no download, so a mask made per forward is cheap.
+    pub fn from_mask(mask: &Tensor) -> Result<Tiles> {
+        if mask.dtype() != DType::Bool || mask.dim() != 4 {
+            return Err(Error::Invalid("attention tiles: expected a 4-D bool mask".into()));
+        }
+        let (mb, mh, l, s) = (mask.shape()[0], mask.shape()[1], mask.shape()[2], mask.shape()[3]);
+        let (nq, nk, planes) = (l.div_ceil(TILE), s.div_ceil(TILE), mb * mh);
+        let dev = mask.device();
+        let int = |shape: &[usize]| Tensor::empty_typed(dev, shape, DType::I32);
+        let bits = int(&[mb, mh, l.max(1), nk.max(1)])?;
+        let flags = int(&[planes.max(1) * nq.max(1) * nk.max(1)])?;
+        let tiles = Tiles {
+            bits,
+            kv_count: int(&[mb, mh, nq])?,
+            kv_list: int(&[mb, mh, nq, nk.max(1)])?,
+            q_count: int(&[mb, mh, nk])?,
+            q_list: int(&[mb, mh, nk, nq.max(1)])?,
+            mb,
+            mh,
+        };
+        if planes * l * s == 0 {
+            return Ok(tiles);
+        }
+        let args = [
+            Arg::Storage(mask),
+            Arg::Tensor(&tiles.bits),
+            Arg::Tensor(&flags),
+            Arg::Tensor(&tiles.kv_count),
+            Arg::Tensor(&tiles.kv_list),
+            Arg::Tensor(&tiles.q_count),
+            Arg::Tensor(&tiles.q_list),
+        ];
+        let dims = [u32_of(planes, "planes")?, u32_of(l, "L")?, u32_of(s, "S")?, u32_of(nq, "nq")?, u32_of(nk, "nk")?];
+        let off = u32_of(mask.offset(), "offset")?;
+        for (stage, threads) in [(0u32, planes * l * nk), (1, planes * nq * nk), (2, planes * nq), (3, planes * nk)] {
+            let push = [stage, dims[0], dims[1], dims[2], dims[3], dims[4], off];
+            FLASH_TILES.launch_flat(dev, &args, threads, &push)?;
+        }
+        Ok(tiles)
+    }
 }
 
 fn u32_of(v: usize, what: &str) -> Result<u32> {

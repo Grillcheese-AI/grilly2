@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 import warnings
 
@@ -206,14 +207,58 @@ def _repeat_heads(t: Tensor, r: int) -> Tensor:
     return wide.reshape(*shape[:-3], shape[-3] * r, *shape[-2:])
 
 
+@functools.lru_cache(maxsize=16)
+def _causal_tiles(L: int, S: int):
+    from .. import arange
+    from .attention.flex_attention import _Tiles
+    keep = arange(L).unsqueeze(1) >= arange(S).unsqueeze(0)
+    return _Tiles.from_mask(keep.reshape(1, 1, L, S))
+
+
+def _fused_sdpa(q: Tensor, k: Tensor, v: Tensor, attn_mask, is_causal: bool, scale: float):
+    """The fused block-sparse kernels' output, or None when they do not apply
+    (a float mask, 5-D inputs, head dims > 128)."""
+    from .attention.flex_attention import _Tiles, _run, _unmasked
+    b_ = _bool_dtype()
+    if q.dim() not in (3, 4) or k.dim() != q.dim() or v.dim() != q.dim():
+        return None
+    if q.shape[-1] > 128 or v.shape[-1] > 128 or (attn_mask is not None and attn_mask.dtype is not b_):
+        return None
+    three = q.dim() == 3
+    if three:
+        q, k, v = q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1)
+    B, H, L, S = q.shape[0], q.shape[1], q.shape[2], k.shape[2]
+    if attn_mask is None:
+        tiles = _causal_tiles(L, S) if is_causal else _unmasked(L, S)
+    else:
+        from .. import arange
+        m = attn_mask
+        if three and m.dim() == 3:
+            m = m.unsqueeze(1)
+        m = m.reshape(*([1] * (4 - m.dim())), *m.shape) if m.dim() < 4 else m
+        if is_causal:
+            m = m & (arange(L).unsqueeze(1) >= arange(S).unsqueeze(0))
+        mb, mh = m.shape[0], m.shape[1]
+        if mb not in (1, B) or mh not in (1, H):
+            return None
+        if tuple(m.shape[2:]) != (L, S):
+            m = m.expand(mb, mh, L, S)
+        tiles = _Tiles.from_mask(m)
+    out, _ = _run(q, k, v, tiles, scale)
+    return out.squeeze(1) if three else out
+
+
 def scaled_dot_product_attention(query: Tensor, key: Tensor, value: Tensor, attn_mask=None, dropout_p: float = 0.0,
                                  is_causal: bool = False, scale=None, enable_gqa: bool = False) -> Tensor:
-    """``softmax(query @ key^T * scale + mask) @ value``, as torch's math
-    backend computes it. Masks follow torch 2.10: a bool mask keeps True
-    positions, a float mask is added, ``is_causal`` keeps the top-left
-    triangle (combined with a bool mask when both are given, as torch does on
-    CPU), and fully-masked rows give 0. The (L, S) score matrix is
-    materialized: this is not a fused flash kernel."""
+    """``softmax(query @ key^T * scale + mask) @ value``. Masks follow torch
+    2.10: a bool mask keeps True positions, a float mask is added,
+    ``is_causal`` keeps the top-left triangle (combined with a bool mask when
+    both are given, as torch does on CPU), and fully-masked rows give 0.
+
+    Without dropout or a float mask (and with head dims <= 128) this runs the
+    fused block-sparse kernels flex_attention uses: masked-out 32x32 tiles
+    are skipped and no score matrix reaches memory. Otherwise it computes the
+    (L, S) scores as torch's math backend does."""
     q, k, v = _require_tensor("query", query), _require_tensor("key", key), _require_tensor("value", value)
     L, S, E = q.shape[-2], k.shape[-2], q.shape[-1]
     if enable_gqa and q.dim() >= 3 and q.shape[-3] != k.shape[-3]:
@@ -221,7 +266,13 @@ def scaled_dot_product_attention(query: Tensor, key: Tensor, value: Tensor, attn
         if hq % hk or hq % v.shape[-3]:
             raise RuntimeError(f"number of heads in key/value must divide number of heads in query ({hk} vs {hq})")
         k, v = _repeat_heads(k, hq // hk), _repeat_heads(v, hq // v.shape[-3])
-    scores = _ops.matmul(q, k.transpose(-2, -1)) * (1.0 / math.sqrt(E) if scale is None else float(scale))
+    scale = 1.0 / math.sqrt(E) if scale is None else float(scale)
+    if dropout_p == 0.0:
+        m = None if attn_mask is None else _require_tensor("attn_mask", attn_mask)
+        out = _fused_sdpa(q, k, v, m, is_causal, scale)
+        if out is not None:
+            return out
+    scores = _ops.matmul(q, k.transpose(-2, -1)) * scale
     keep = None
     if is_causal:
         from .. import arange

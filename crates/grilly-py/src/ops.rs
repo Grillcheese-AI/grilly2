@@ -351,6 +351,16 @@ fn flex_attention(
     run2(py, move || attention::flex_attention(&q, &k, &v, &tiles, scale))
 }
 
+/// Tile lists (bits, kv_count, kv_list, q_count, q_list) of a bool mask
+/// (mb, mh, L, S), built on the device.
+#[pyfunction]
+fn flash_tiles(py: Python<'_>, mask: &PyTensor) -> PyResult<Vec<PyTensor>> {
+    let mask = mask.inner.clone();
+    py.detach(move || attention::Tiles::from_mask(&mask))
+        .map(|t| [t.bits, t.kv_count, t.kv_list, t.q_count, t.q_list].into_iter().map(wrap).collect())
+        .map_err(err)
+}
+
 #[pyfunction]
 fn set_deterministic(on: bool) {
     grilly_core::generic::set_deterministic(on);
@@ -367,6 +377,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(index_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(embedding, m)?)?;
     m.add_function(wrap_pyfunction!(flex_attention, m)?)?;
+    m.add_function(wrap_pyfunction!(flash_tiles, m)?)?;
     m.add_function(wrap_pyfunction!(scatter, m)?)?;
     m.add_function(wrap_pyfunction!(scatter_, m)?)?;
     m.add_function(wrap_pyfunction!(cumsum, m)?)?;

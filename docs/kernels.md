@@ -29,6 +29,9 @@ applies to v1's modules.
 | `g2-scatter` | `dst[c with c[dim] := index[c]] = src[c]`, any dtype | scatter, scatter_, the input gradient of scatter |
 | `g2-scan` | inclusive scan along one axis, one thread per line, forward or reversed | cumsum (and its gradient), logcumsumexp (and its gradient) |
 | `g2-layer-norm`, `g2-layer-norm-backward` | layer_norm forward and input gradient, a workgroup per row; (mean, rstd) saved per row | F.layer_norm, nn.LayerNorm (dw and db are column sums through g2-reduce) |
+| `g2-flash-fwd` | block-sparse attention forward over 32x32 tiles, online softmax, writes O and lse | flex_attention, scaled_dot_product_attention (bool / no mask, no dropout) |
+| `g2-flash-bwd-kv`, `g2-flash-bwd-q` | its backward as two kernels (dK, dV per key tile; dQ per query tile), no atomics | the gradients of both |
+| `g2-flash-tiles` | a bool mask's bit mask and per-tile key / query lists, on the device | create_block_mask, SDPA masks |
 | `g2-bmm` | batched `op(A) @ op(B)`, optional transposes, broadcast batch dims; 16x16 tiles through shared memory | matmul / bmm with batch dims, and both gradients (no transpose copies) |
 
 All are prefixed `g2-` so they cannot shadow a v1 kernel. Every tensor is

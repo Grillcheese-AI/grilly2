@@ -7,15 +7,32 @@
 - Shader fusion must build on grilly v1's (see "v1's attention kernels and
   shader fusion" below; one choice there is still open).
 
-Built so far:
-- Stages 1-3. Tile lists; the fused forward (1a71112); the deterministic
-  two-kernel backward. flex_attention takes the fused path whenever there
-  is no score_mod and head dims are <= 128.
-- Measured forward + backward at 16 heads x dim 128, window 512, on the
-  RX 6750 XT: 20 / 44 / 94 / 193 ms at S = 1K / 2K / 4K / 8K. The cost
-  is linear in S. The dense path took 41 ms and 132 ms at 1K and 2K and
-  could not finish 4K.
-- Stage 4 (routing SDPA) is next.
+Built: all four stages.
+- Tile lists (built on the GPU by g2-flash-tiles, no sync).
+- The fused forward (1a71112).
+- The deterministic two-kernel backward (335dec2).
+- SDPA routed through the kernels: no dropout, bool or no mask,
+  is_causal, 3-D or 4-D inputs.
+
+flex_attention takes the fused path whenever there is no score_mod and
+head dims are <= 128. Float masks and dropout keep SDPA dense.
+
+Measured forward + backward at 16 heads x dim 128, window 512, on the
+RX 6750 XT:
+
+| S | flex_attention | SDPA, bool mask built per forward (CubbyLLM) |
+|---:|---:|---:|
+| 1K | 20 ms | 21 ms |
+| 2K | 44 ms | 46 ms |
+| 4K | 94 ms | 102 ms |
+| 8K | 193 ms | 217 ms |
+
+The cost is linear in S. The dense path took 41 ms and 132 ms at 1K and
+2K and could not finish 4K. Building tiles on the GPU takes 23 ms at
+8K; the earlier host build took 295 ms.
+
+Left to optimize: the forward runs at about 0.6 TFLOP/s against 1.1
+for g2-bmm.
 
 ## Where it stands
 

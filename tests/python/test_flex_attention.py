@@ -170,10 +170,11 @@ def test_cubbyllm_flex_path_equals_the_masked_sdpa_path():
 def test_tile_lists_match_the_dense_mask(mod, bh, Q, KV):
     bm = gfa.create_block_mask(mod, *bh, Q, KV)
     t, dense = bm.tiles(), bm.mask.numpy()
+    bits, kv_count, kv_list, q_count, q_list = t.numpy()
     mb, mh, nq, nk = t.shape
     padded = np.zeros((mb, mh, nq * 32, nk * 32), bool)
     padded[..., :Q, :KV] = dense
-    bits = t.bits.view(np.uint32)
+    bits = bits.view(np.uint32)
     for w in range(nk):  # the bit mask holds the dense mask exactly
         got = (bits[..., w:w + 1] >> np.arange(32, dtype=np.uint32)) & 1
         np.testing.assert_array_equal(got.astype(bool), padded[..., :Q, w * 32:(w + 1) * 32])
@@ -181,14 +182,14 @@ def test_tile_lists_match_the_dense_mask(mod, bh, Q, KV):
     for b in range(mb):
         for h in range(mh):
             for qt in range(nq):
-                listed = t.kv_list[b, h, qt, :t.kv_count[b, h, qt]]
+                listed = kv_list[b, h, qt, :kv_count[b, h, qt]]
                 assert list(listed & (gfa._FULL - 1)) == list(np.nonzero(blocks[b, h, qt].any(axis=(0, 2)))[0])
                 for e in listed:
                     kt, full = e & (gfa._FULL - 1), bool(e & gfa._FULL)
                     rows, cols = min(32, Q - qt * 32), min(32, KV - kt * 32)
                     assert full == bool(blocks[b, h, qt, :rows, kt, :cols].all())
             for kt in range(nk):  # the transpose, for the backward
-                listed = t.q_list[b, h, kt, :t.q_count[b, h, kt]] & (gfa._FULL - 1)
+                listed = q_list[b, h, kt, :q_count[b, h, kt]] & (gfa._FULL - 1)
                 assert list(listed) == list(np.nonzero(blocks[b, h, :, :, kt].any(axis=(1, 2)))[0])
 
 

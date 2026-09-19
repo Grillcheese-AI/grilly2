@@ -111,59 +111,44 @@ _FULL = 1 << 30  # set in a tile-list entry when every position in the tile is k
 
 
 class _Tiles:
-    """A mask at the fused kernels' tile granularity (int32 tensors on the
-    device), for (mb, mh) = (1 or B, 1 or H) mask batches and heads:
+    """A mask at the fused kernels' tile granularity, as int32 device tensors,
+    for (mb, mh) = (1 or B, 1 or H) mask batches and heads:
       bits      (mb, mh, Q, nk)  bit c of word [.., q, t]: key t*32 + c kept
       kv_count  (mb, mh, nq)     key tiles each query tile touches
       kv_list   (mb, mh, nq, nk) those tiles, ascending, _FULL flagged
       q_count   (mb, mh, nk)     and the transpose, for the backward
       q_list    (mb, mh, nk, nq)
-    Built once, on the host, from the dense mask."""
+    Built on the device from a bool mask (g2-flash-tiles), without a sync."""
+
+    def __init__(self, tensors, shape) -> None:
+        self.tensors = tuple(tensors)
+        self.shape = shape
+
+    @classmethod
+    def from_mask(cls, mask: Tensor) -> "_Tiles":
+        """From a bool mask (mb, mh, Q, KV)."""
+        from ... import _C
+        mb, mh, Q, KV = mask.shape
+        handles = _C.flash_tiles(mask._t)
+        return cls([Tensor._wrap(h) for h in handles], (mb, mh, -(-Q // TILE), -(-KV // TILE)))
 
     @classmethod
     def everything(cls, Q: int, KV: int) -> "_Tiles":
         """No mask: every tile full, so the bit mask is never read."""
-        t = cls.__new__(cls)
+        from ... import int32, tensor
         nq, nk = -(-Q // TILE), -(-KV // TILE)
-        t.bits = np.zeros((1, 1, 1, 1), np.int32)
-        t.kv_count = np.full((1, 1, nq), nk, np.int32)
-        t.kv_list = np.broadcast_to(np.arange(nk, dtype=np.int32) | _FULL, (1, 1, nq, nk)).copy()
-        t.q_count = np.full((1, 1, nk), nq, np.int32)
-        t.q_list = np.broadcast_to(np.arange(nq, dtype=np.int32) | _FULL, (1, 1, nk, nq)).copy()
-        t.shape = (1, 1, nq, nk)
-        return t
+        arrays = (np.zeros((1, 1, 1, 1), np.int32), np.full((1, 1, nq), nk, np.int32),
+                  np.broadcast_to(np.arange(nk, dtype=np.int32) | _FULL, (1, 1, nq, nk)).copy(),
+                  np.full((1, 1, nk), nq, np.int32),
+                  np.broadcast_to(np.arange(nq, dtype=np.int32) | _FULL, (1, 1, nk, nq)).copy())
+        return cls([tensor(a, dtype=int32) for a in arrays], (1, 1, nq, nk))
 
-    def __init__(self, dense: np.ndarray) -> None:
-        mb, mh, Q, KV = dense.shape
-        nq, nk = -(-Q // TILE), -(-KV // TILE)
-        padded = np.zeros((mb, mh, nq * TILE, nk * TILE), bool)
-        padded[..., :Q, :KV] = dense
-        valid = np.zeros_like(padded)
-        valid[..., :Q, :KV] = True
-        words = np.packbits(padded[..., :Q, :].reshape(mb, mh, Q, nk, TILE), axis=-1, bitorder="little")
-        self.bits = words.view(np.uint32).reshape(mb, mh, Q, nk).view(np.int32)
-        blocks = padded.reshape(mb, mh, nq, TILE, nk, TILE)
-        touched = blocks.any(axis=(3, 5))                                                    # (mb, mh, nq, nk)
-        full = (blocks | ~valid.reshape(blocks.shape)).all(axis=(3, 5)) & touched
-        self.kv_count, self.kv_list = self._lists(touched, full)
-        self.q_count, self.q_list = self._lists(touched.swapaxes(-1, -2), full.swapaxes(-1, -2))
-        self.shape = (mb, mh, nq, nk)
+    def handles(self):
+        return [t._t for t in self.tensors]
 
-    @staticmethod
-    def _lists(touched: np.ndarray, full: np.ndarray):
-        count = touched.sum(-1).astype(np.int32)
-        order = np.argsort(~touched, axis=-1, kind="stable").astype(np.int32)  # touched first, ascending
-        flags = np.take_along_axis(full, order, -1)
-        entries = np.where(np.arange(order.shape[-1]) < count[..., None], order | (flags * _FULL), 0)
-        return count, entries.astype(np.int32)
-
-    def on_device(self):
-        """(bits, kv_count, kv_list, q_count, q_list) as grilly int32 tensors (cached)."""
-        if not hasattr(self, "_device"):
-            from ... import int32, tensor
-            self._device = tuple(tensor(a, dtype=int32) for a in (self.bits, self.kv_count, self.kv_list,
-                                                                  self.q_count, self.q_list))
-        return self._device
+    def numpy(self):
+        """(bits, kv_count, kv_list, q_count, q_list) on the host, for inspection."""
+        return tuple(t.numpy() for t in self.tensors)
 
 
 class BlockMask:
@@ -181,14 +166,15 @@ class BlockMask:
 
     def tiles(self) -> _Tiles:
         if self._tiles is None:
-            self._tiles = _Tiles(self.mask.numpy())
+            self._tiles = _Tiles.from_mask(self.mask)
         return self._tiles
 
     def sparsity(self) -> float:
         """Percent of key tiles the kernels skip (torch's BlockMask.sparsity,
-        at grilly's 32x32 tiles)."""
+        at grilly's 32x32 tiles). Downloads the per-tile counts."""
         t = self.tiles()
-        return 100.0 * (1.0 - t.kv_count.sum() / t.kv_count.size / t.shape[-1])
+        counts = t.tensors[1].numpy()
+        return 100.0 * (1.0 - counts.sum() / counts.size / t.shape[-1])
 
     @property
     def shape(self):
@@ -238,8 +224,13 @@ def _fused(q: Tensor, k: Tensor, v: Tensor, block_mask, scale: float):
     from ... import _C
     L, S = q.shape[2], k.shape[2]
     tiles = block_mask.tiles() if block_mask is not None else _unmasked(L, S)
-    handles = [t._t for t in tiles.on_device()]
-    out, lse = _C.flex_attention(q._t, k._t, v._t, handles, tiles.shape[0], tiles.shape[1], float(scale))
+    return _run(q, k, v, tiles, scale)
+
+
+def _run(q: Tensor, k: Tensor, v: Tensor, tiles: _Tiles, scale: float):
+    """(out, lse) of the fused kernels for (B, H, L, D) inputs."""
+    from ... import _C
+    out, lse = _C.flex_attention(q._t, k._t, v._t, tiles.handles(), tiles.shape[0], tiles.shape[1], float(scale))
     return Tensor._wrap(out), Tensor._wrap(lse)
 
 

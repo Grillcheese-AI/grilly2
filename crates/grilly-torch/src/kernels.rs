@@ -77,3 +77,13 @@ pub const FLASH_BWD_Q: Kernel = Kernel {
     push_words: 15,
     local_size: [256, 1, 1],
 };
+
+/// Tile lists from a bool mask (g2-flash-tiles.glsl), in four stages.
+/// Bindings: mask, bits, flags, kv_count, kv_list, q_count, q_list. Push:
+/// {stage, planes, L, S, nq, nk, mask_off}.
+pub const FLASH_TILES: Kernel = Kernel {
+    shader: "g2-flash-tiles",
+    bindings: 7,
+    push_words: 7,
+    local_size: [256, 1, 1],
+};
