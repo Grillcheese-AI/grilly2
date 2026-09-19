@@ -7,7 +7,7 @@ pub mod math;
 pub mod shape;
 
 use grilly_core::autograd::{self, Backward, SavedTensor};
-use grilly_core::{Arg, Error, Result, Tensor};
+use grilly_core::{require_float, Arg, Error, Result, Tensor};
 
 pub use grilly_core::add;
 
@@ -46,6 +46,7 @@ impl Backward for ReluBackward {
 
 /// `torch.relu(input)`.
 pub fn relu(input: &Tensor) -> Result<Tensor> {
+    require_float("relu", input.dtype())?;
     let mut out = Tensor::empty(input.device(), input.shape())?;
     let n = u32_dim(input.numel(), "numel")?;
     if n > 0 {
@@ -146,6 +147,9 @@ impl Backward for LinearBackward {
 /// `input` is `(*, in_features)`, `weight` is `(out_features, in_features)`,
 /// `bias` is `(out_features,)`.
 pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+    for t in [Some(input), Some(weight), bias].into_iter().flatten() {
+        require_float("linear", t.dtype())?;
+    }
     let (Some(&in_features), [out_features, w_in]) = (input.shape().last(), weight.shape()) else {
         return Err(Error::Shape(format!(
             "linear: expected input (*, in_features) and weight (out_features, in_features), got {:?} and {:?}",

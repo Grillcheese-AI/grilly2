@@ -101,6 +101,24 @@ impl Generator {
         out
     }
 
+    /// `n` integers uniform in [low, high): each value takes two words `a`,
+    /// `b` of the stream as `low + ((b << 32 | a) mod (high - low))`, so the
+    /// modulo bias is below 2^-32 for any range.
+    pub fn integers(&mut self, n: usize, low: i64, high: i64) -> Vec<i64> {
+        let range = (high as i128 - low as i128) as u128;
+        let mut out = Vec::with_capacity(n);
+        while out.len() < n {
+            let w = self.next_block();
+            for pair in [(w[0], w[1]), (w[2], w[3])] {
+                if out.len() < n {
+                    let x = ((pair.1 as u64) << 32 | pair.0 as u64) as u128;
+                    out.push((low as i128 + (x % range) as i128) as i64);
+                }
+            }
+        }
+        out
+    }
+
     /// `n` values from the standard normal distribution.
     pub fn normal(&mut self, n: usize) -> Vec<f32> {
         const SCALE: f64 = 1.0 / (1u32 << 24) as f64;

@@ -30,7 +30,7 @@ pub fn broadcast_raw(t: &Tensor, shape: &[usize]) -> Result<Tensor> {
     let src: Vec<usize> = (0..shape.len())
         .map(|i| if i < lead || t.shape()[i - lead] == 1 { 0 } else { own[i - lead] })
         .collect();
-    let out = Tensor::empty(t.device(), shape)?;
+    let out = Tensor::empty_typed(t.device(), shape, t.dtype())?;
     k::copy_strided(t, t.offset(), &src, &out, 0, &contiguous_strides(shape), shape)?;
     Ok(out)
 }
@@ -51,7 +51,7 @@ fn permute_raw(x: &Tensor, dims: &[usize]) -> Result<Tensor> {
     let own = strides_of(x);
     let shape: Vec<usize> = dims.iter().map(|&d| x.shape()[d]).collect();
     let src: Vec<usize> = dims.iter().map(|&d| own[d]).collect();
-    let out = Tensor::empty(x.device(), &shape)?;
+    let out = Tensor::empty_typed(x.device(), &shape, x.dtype())?;
     k::copy_strided(x, x.offset(), &src, &out, 0, &contiguous_strides(&shape), &shape)?;
     Ok(out)
 }
@@ -90,7 +90,7 @@ pub fn transpose(x: &Tensor, d0: usize, d1: usize) -> Result<Tensor> {
 /// `shape` (offset relative to `x`'s first element): torch's basic indexing
 /// and slicing. `name` is the grad_fn torch reports.
 pub fn strided_read(x: &Tensor, offset: usize, strides: &[usize], shape: &[usize], name: &'static str) -> Result<Tensor> {
-    let mut out = Tensor::empty(x.device(), shape)?;
+    let mut out = Tensor::empty_typed(x.device(), shape, x.dtype())?;
     k::copy_strided(x, x.offset() + offset, strides, &out, 0, &contiguous_strides(shape), shape)?;
     out.mark_view_copy();
     let (in_shape, strides, shape) = (x.shape().to_vec(), strides.to_vec(), shape.to_vec());
@@ -133,12 +133,16 @@ pub fn select(x: &Tensor, dim: usize, index: usize) -> Result<Tensor> {
 /// torch's `dst[index] = value`. An in-place op: torch's rules apply.
 pub fn write_region(dst: &Tensor, offset: usize, strides: &[usize], shape: &[usize], value: &Tensor) -> Result<()> {
     dst.check_inplace(&[value])?;
-    let v = broadcast_raw(value, shape)?;
+    // torch converts the value to the destination's dtype.
+    let v = broadcast_raw(&value.cast(dst.dtype())?, shape)?;
     k::write_strided(&v, v.offset(), &contiguous_strides(shape), dst, dst.offset() + offset, strides, shape)
 }
 
 fn check_cat(xs: &[&Tensor], dim: usize, what: &str) -> Result<()> {
     let first = xs.first().ok_or_else(|| Error::Invalid(format!("{what}(): expected a non-empty list of Tensors")))?;
+    if xs.iter().any(|t| t.dtype() != first.dtype()) {
+        return Err(Error::NotImplemented(format!("{what}() of tensors with different dtypes (type promotion)")));
+    }
     for t in xs {
         let same = t.dim() == first.dim()
             && t.shape().iter().zip(first.shape()).enumerate().all(|(i, (a, b))| a == b || (what == "cat" && i == dim));
@@ -162,7 +166,7 @@ pub fn cat(xs: &[&Tensor], dim: usize) -> Result<Tensor> {
     }
     let mut shape = xs[0].shape().to_vec();
     shape[dim] = xs.iter().map(|t| t.shape()[dim]).sum();
-    let mut out = Tensor::empty(xs[0].device(), &shape)?;
+    let mut out = Tensor::empty_typed(xs[0].device(), &shape, xs[0].dtype())?;
     let out_strides = contiguous_strides(&shape);
     let mut starts = Vec::with_capacity(xs.len());
     let mut at = 0;
@@ -189,7 +193,7 @@ pub fn stack(xs: &[&Tensor], dim: usize) -> Result<Tensor> {
     }
     let mut shape = xs[0].shape().to_vec();
     shape.insert(dim, xs.len());
-    let mut out = Tensor::empty(xs[0].device(), &shape)?;
+    let mut out = Tensor::empty_typed(xs[0].device(), &shape, xs[0].dtype())?;
     let out_strides = contiguous_strides(&shape);
     let mut dst_strides = out_strides.clone();
     dst_strides.remove(dim);

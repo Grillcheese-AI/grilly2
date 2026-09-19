@@ -99,7 +99,6 @@ def test_distributions():
 
 
 @pytest.mark.parametrize("call", [
-    lambda: grilly.randint(0, 2, (3,)),
     lambda: grilly.Generator(device="cuda"),
     lambda: grilly.Generator().get_state(),
     lambda: grilly.randn(3, out=grilly.zeros(3)),

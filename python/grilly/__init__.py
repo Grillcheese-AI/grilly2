@@ -16,7 +16,7 @@ from . import _C
 
 __all__ = [
     "Generator", "Size", "Tensor", "add", "default_generator", "device", "dtype", "empty",
-    "enable_grad", "float32", "from_numpy", "full", "initial_seed",
+    "arange", "enable_grad", "float32", "from_numpy", "full", "initial_seed",
     "is_grad_enabled", "is_tensor", "manual_seed", "no_grad", "ones", "rand",
     "rand_like", "randint", "randn", "randn_like", "relu", "seed",
     "set_grad_enabled", "tensor", "zeros",
@@ -52,7 +52,21 @@ int8 = dtype("int8", False)
 uint8 = dtype("uint8", False)
 bool = dtype("bool", False)  # noqa: A001 - torch.bool
 
-_SUPPORTED = (float32,)
+# dtypes grilly stores, with their DType codes (grilly_core::DType::code),
+# numpy equivalents and torch's element sizes.
+_CODES = {float32: 0, int64: 1, int32: 2, bool: 3}
+_BY_CODE = {c: d for d, c in _CODES.items()}
+_NUMPY = {float32: _np.float32, int64: _np.int64, int32: _np.int32, bool: _np.bool_}
+_ITEMSIZE = {float32: 4, int64: 8, int32: 4, bool: 1}
+_FROM_NUMPY = {_np.dtype(_np.float32): float32, _np.dtype(_np.int64): int64,
+               _np.dtype(_np.int32): int32, _np.dtype(_np.bool_): bool}
+_SUPPORTED = tuple(_CODES)
+
+
+def _code(dt) -> _builtins.int:
+    if dt not in _CODES:
+        raise _not_yet(f"dtype {dt!r} (grilly has float32, int64, int32 and bool)")
+    return _CODES[dt]
 
 
 def _this_module():
@@ -126,13 +140,13 @@ def _resolve_device(d) -> device:
 
 
 def _check_factory_args(dtype_, device_, requires_grad=False) -> None:
-    if dtype_ is not None and dtype_ not in _SUPPORTED:
-        raise _not_yet(f"dtype {dtype_!r} (only grilly.float32 so far)")
+    if dtype_ is not None:
+        _code(dtype_)
     _resolve_device(device_)
 
 
 def _cast(t: "Tensor", dt) -> "Tensor":
-    raise _not_yet(f"converting to {dt!r} (only float32 so far)")
+    return Tensor._wrap(t._t.cast(_code(dt)))
 
 
 def _leaf(t: "Tensor", requires_grad) -> "Tensor":
@@ -187,7 +201,7 @@ def _resolve_shape(shape: tuple[_builtins.int, ...], numel: _builtins.int) -> li
         if known == 0 or numel % known:
             raise RuntimeError(f"shape '{list(shape)}' is invalid for input of size {numel}")
         shape = tuple(numel // known if d == -1 else d for d in shape)
-    if any(d < 0 for d in shape):
+    if _builtins.any(d < 0 for d in shape):
         raise RuntimeError(f"invalid shape dimension in {list(shape)}")
     return list(shape)
 
@@ -230,7 +244,42 @@ class Tensor:
 
     @property
     def dtype(self) -> dtype:
-        return float32
+        return _BY_CODE[self._t.dtype]
+
+    def is_floating_point(self) -> _builtins.bool:
+        return self.dtype.is_floating_point
+
+    def element_size(self) -> _builtins.int:
+        return _ITEMSIZE[self.dtype]
+
+    @property
+    def itemsize(self) -> _builtins.int:
+        return _ITEMSIZE[self.dtype]
+
+    @property
+    def nbytes(self) -> _builtins.int:
+        return self.numel() * _ITEMSIZE[self.dtype]
+
+    def float(self) -> "Tensor":
+        return self.to(float32)
+
+    def long(self) -> "Tensor":
+        return self.to(int64)
+
+    def int(self) -> "Tensor":
+        return self.to(int32)
+
+    def bool(self) -> "Tensor":
+        return self.to(bool)
+
+    def double(self) -> "Tensor":
+        raise _not_yet("float64 tensors")
+
+    def half(self) -> "Tensor":
+        raise _not_yet("float16 tensors")
+
+    def type_as(self, other) -> "Tensor":
+        return self.to(_require_tensor("other", other).dtype)
 
     @property
     def device(self) -> device:
@@ -399,18 +448,20 @@ class Tensor:
         return self._host()
 
     def _host(self) -> _np.ndarray:
-        data = _np.frombuffer(self._t.to_bytes(), dtype="<f4")
-        return data.reshape(self._t.shape).copy()
+        dt = self.dtype
+        raw = {float32: "<f4", int64: "<i8", int32: "<i4", bool: "<u4"}[dt]
+        data = _np.frombuffer(self._t.to_bytes(), dtype=raw).reshape(self._t.shape)
+        return data.astype(_np.bool_) if dt is bool else data.copy()
 
     def tolist(self):
         return self._host().tolist()
 
-    def item(self) -> _builtins.float:
+    def item(self):
         if self.numel() != 1:
             raise RuntimeError(
                 f"a Tensor with {self.numel()} elements cannot be converted to Scalar"
             )
-        return _builtins.float(self._host().reshape(()))
+        return self._host().reshape(()).item()
 
     def __len__(self) -> _builtins.int:
         if self.dim() == 0:
@@ -422,12 +473,13 @@ class Tensor:
             self._host(), separator=", ", prefix="tensor(",
             formatter={"float_kind": lambda v: f"{v:.4f}"},
         )
+        extra = "" if self.dtype in (float32, int64, bool) else f", dtype={self.dtype!r}"
         name = self._t.grad_fn_name
         if name is not None:
-            return f"tensor({body}, grad_fn=<{name}>)"
+            return f"tensor({body}{extra}, grad_fn=<{name}>)"
         if self.requires_grad:
-            return f"tensor({body}, requires_grad=True)"
-        return f"tensor({body})"
+            return f"tensor({body}{extra}, requires_grad=True)"
+        return f"tensor({body}{extra})"
 
     # views
     def reshape(self, *shape) -> "Tensor":
@@ -458,26 +510,43 @@ def _require_tensor(name: str, value) -> Tensor:
 
 # ── creation ─────────────────────────────────────────────────────────────
 
-def _from_array(arr: _np.ndarray) -> Tensor:
+def _from_array(arr: _np.ndarray, dt=None) -> Tensor:
+    """Upload a numpy array; `dt` defaults to the array's own dtype."""
+    arr = _np.asarray(arr)
+    dt = _FROM_NUMPY.get(arr.dtype) if dt is None else dt
+    if dt is None:
+        raise _not_yet(f"tensors of numpy dtype {arr.dtype} (grilly has float32, int64, int32 and bool)")
+    stored = _np.uint32 if dt is bool else _NUMPY[dt]
     # Not ascontiguousarray: it turns 0-d arrays into 1-d.
-    arr = _np.asarray(arr, dtype="<f4", order="C")
-    return Tensor._wrap(_C.Tensor.from_bytes(arr.tobytes(), list(arr.shape)))
+    arr = _np.asarray(arr.astype(_NUMPY[dt]), dtype=stored, order="C")
+    return Tensor._wrap(_C.Tensor.from_bytes(arr.tobytes(), list(arr.shape), _code(dt)))
+
+
+def _infer_dtype(arr: _np.ndarray):
+    """torch's inference for Python data: floats -> float32, ints -> int64, bools -> bool."""
+    kind = arr.dtype.kind
+    if kind == "f":
+        return float32
+    if kind in "iu":
+        return int64
+    if kind == "b":
+        return bool
+    raise TypeError(f"Could not infer dtype of {arr.dtype}")
 
 
 def tensor(data, *, dtype=None, device=None, requires_grad=False) -> Tensor:
-    """Copy ``data`` (nested sequences, a scalar, or an ndarray) to a tensor."""
+    """Copy ``data`` (nested sequences, a scalar, an ndarray or a tensor)."""
     _check_factory_args(dtype, device)
     if isinstance(data, Tensor):  # torch copies here too, detached
-        return _leaf(_from_array(data._host()), requires_grad)
-    if isinstance(data, _np.ndarray):
-        if data.dtype != _np.float32 and dtype is None:
-            raise _not_yet(f"tensors of numpy dtype {data.dtype} (only float32 so far)")
-        return _leaf(_from_array(data), requires_grad)
-    arr = _np.asarray(data)
-    # torch infers float32 from Python floats and int64/bool from ints/bools.
-    if arr.dtype.kind == "f" or (dtype is float32 and arr.dtype.kind in "iub"):
-        return _leaf(_from_array(arr.astype(_np.float32)), requires_grad)
-    raise _not_yet(f"tensors of inferred dtype {arr.dtype} (only float32 so far)")
+        arr, inferred = data._host(), data.dtype
+    elif isinstance(data, _np.ndarray):
+        arr, inferred = data, _FROM_NUMPY.get(data.dtype)
+        if inferred is None and dtype is None:
+            raise _not_yet(f"tensors of numpy dtype {data.dtype} (grilly has float32, int64, int32 and bool)")
+    else:
+        arr = _np.asarray(data)
+        inferred = _infer_dtype(arr)
+    return _leaf(_from_array(arr, dtype or inferred), requires_grad)
 
 
 def from_numpy(ndarray: _np.ndarray) -> Tensor:
@@ -485,34 +554,68 @@ def from_numpy(ndarray: _np.ndarray) -> Tensor:
     to ``ndarray`` are not seen by the tensor, and vice versa."""
     if not isinstance(ndarray, _np.ndarray):
         raise TypeError(f"expected np.ndarray (got {type(ndarray).__name__})")
-    if ndarray.dtype != _np.float32:
-        raise _not_yet(f"from_numpy for dtype {ndarray.dtype} (only float32 so far)")
+    if ndarray.dtype not in _FROM_NUMPY:
+        raise _not_yet(f"from_numpy for dtype {ndarray.dtype} (grilly has float32, int64, int32 and bool)")
     return _from_array(ndarray)
 
 
 def empty(*size, dtype=None, device=None, requires_grad=False) -> Tensor:
     _check_factory_args(dtype, device)
-    return _leaf(Tensor._wrap(_C.Tensor.empty(list(_size_args(size)))), requires_grad)
+    t = Tensor._wrap(_C.Tensor.empty(list(_size_args(size)), _code(dtype or float32)))
+    return _leaf(t, requires_grad)
 
 
 def full(size, fill_value, *, dtype=None, device=None, requires_grad=False) -> Tensor:
     _check_factory_args(dtype, device)
-    if isinstance(fill_value, _builtins.bool) or not isinstance(fill_value, (_builtins.int, _builtins.float)):
-        raise _not_yet(f"full with a {type(fill_value).__name__} fill value (only float32 tensors so far)")
-    if isinstance(fill_value, _builtins.int) and dtype is None:
-        raise _not_yet("full with an int fill value (torch makes an int64 tensor)")
-    t = Tensor._wrap(_C.Tensor.full(list(_size_args((size,))), _builtins.float(fill_value)))
+    if dtype is None:  # torch infers from the fill value
+        if isinstance(fill_value, _builtins.bool):
+            dtype = bool
+        elif isinstance(fill_value, (_builtins.int, _np.integer)):
+            dtype = int64
+        elif isinstance(fill_value, (_builtins.float, _np.floating)):
+            dtype = float32
+        else:
+            raise TypeError(f"full(): fill_value must be a number, not {type(fill_value).__name__}")
+    t = Tensor._wrap(_C.Tensor.full(list(_size_args((size,))), _builtins.float(fill_value), _code(dtype)))
     return _leaf(t, requires_grad)
 
 
 def zeros(*size, dtype=None, device=None, requires_grad=False) -> Tensor:
     _check_factory_args(dtype, device)
-    return _leaf(Tensor._wrap(_C.Tensor.full(list(_size_args(size)), 0.0)), requires_grad)
+    t = Tensor._wrap(_C.Tensor.full(list(_size_args(size)), 0.0, _code(dtype or float32)))
+    return _leaf(t, requires_grad)
 
 
 def ones(*size, dtype=None, device=None, requires_grad=False) -> Tensor:
     _check_factory_args(dtype, device)
-    return _leaf(Tensor._wrap(_C.Tensor.full(list(_size_args(size)), 1.0)), requires_grad)
+    t = Tensor._wrap(_C.Tensor.full(list(_size_args(size)), 1.0, _code(dtype or float32)))
+    return _leaf(t, requires_grad)
+
+
+def arange(start=0, end=None, step=1, *, out=None, dtype=None, layout=None, device=None,
+           requires_grad=False) -> Tensor:
+    """Like ``torch.arange``: int64 when every argument is an int, else float32;
+    float values are ``start + i * step`` computed in float64, as torch does."""
+    if out is not None:
+        raise _not_yet("the out= argument")
+    _check_factory_args(dtype, device)
+    if end is None:
+        start, end = 0, start
+    args = [v.item() if isinstance(v, Tensor) else v for v in (start, end, step)]
+    start, end, step = args
+    if step == 0:
+        raise RuntimeError("step must be nonzero")
+    if (end - start) * step < 0:
+        raise RuntimeError("upper bound and larger bound inconsistent with step sign")
+    integral = _builtins.all(isinstance(v, (_builtins.int, _np.integer)) and not isinstance(v, _builtins.bool) for v in args)
+    if integral:
+        n = _builtins.max(0, -(-(end - start) // step))
+        values = _np.arange(n, dtype=_np.int64) * step + start
+    else:
+        n = _builtins.max(0, _math.ceil((end - start) / step))
+        values = start + _np.arange(n, dtype=_np.float64) * step
+    t = _from_array(values, dtype or (int64 if integral else float32))
+    return _leaf(t, requires_grad)
 
 
 # ── ops ──────────────────────────────────────────────────────────────────
@@ -537,6 +640,8 @@ def _random(kind: str, size, generator, dtype_, device, requires_grad, out) -> T
     if out is not None:
         raise _not_yet("the out= argument")
     _check_factory_args(dtype_, device)
+    if dtype_ is not None and dtype_ is not float32:
+        raise RuntimeError(f"{'normal' if kind == 'normal' else 'uniform'} expects a floating point dtype, got {dtype_!r}")
     t = Tensor._wrap(getattr(_generator(generator)._g, kind)(list(_size_args(size))))
     return _leaf(t, requires_grad)
 
@@ -565,11 +670,26 @@ def rand_like(input: Tensor, *, dtype=None, layout=None, device=None,
                 requires_grad=requires_grad)
 
 
-def randint(*args, **kwargs):
-    raise NotImplementedError(
-        "grilly: randint is not implemented yet (it returns int64 tensors, "
-        "and integer dtypes are not implemented yet)"
-    )
+def randint(*args, size=None, generator=None, out=None, dtype=None, layout=None, device=None,
+            requires_grad=False, pin_memory=False) -> Tensor:
+    """``randint(high, size)`` or ``randint(low, high, size)``: int64 uniform in
+    [low, high); deterministic per seed, not torch's values."""
+    if out is not None:
+        raise _not_yet("the out= argument")
+    args = list(args)
+    if size is None and args and isinstance(args[-1], (tuple, list)):
+        size = args.pop()
+    if size is None:
+        raise TypeError("randint() missing required argument 'size'")
+    low, high = (0, args[0]) if len(args) == 1 else args
+    low, high = _builtins.int(low), _builtins.int(high)
+    if low >= high:
+        raise RuntimeError(f"random_ expects 'from' to be less than 'to', but got from={low} >= to={high}")
+    _check_factory_args(dtype, device)
+    t = Tensor._wrap(_generator(generator)._g.integers(list(_size_args((size,))), low, high))
+    if dtype is not None and dtype is not int64:
+        t = _cast(t, dtype)
+    return _leaf(t, requires_grad)
 
 
 # ── tensor operations ────────────────────────────────────────────────────

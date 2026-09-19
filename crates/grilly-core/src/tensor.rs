@@ -1,34 +1,33 @@
 use std::sync::Arc;
 
 use crate::autograd::{self, Backward, Meta};
-use crate::rng::Generator;
-use crate::ops;
 use crate::device::{Buffer, Device, MemClass};
+use crate::dtype::{require_float, DType};
 use crate::error::{Error, Result};
+use crate::ops;
+use crate::rng::Generator;
 
-/// A float32 tensor in GPU memory: a shape over a contiguous row-major run of
-/// elements in a shared buffer, plus its autograd state.
+/// A tensor in GPU memory: a shape over a contiguous row-major run of
+/// elements of one dtype in a shared buffer, plus its autograd state.
 ///
 /// Cloning a `Tensor` makes another handle to the *same* tensor (same data,
 /// same `requires_grad` and `.grad`), like a second Python reference in torch.
 /// [`Tensor::clone_data`] is torch's `clone()`.
 ///
-/// Strided views and other dtypes are not implemented yet; every tensor is
-/// contiguous float32.
+/// Strided views are not implemented yet; every tensor is contiguous.
 #[derive(Clone)]
 pub struct Tensor {
     storage: Arc<Buffer>,
     shape: Vec<usize>,
     /// Offset of the first element, in elements.
     offset: usize,
+    dtype: DType,
     meta: Arc<Meta>,
     /// A copy standing in for what torch returns as a view (transpose,
     /// expand, slicing). Writing through it would not reach the original, so
     /// in-place ops on it are refused rather than silently diverging.
     view_copy: bool,
 }
-
-const ELEM: usize = std::mem::size_of::<f32>();
 
 fn numel_of(shape: &[usize]) -> Result<usize> {
     shape.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d)).ok_or_else(|| {
@@ -61,40 +60,60 @@ impl Backward for CloneBackward {
 }
 
 impl Tensor {
-    fn from_parts(storage: Arc<Buffer>, shape: Vec<usize>, offset: usize) -> Tensor {
-        Tensor { storage, shape, offset, meta: Arc::new(Meta::leaf()), view_copy: false }
+    fn from_parts(storage: Arc<Buffer>, shape: Vec<usize>, offset: usize, dtype: DType) -> Tensor {
+        Tensor { storage, shape, offset, dtype, meta: Arc::new(Meta::leaf()), view_copy: false }
     }
 
-    /// A tensor with undefined contents.
+    /// A float32 tensor with undefined contents.
     pub fn empty(device: &Device, shape: &[usize]) -> Result<Tensor> {
+        Tensor::empty_typed(device, shape, DType::F32)
+    }
+
+    /// A tensor of `dtype` with undefined contents.
+    pub fn empty_typed(device: &Device, shape: &[usize], dtype: DType) -> Result<Tensor> {
         let bytes = numel_of(shape)?
-            .checked_mul(ELEM)
+            .checked_mul(dtype.size())
             .ok_or_else(|| Error::Shape(format!("shape {shape:?} is too large")))?;
         // Zero-element tensors still get a minimal allocation.
-        let storage = device.alloc(bytes.max(ELEM) as u64, MemClass::Device)?;
-        Ok(Tensor::from_parts(Arc::new(storage), shape.to_vec(), 0))
+        let storage = device.alloc(bytes.max(8) as u64, MemClass::Device)?;
+        Ok(Tensor::from_parts(Arc::new(storage), shape.to_vec(), 0, dtype))
     }
 
-    /// Copy `data` (row-major) to a new tensor of the given shape.
+    /// Copy float32 `data` (row-major) to a new tensor of the given shape.
     pub fn from_slice(device: &Device, data: &[f32], shape: &[usize]) -> Result<Tensor> {
+        Tensor::from_bytes(device, as_bytes(data), shape, DType::F32)
+    }
+
+    /// A new tensor from its elements as stored (little-endian; bool as one
+    /// u32 0/1 per element), row-major.
+    pub fn from_bytes(device: &Device, data: &[u8], shape: &[usize], dtype: DType) -> Result<Tensor> {
         let n = numel_of(shape)?;
-        if n != data.len() {
+        if data.len() != n * dtype.size() {
             return Err(Error::Shape(format!(
-                "shape {shape:?} needs {n} elements, got {}",
+                "shape {shape:?} of {} needs {} bytes, got {}",
+                dtype.name(),
+                n * dtype.size(),
                 data.len()
             )));
         }
-        let t = Tensor::empty(device, shape)?;
+        let t = Tensor::empty_typed(device, shape, dtype)?;
         if n > 0 {
-            t.storage.write(0, as_bytes(data))?;
+            t.storage.write(0, data)?;
         }
         Ok(t)
     }
 
-    /// Every element `value`, filled on the device.
+    /// Every element `value`, as float32, filled on the device.
     pub fn full(device: &Device, shape: &[usize], value: f32) -> Result<Tensor> {
         let t = Tensor::empty(device, shape)?;
         device.record_fill(&t.storage, t.byte_offset(), t.byte_len(), value.to_bits())?;
+        Ok(t)
+    }
+
+    /// Every element `value` converted to `dtype` (torch's `full(..., dtype=)`).
+    pub fn full_typed(device: &Device, shape: &[usize], value: f64, dtype: DType) -> Result<Tensor> {
+        let t = Tensor::empty_typed(device, shape, dtype)?;
+        t.fill_raw(value)?;
         Ok(t)
     }
 
@@ -102,9 +121,23 @@ impl Tensor {
         Tensor::full(device, shape, 0.0)
     }
 
+    /// Write `value` to every element, without version or autograd checks.
+    fn fill_raw(&self, value: f64) -> Result<()> {
+        let pattern = self.dtype.encode(value);
+        if pattern.len() == 4 {
+            let word = u32::from_le_bytes(pattern.try_into().unwrap());
+            return self.device().record_fill(&self.storage, self.byte_offset(), self.byte_len(), word);
+        }
+        // A multi-word element: broadcast one stored element with a strided copy.
+        let one = Tensor::from_bytes(self.device(), &pattern, &[], self.dtype)?;
+        let zero_strides = vec![0; self.dim()];
+        let strides = crate::generic::contiguous_strides(&self.shape);
+        crate::generic::copy_strided(&one, 0, &zero_strides, self, self.offset, &strides, &self.shape)
+    }
+
     /// A copy of the data in new storage (torch's `clone()`); differentiable.
     pub fn clone_data(&self) -> Result<Tensor> {
-        let mut out = Tensor::empty(self.device(), &self.shape)?;
+        let mut out = Tensor::empty_typed(self.device(), &self.shape, self.dtype)?;
         self.device().record_copy(&self.storage, self.byte_offset(), &out.storage, 0, self.byte_len())?;
         autograd::record("CloneBackward0", &[self], &mut [&mut out], |_| Ok(CloneBackward))?;
         Ok(out)
@@ -117,17 +150,36 @@ impl Tensor {
 
     /// The same data, cut off from the graph (torch's `detach()`).
     pub fn detach(&self) -> Tensor {
-        Tensor::from_parts(self.storage.clone(), self.shape.clone(), self.offset)
+        Tensor::from_parts(self.storage.clone(), self.shape.clone(), self.offset, self.dtype)
     }
 
-    /// Copy the elements back to the host (row-major). Waits for pending work.
+    /// The element type.
+    pub fn dtype(&self) -> DType {
+        self.dtype
+    }
+
+    /// The elements converted to `dtype` (torch's `.to(dtype)`): this tensor
+    /// when the dtype already matches, otherwise a new one. Conversions are
+    /// not differentiable (only float32 can require grad).
+    pub fn cast(&self, dtype: DType) -> Result<Tensor> {
+        if dtype == self.dtype {
+            return Ok(self.clone());
+        }
+        crate::generic::cast(self, dtype)
+    }
+
+    /// Copy float32 elements back to the host (row-major). Waits for pending work.
     pub fn to_vec(&self) -> Result<Vec<f32>> {
-        let mut out = vec![0f32; self.numel()];
+        require_float("to_vec", self.dtype)?;
+        let bytes = self.to_bytes()?;
+        Ok(bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect())
+    }
+
+    /// The elements as stored (see [`Tensor::from_bytes`]). Waits for pending work.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut out = vec![0u8; self.numel() * self.dtype.size()];
         if !out.is_empty() {
-            let bytes = unsafe {
-                std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, out.len() * ELEM)
-            };
-            self.storage.read(self.byte_offset(), bytes)?;
+            self.storage.read(self.byte_offset(), &mut out)?;
         }
         Ok(out)
     }
@@ -157,7 +209,7 @@ impl Tensor {
                 self.numel()
             )));
         }
-        let mut out = Tensor::from_parts(self.storage.clone(), shape.to_vec(), self.offset);
+        let mut out = Tensor::from_parts(self.storage.clone(), shape.to_vec(), self.offset, self.dtype);
         out.view_copy = self.view_copy;
         let input_shape = self.shape.clone();
         autograd::record("ViewBackward0", &[self], &mut [&mut out], |_| Ok(ViewBackward { input_shape }))?;
@@ -172,6 +224,9 @@ impl Tensor {
 
     /// torch's `requires_grad_()`: only leaves can change it.
     pub fn set_requires_grad(&self, value: bool) -> Result<()> {
+        if value && !self.dtype.is_floating() {
+            return Err(Error::Invalid("only Tensors of floating point and complex dtype can require gradients".into()));
+        }
         autograd::set_requires_grad(&self.meta, value)
     }
 
@@ -264,9 +319,9 @@ impl Tensor {
     }
 
     /// Every element set to `value` (torch's `fill_`).
-    pub fn fill_(&self, value: f32) -> Result<&Tensor> {
+    pub fn fill_(&self, value: f64) -> Result<&Tensor> {
         self.check_inplace(&[])?;
-        self.device().record_fill(&self.storage, self.byte_offset(), self.byte_len(), value.to_bits())?;
+        self.fill_raw(value)?;
         self.bump_version();
         Ok(self)
     }
@@ -286,6 +341,7 @@ impl Tensor {
             )));
         }
         self.check_inplace(&[src])?;
+        let src = src.cast(self.dtype)?; // torch converts to the destination's dtype
         self.device().record_copy(&src.storage, src.byte_offset(), &self.storage, self.byte_offset(), self.byte_len())?;
         self.bump_version();
         Ok(self)
@@ -302,6 +358,7 @@ impl Tensor {
     /// Samples from N(mean, std^2) (torch's `normal_`); deterministic per
     /// generator, not torch's values.
     pub fn normal_(&self, mean: f32, std: f32, generator: &mut Generator) -> Result<&Tensor> {
+        require_float("normal_", self.dtype)?;
         self.check_inplace(&[])?;
         let values: Vec<f32> = generator.normal(self.numel()).into_iter().map(|z| mean + std * z).collect();
         self.overwrite(&values)
@@ -309,6 +366,7 @@ impl Tensor {
 
     /// Samples uniform in [from, to) (torch's `uniform_`).
     pub fn uniform_(&self, from: f32, to: f32, generator: &mut Generator) -> Result<&Tensor> {
+        require_float("uniform_", self.dtype)?;
         self.check_inplace(&[])?;
         let values: Vec<f32> = generator.uniform(self.numel()).into_iter().map(|u| from + (to - from) * u).collect();
         self.overwrite(&values)
@@ -316,6 +374,7 @@ impl Tensor {
 
     /// `self *= value` (torch's `mul_` with a scalar).
     pub fn mul_(&self, value: f32) -> Result<&Tensor> {
+        require_float("mul_", self.dtype)?;
         self.check_inplace(&[])?;
         crate::generic::unary_inplace(self, crate::generic::Unary::MulScalar, value, 0.0)?;
         Ok(self)
@@ -351,11 +410,11 @@ impl Tensor {
     }
 
     pub(crate) fn byte_offset(&self) -> u64 {
-        (self.offset * ELEM) as u64
+        (self.offset * self.dtype.size()) as u64
     }
 
     pub(crate) fn byte_len(&self) -> u64 {
-        (self.numel() * ELEM) as u64
+        (self.numel() * self.dtype.size()) as u64
     }
 }
 

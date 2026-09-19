@@ -2,6 +2,7 @@
 //! kernels are declared here, once, like every other kernel.
 
 use crate::autograd::{self, Backward};
+use crate::dtype::require_float;
 use crate::error::{Error, Result};
 use crate::kernel::{Arg, Kernel};
 use crate::tensor::Tensor;
@@ -40,6 +41,8 @@ impl Backward for AddBackward {
 
 /// `torch.add(input, other)` for tensors of the same shape.
 pub fn add(input: &Tensor, other: &Tensor) -> Result<Tensor> {
+    require_float("add", input.dtype())?;
+    require_float("add", other.dtype())?;
     same_shape("add", input, other)?;
     let mut out = Tensor::empty(input.device(), input.shape())?;
     let n = numel_u32(input)?;
@@ -53,6 +56,8 @@ pub fn add(input: &Tensor, other: &Tensor) -> Result<Tensor> {
 /// `dst += src` in place, untracked. Used to accumulate `.grad` and by
 /// `Tensor::add_`.
 pub(crate) fn add_into(dst: &Tensor, src: &Tensor) -> Result<()> {
+    require_float("add_", dst.dtype())?;
+    require_float("add_", src.dtype())?;
     same_shape("add_", dst, src)?;
     let n = numel_u32(dst)?;
     if n > 0 {

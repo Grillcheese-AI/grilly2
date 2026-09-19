@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use grilly_core::autograd::{PackedTensor, SavedTensorHooks};
-use grilly_core::{autograd, rng, Device, Error, Tensor};
+use grilly_core::{autograd, rng, DType, Device, Error, Tensor};
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -57,37 +57,44 @@ fn wrap(inner: Tensor) -> PyTensor {
 
 #[pymethods]
 impl PyTensor {
-    /// Build from little-endian float32 bytes in row-major order.
+    /// Build from the elements as stored (little-endian; bool as u32 0/1),
+    /// row-major; `dtype` is a DType code.
     #[staticmethod]
-    fn from_bytes(py: Python<'_>, data: &[u8], shape: Vec<usize>) -> PyResult<PyTensor> {
-        if !data.len().is_multiple_of(4) {
-            return Err(PyRuntimeError::new_err("float32 data must be a multiple of 4 bytes"));
-        }
-        let values: Vec<f32> = data
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-            .collect();
-        let dev = device()?;
-        py.detach(|| Tensor::from_slice(&dev, &values, &shape)).map(wrap).map_err(err)
+    #[pyo3(signature = (data, shape, dtype=0))]
+    fn from_bytes(py: Python<'_>, data: &[u8], shape: Vec<usize>, dtype: u32) -> PyResult<PyTensor> {
+        let (dev, dtype) = (device()?, DType::from_code(dtype).map_err(err)?);
+        py.detach(|| Tensor::from_bytes(&dev, data, &shape, dtype)).map(wrap).map_err(err)
     }
 
     #[staticmethod]
-    fn empty(py: Python<'_>, shape: Vec<usize>) -> PyResult<PyTensor> {
-        let dev = device()?;
-        py.detach(|| Tensor::empty(&dev, &shape)).map(wrap).map_err(err)
+    #[pyo3(signature = (shape, dtype=0))]
+    fn empty(py: Python<'_>, shape: Vec<usize>, dtype: u32) -> PyResult<PyTensor> {
+        let (dev, dtype) = (device()?, DType::from_code(dtype).map_err(err)?);
+        py.detach(|| Tensor::empty_typed(&dev, &shape, dtype)).map(wrap).map_err(err)
     }
 
     #[staticmethod]
-    fn full(py: Python<'_>, shape: Vec<usize>, value: f32) -> PyResult<PyTensor> {
-        let dev = device()?;
-        py.detach(|| Tensor::full(&dev, &shape, value)).map(wrap).map_err(err)
+    #[pyo3(signature = (shape, value, dtype=0))]
+    fn full(py: Python<'_>, shape: Vec<usize>, value: f64, dtype: u32) -> PyResult<PyTensor> {
+        let (dev, dtype) = (device()?, DType::from_code(dtype).map_err(err)?);
+        py.detach(|| Tensor::full_typed(&dev, &shape, value, dtype)).map(wrap).map_err(err)
     }
 
-    /// The elements as little-endian float32 bytes, row-major. Waits for
-    /// pending GPU work.
+    /// The DType code.
+    #[getter]
+    fn dtype(&self) -> u32 {
+        self.inner.dtype().code()
+    }
+
+    fn cast(&self, py: Python<'_>, dtype: u32) -> PyResult<PyTensor> {
+        let (x, dtype) = (self.inner.clone(), DType::from_code(dtype).map_err(err)?);
+        py.detach(move || x.cast(dtype)).map(wrap).map_err(err)
+    }
+
+    /// The elements as stored (little-endian; bool as u32 0/1), row-major.
+    /// Waits for pending GPU work.
     fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let values = py.detach(|| self.inner.to_vec()).map_err(err)?;
-        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let bytes = py.detach(|| self.inner.to_bytes()).map_err(err)?;
         Ok(PyBytes::new(py, &bytes))
     }
 
@@ -157,7 +164,7 @@ impl PyTensor {
         py.detach(|| self.inner.add_(&other.inner).map(|_| ())).map_err(err)
     }
 
-    fn fill_(&self, py: Python<'_>, value: f32) -> PyResult<()> {
+    fn fill_(&self, py: Python<'_>, value: f64) -> PyResult<()> {
         py.detach(|| self.inner.fill_(value).map(|_| ())).map_err(err)
     }
 
@@ -260,6 +267,14 @@ impl PyGenerator {
         let values = self.inner.normal(n);
         let dev = device()?;
         py.detach(|| Tensor::from_slice(&dev, &values, &shape)).map(wrap).map_err(err)
+    }
+
+    /// int64 tensor uniform in [low, high).
+    fn integers(&mut self, py: Python<'_>, shape: Vec<usize>, low: i64, high: i64) -> PyResult<PyTensor> {
+        let n = shape.iter().product();
+        let bytes: Vec<u8> = self.inner.integers(n, low, high).iter().flat_map(|v| v.to_le_bytes()).collect();
+        let dev = device()?;
+        py.detach(|| Tensor::from_bytes(&dev, &bytes, &shape, DType::I64)).map(wrap).map_err(err)
     }
 
     /// Float32 tensor uniform in [0, 1).

@@ -2,13 +2,15 @@
 #extension GL_GOOGLE_include_directive : require
 // dst[dst_off + sum c_d * ds_d] = src[src_off + sum c_d * ss_d] for every
 // coordinate c of `shape`. Materializes transposes, broadcasts and slices,
-// and writes into slices (cat, stack, __setitem__).
+// and writes into slices (cat, stack, __setitem__). Copies raw 32-bit words,
+// so every dtype passes through bit-exact (no float canonicalization);
+// multi-word elements are addressed with an extra innermost dimension.
 
 layout(local_size_x = 256) in;
 #include "g2-common.glsl"
 
-layout(std430, binding = 0) buffer S { float src[]; };
-layout(std430, binding = 1) buffer D { float dst[]; };
+layout(std430, binding = 0) buffer S { uint src[]; };
+layout(std430, binding = 1) buffer D { uint dst[]; };
 layout(push_constant) uniform P {
     uint n; uint ndim; uint src_off; uint dst_off;
     uint shape[MAX_DIMS]; uint ss[MAX_DIMS]; uint ds[MAX_DIMS];

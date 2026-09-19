@@ -9,6 +9,7 @@
 
 pub mod autograd;
 mod device;
+mod dtype;
 mod error;
 pub mod generic;
 mod kernel;
@@ -17,6 +18,7 @@ pub mod rng;
 mod tensor;
 
 pub use device::{Buffer, Caps, Device, MemClass};
+pub use dtype::{require_float, DType};
 pub use error::{Error, Result};
 pub use kernel::{Arg, Kernel};
 pub use ops::add;

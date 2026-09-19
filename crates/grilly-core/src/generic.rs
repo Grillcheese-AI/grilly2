@@ -6,6 +6,7 @@
 //! offsets, so any tensor (including one at an unaligned offset) can be an
 //! operand.
 
+use crate::dtype::{require_float, DType};
 use crate::error::{Error, Result};
 use crate::kernel::{Arg, Kernel};
 use crate::tensor::Tensor;
@@ -17,7 +18,9 @@ pub const BINARY: Kernel = Kernel { shader: "g2-binary", bindings: 3, push_words
 pub const REDUCE: Kernel = Kernel { shader: "g2-reduce", bindings: 2, push_words: 6, local_size: [256, 1, 1] };
 pub const COPY: Kernel = Kernel { shader: "g2-copy", bindings: 2, push_words: 4 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 
-pub const ALL: &[Kernel] = &[UNARY, BINARY, REDUCE, COPY];
+pub const CAST: Kernel = Kernel { shader: "g2-cast", bindings: 2, push_words: 5, local_size: [256, 1, 1] };
+
+pub const ALL: &[Kernel] = &[UNARY, BINARY, REDUCE, COPY, CAST];
 
 /// Elementwise `f(x; a, b)`. Codes match g2-unary.glsl.
 #[repr(u32)]
@@ -141,6 +144,7 @@ fn padded(v: &[usize], what: &str) -> Result<[u32; MAX_DIMS]> {
 
 /// `f(x; a, b)` into a new tensor.
 pub fn unary(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<Tensor> {
+    require_float("elementwise math", x.dtype())?;
     let out = Tensor::empty(x.device(), x.shape())?;
     let push = [u32_of(x.numel(), "numel")?, op as u32, a.to_bits(), b.to_bits(), u32_of(x.offset(), "offset")?, 0];
     UNARY.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], x.numel(), &push)?;
@@ -149,6 +153,7 @@ pub fn unary(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<Tensor> {
 
 /// `x = f(x; a, b)` in place; bumps `x`'s version.
 pub fn unary_inplace(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<()> {
+    require_float("elementwise math", x.dtype())?;
     let off = u32_of(x.offset(), "offset")?;
     let push = [u32_of(x.numel(), "numel")?, op as u32, a.to_bits(), b.to_bits(), off, off];
     UNARY.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(x)], x.numel(), &push)?;
@@ -158,6 +163,8 @@ pub fn unary_inplace(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<()> {
 
 /// `op(a, b)` with broadcasting, into a new tensor.
 pub fn binary(a: &Tensor, b: &Tensor, op: Binary) -> Result<Tensor> {
+    require_float("elementwise math", a.dtype())?;
+    require_float("elementwise math", b.dtype())?;
     let shape = broadcast_shape(a.shape(), b.shape())?;
     let out = Tensor::empty(a.device(), &shape)?;
     let mut push = vec![
@@ -177,6 +184,7 @@ pub fn binary(a: &Tensor, b: &Tensor, op: Binary) -> Result<Tensor> {
 
 /// Reduce `x` along `dim`.
 pub fn reduce(x: &Tensor, dim: usize, op: Reduce, keepdim: bool) -> Result<Tensor> {
+    require_float("reductions", x.dtype())?;
     let shape = x.shape();
     if dim >= shape.len() {
         return Err(Error::Shape(format!("reduce: dim {dim} out of range for shape {shape:?}")));
@@ -251,11 +259,30 @@ pub fn copy_strided(
     if src_strides.len() != shape.len() || dst_strides.len() != shape.len() {
         return Err(Error::Invalid("copy_strided: strides must match the shape's rank".into()));
     }
+    if src.dtype() != dst.dtype() {
+        return Err(Error::Invalid(format!(
+            "copy_strided: {} source into {} destination",
+            src.dtype().name(),
+            dst.dtype().name()
+        )));
+    }
+    // The kernel moves 32-bit words; a multi-word element becomes an extra
+    // innermost dimension of its words.
+    let w = src.dtype().words();
+    let (mut shape, mut ss, mut ds) = (shape.to_vec(), src_strides.to_vec(), dst_strides.to_vec());
+    for s in ss.iter_mut().chain(ds.iter_mut()) {
+        *s *= w;
+    }
+    if w > 1 {
+        shape.push(w);
+        ss.push(1);
+        ds.push(1);
+    }
     let n: usize = shape.iter().product();
-    let mut push = vec![u32_of(n, "numel")?, shape.len() as u32, u32_of(src_off, "offset")?, u32_of(dst_off, "offset")?];
-    push.extend(padded(shape, "strided copy")?);
-    push.extend(padded(src_strides, "strided copy")?);
-    push.extend(padded(dst_strides, "strided copy")?);
+    let mut push = vec![u32_of(n, "numel")?, shape.len() as u32, u32_of(src_off * w, "offset")?, u32_of(dst_off * w, "offset")?];
+    push.extend(padded(&shape, "strided copy")?);
+    push.extend(padded(&ss, "strided copy")?);
+    push.extend(padded(&ds, "strided copy")?);
     COPY.launch_flat(src.device(), &[Arg::Storage(src), Arg::Storage(dst)], n, &push)
 }
 
@@ -273,4 +300,19 @@ pub fn write_strided(
     copy_strided(src, src_off, src_strides, dst, dst_off, dst_strides, shape)?;
     dst.bump_version();
     Ok(())
+}
+
+/// `x` converted to `dtype` into a new tensor, with torch's rules (float to
+/// int truncates toward zero; anything to bool is `!= 0`).
+pub fn cast(x: &Tensor, dtype: DType) -> Result<Tensor> {
+    let out = Tensor::empty_typed(x.device(), x.shape(), dtype)?;
+    let push = [
+        u32_of(x.numel(), "numel")?,
+        x.dtype().code(),
+        dtype.code(),
+        u32_of(x.offset() * x.dtype().words(), "offset")?,
+        0,
+    ];
+    CAST.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], x.numel(), &push)?;
+    Ok(out)
 }

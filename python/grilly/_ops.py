@@ -383,10 +383,10 @@ def contiguous(input) -> Tensor:
 # ── like-constructors ────────────────────────────────────────────────────
 
 def _like(input, fill, dtype, device, requires_grad) -> Tensor:
-    from . import _check_factory_args, _leaf
+    from . import _check_factory_args, _code, _leaf
     _check_factory_args(dtype, device)
     x = _require_tensor("input", input)
-    return _leaf(_w(_C.Tensor.full(list(x.shape), builtins.float(fill))), requires_grad)
+    return _leaf(_w(_C.Tensor.full(list(x.shape), builtins.float(fill), _code(dtype or x.dtype))), requires_grad)
 
 
 def zeros_like(input, *, dtype=None, layout=None, device=None, requires_grad=False, memory_format=None) -> Tensor:
@@ -463,7 +463,11 @@ def _index(x: Tensor, idx) -> Tensor:
 
 def _setitem(x: Tensor, idx, value) -> None:
     offset, strides, shape, _ = _parse_index(x, idx)
-    v = _const(value) if _is_number(value) else _require_tensor("value", value)
+    if _is_number(value):
+        from . import _code
+        v = _w(_C.Tensor.full([], builtins.float(value), _code(x.dtype)))
+    else:
+        v = _require_tensor("value", value)
     _C.write_region(x._t, offset, strides, shape, v._t)
 
 
@@ -509,7 +513,6 @@ def _install() -> None:
     T.expand_as = lambda self, other: expand(self, list(other.shape))
     T.view_as = lambda self, other: self.view(list(other.shape))
     T.reshape_as = lambda self, other: self.reshape(list(other.shape))
-    T.float = lambda self: self  # already float32
     T.__iter__ = lambda self: (self[i] for i in range(len(self)))
     T.__float__ = _scalar(builtins.float)
     T.__int__ = _scalar(builtins.int)       # truncates toward zero, as torch
