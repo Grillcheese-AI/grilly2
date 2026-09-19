@@ -1,0 +1,11 @@
+[package]
+name = "grilly-sys"
+version = "0.1.0"
+description = "extern \"C\" shim over grilly v1's Vulkan layer"
+edition.workspace = true
+license.workspace = true
+links = "grilly_core"
+
+[build-dependencies]
+cc = "1"
+cmake = "0.1"
