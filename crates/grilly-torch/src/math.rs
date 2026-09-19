@@ -204,18 +204,39 @@ fn kept_shape(shape: &[usize], dims: &[usize]) -> Vec<usize> {
 }
 
 fn reduce_raw(x: &Tensor, dims: &[usize], op: Reduce, keepdim: bool) -> Result<Tensor> {
-    let mut t = x.clone();
     if x.dim() == 0 {
         return k::reduce_all(x, op); // a 0-d tensor reduces to itself
     }
-    for &d in dims.iter().rev() {
-        t = k::reduce(&t, d, op, true)?;
+    let shape = x.shape();
+    let mut final_shape: Vec<usize> = Vec::with_capacity(shape.len());
+    for (i, &s) in shape.iter().enumerate() {
+        if !dims.contains(&i) {
+            final_shape.push(s);
+        } else if keepdim {
+            final_shape.push(1);
+        }
     }
-    if keepdim {
-        return Ok(t);
+    // adjacent reduced dims (layer_norm's trailing dims, a full sum) merge
+    // into one, so they take one pass
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for &d in dims {
+        match runs.last_mut() {
+            Some((_, end)) if *end + 1 == d => *end = d,
+            _ => runs.push((d, d)),
+        }
     }
-    let shape: Vec<usize> = x.shape().iter().enumerate().filter(|(i, _)| !dims.contains(i)).map(|(_, &s)| s).collect();
-    t.detach().reshape(&shape)
+    let mut t = x.detach();
+    for &(first, last) in runs.iter().rev() {
+        let mut merged: Vec<usize> = t.shape()[..first].to_vec();
+        merged.push(t.shape()[first..=last].iter().product());
+        merged.extend_from_slice(&t.shape()[last + 1..]);
+        t = k::reduce(&t.reshape(&merged)?, first, op, true)?;
+        let mut kept: Vec<usize> = t.shape()[..first].to_vec();
+        kept.extend(std::iter::repeat_n(1, last - first + 1));
+        kept.extend_from_slice(&t.shape()[first + 1..]);
+        t = t.reshape(&kept)?;
+    }
+    t.reshape(&final_shape)
 }
 
 /// `torch.sum(x, dim=dims, keepdim)`; empty `dims` sums everything.

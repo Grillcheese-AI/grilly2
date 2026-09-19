@@ -16,6 +16,7 @@ const MAX_DIMS: usize = 6;
 pub const UNARY: Kernel = Kernel { shader: "g2-unary", bindings: 2, push_words: 6, local_size: [256, 1, 1] };
 pub const BINARY: Kernel = Kernel { shader: "g2-binary", bindings: 3, push_words: 6 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 pub const REDUCE: Kernel = Kernel { shader: "g2-reduce", bindings: 2, push_words: 6, local_size: [256, 1, 1] };
+pub const REDUCE_ROWS: Kernel = Kernel { shader: "g2-reduce-rows", bindings: 2, push_words: 10, local_size: [256, 1, 1] };
 pub const COPY: Kernel = Kernel { shader: "g2-copy", bindings: 2, push_words: 4 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 
 pub const CAST: Kernel = Kernel { shader: "g2-cast", bindings: 2, push_words: 5, local_size: [256, 1, 1] };
@@ -39,7 +40,7 @@ pub const BMM: Kernel = Kernel { shader: "g2-bmm", bindings: 3, push_words: 9 + 
 
 pub const ALL: &[Kernel] = &[
     UNARY, BINARY, REDUCE, COPY, CAST, BINARY_INT, WHERE, REDUCE_INT, INDEX, INDEX_ADD, INDEX_ADD_ATOMIC,
-    ARG_REDUCE, SORT_INIT, SORT_STEP, SORT_TAKE, SCATTER, SCAN, BMM,
+    ARG_REDUCE, SORT_INIT, SORT_STEP, SORT_TAKE, SCATTER, SCAN, BMM, REDUCE_ROWS,
 ];
 
 /// Batch dimensions g2-bmm can broadcast over.
@@ -280,16 +281,69 @@ pub fn reduce(x: &Tensor, dim: usize, op: Reduce, keepdim: bool) -> Result<Tenso
         out_shape.remove(dim);
     }
     let out = Tensor::empty(x.device(), &out_shape)?;
-    let push = [
-        u32_of(outer, "outer")?,
-        u32_of(len, "len")?,
-        u32_of(inner, "inner")?,
-        op as u32,
-        u32_of(x.offset(), "offset")?,
-        0,
-    ];
-    REDUCE.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], outer * inner, &push)?;
+    if outer * inner == 0 {
+        return Ok(out);
+    }
+    if len > 0 && inner == 1 {
+        // the reduced dim is contiguous: a workgroup per row
+        reduce_rows(x, x.offset(), outer, len, op, &out)?;
+    } else if len > 0 && outer * inner < COLUMN_THREADS {
+        // too few outputs to fill the GPU with a thread each: make the
+        // reduced dim contiguous, then reduce rows
+        let moved = Tensor::empty(x.device(), &[outer, inner, len])?;
+        copy_strided(x, x.offset(), &[len * inner, 1, inner], &moved, 0, &[inner * len, len, 1], &[outer, inner, len])?;
+        reduce_rows(&moved, 0, outer * inner, len, op, &out)?;
+    } else {
+        // a thread per output; neighbouring outputs read neighbouring addresses
+        let push = [
+            u32_of(outer, "outer")?,
+            u32_of(len, "len")?,
+            u32_of(inner, "inner")?,
+            op as u32,
+            u32_of(x.offset(), "offset")?,
+            0,
+        ];
+        REDUCE.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], outer * inner, &push)?;
+    }
     Ok(out)
+}
+
+/// Below this many outputs, a strided (non-last-dim) reduction is copied
+/// to contiguous rows first rather than given one thread per output.
+const COLUMN_THREADS: usize = 8192;
+
+/// Workgroups a row reduction aims for before it stops splitting rows.
+const TARGET_GROUPS: usize = 512;
+
+/// Reduce `rows` contiguous rows of `len` floats starting at element
+/// `offset` of `x`'s storage into `out` (one value per row). Rows too long
+/// for the row count are split into chunks and finished by a second pass.
+fn reduce_rows(x: &Tensor, offset: usize, rows: usize, len: usize, op: Reduce, out: &Tensor) -> Result<()> {
+    let wanted = if rows >= TARGET_GROUPS { 1 } else { (TARGET_GROUPS / rows).min(len.div_ceil(2048)).max(1) };
+    let chunk = len.div_ceil(wanted);
+    let chunks = len.div_ceil(chunk);
+    let groups = rows * chunks;
+    let gx = groups.min(65_535);
+    let threads = [u32_of(gx * 256, "workgroups")?, u32_of(groups.div_ceil(gx), "workgroups")?, 1];
+    let launch = |src: &Tensor, push: [u32; 10], dst: &Tensor| {
+        REDUCE_ROWS.launch(x.device(), &[Arg::Storage(src), Arg::Storage(dst)], threads, &push)
+    };
+    let (rows32, len32, count) = (u32_of(rows, "rows")?, u32_of(len, "len")?, u32_of(len, "len")?);
+    let off = u32_of(offset, "offset")?;
+    let out_off = u32_of(out.offset(), "offset")?;
+    if chunks == 1 {
+        return launch(x, [rows32, len32, len32, 1, op as u32, off, out_off, 0, 0, count], out);
+    }
+    let partial = Tensor::empty(x.device(), &[groups * 2])?;
+    let (chunk32, chunks32) = (u32_of(chunk, "chunk")?, u32_of(chunks, "chunks")?);
+    launch(x, [rows32, len32, chunk32, chunks32, op as u32, off, 0, 0, 1, count], &partial)?;
+    let threads2 = [u32_of(rows.min(65_535) * 256, "workgroups")?, u32_of(rows.div_ceil(65_535), "workgroups")?, 1];
+    REDUCE_ROWS.launch(
+        x.device(),
+        &[Arg::Storage(&partial), Arg::Storage(out)],
+        threads2,
+        &[rows32, chunks32, chunks32, 1, op as u32, 0, out_off, 1, 0, count],
+    )
 }
 
 /// Reduce every element of `x` to a 0-d tensor.

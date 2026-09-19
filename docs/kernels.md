@@ -14,7 +14,8 @@ applies to v1's modules.
 |---|---|---|
 | `g2-unary` | `f(x; a, b)` per element, in place or not | neg, abs, sign, exp, log, sqrt, rsqrt, tanh, sigmoid, sin, cos, scalar + - * / pow, clamp, gelu, isfinite/isinf/isnan |
 | `g2-binary` | `op(a, b)` with torch broadcasting (up to 6 dims) | + - * / pow, maximum, minimum, comparisons |
-| `g2-reduce` | sum / mean / max / min along one axis | sum, mean, amax, amin, the backward of broadcasting |
+| `g2-reduce` | sum / mean / max / min along a strided axis, a thread per output (used when there are >= 8192 outputs) | sum, mean, amax, amin, the backward of broadcasting |
+| `g2-reduce-rows` | the same along contiguous rows, a workgroup per row (or per chunk of a long row, finished by a second pass) | the last-dim reductions under softmax, log_softmax, layer_norm; full sums; strided reductions with few outputs (copied to rows first) |
 | `g2-copy` | strided gather/scatter | transpose, permute, expand, slicing, cat, stack, `__setitem__` |
 | `g2-cast` | dtype conversion with torch's rules | `.to(dtype)`, `.long()`, `.float()`, `.bool()` |
 | `g2-binary-int` | integer / bool ops with broadcasting | int arithmetic, bitwise and logical ops, int comparisons |
@@ -63,3 +64,14 @@ was measured at 170 ULP after 8192 steps and was replaced.
 0.41 * sqrt(K) * eps * (|A| @ |B|) of float64 (measured), the bound the linear
 tests use. It runs 64 products of 512^3 in 15 ms (1.1 TFLOP/s) on the
 RX 6750 XT. 2-D @ 2-D still goes through v1's linear kernel.
+
+Reductions pick a path by shape (`grilly_core::generic::reduce`): the rows
+kernel when the reduced dim is last; a thread per output when a strided dim
+has at least 8192 outputs (neighbouring outputs then read neighbouring
+addresses); otherwise a copy to rows, then the rows kernel. Adjacent reduced
+dims merge into one pass. The rows kernel sums with Kahan per thread and a
+fixed two-sum tree across the workgroup: deterministic, and within
+0.14 * eps * sum(|x|) of float64 (measured). Before it, one thread per output
+made last-dim reductions uncoalesced (softmax over (8,8,512,512): 25.6 ms,
+now 9.5) and put a whole-tensor sum on one thread (16M elements ran past the
+fence timeout; now 0.1 ms).
