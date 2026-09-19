@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import functools
 
-from . import _C
+from .. import _C
 
 __all__ = ["enable_grad", "is_grad_enabled", "no_grad", "set_grad_enabled"]
 
@@ -71,3 +71,6 @@ class set_grad_enabled(_GradMode):
 
     def clone(self):
         return set_grad_enabled(self._mode)
+
+
+from . import graph  # noqa: E402,F401

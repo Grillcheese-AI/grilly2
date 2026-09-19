@@ -72,6 +72,15 @@ impl Generator {
         self.seed
     }
 
+    /// The whole state: `(seed, next block)`.
+    pub fn state(&self) -> (u64, u64) {
+        (self.seed, self.block)
+    }
+
+    pub fn set_state(&mut self, (seed, block): (u64, u64)) {
+        *self = Generator { seed, block };
+    }
+
     fn next_block(&mut self) -> [u32; 4] {
         let b = self.block;
         self.block = self.block.wrapping_add(1);

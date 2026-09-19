@@ -23,7 +23,7 @@ struct ReluBackward {
 impl Backward for ReluBackward {
     fn apply(&mut self, grads: &[Option<Tensor>], _: &[bool]) -> Result<Vec<Option<Tensor>>> {
         let g = grads[0].as_ref().expect("single output");
-        let result = self.result.get()?;
+        let result = &self.result.get()?;
         let grad_in = Tensor::empty(g.device(), g.shape())?;
         let n = u32_dim(g.numel(), "numel")?;
         if n > 0 {
@@ -49,9 +49,9 @@ pub fn relu(input: &Tensor) -> Result<Tensor> {
     if n > 0 {
         kernels::RELU.launch(input.device(), &[Arg::Tensor(input), Arg::Tensor(&out)], [n, 1, 1], &[n])?;
     }
-    autograd::record("ReluBackward0", &[input], &mut [&mut out], |outs| ReluBackward {
-        result: SavedTensor::save(outs[0]),
-    });
+    autograd::record("ReluBackward0", &[input], &mut [&mut out], |outs| {
+        Ok(ReluBackward { result: SavedTensor::save(outs[0])? })
+    })?;
     Ok(out)
 }
 
@@ -65,8 +65,7 @@ struct LinearBackward {
 }
 
 impl LinearBackward {
-    fn pass(&self, pass: u32, g: &Tensor, out: &Tensor, threads: [u32; 2]) -> Result<()> {
-        let (x, w) = (self.input.get()?, self.weight.get()?);
+    fn pass(x: &Tensor, w: &Tensor, pass: u32, g: &Tensor, out: &Tensor, threads: [u32; 2]) -> Result<()> {
         let (in_f, out_f) = (w.shape()[1], w.shape()[0]);
         // From the leading dims, not numel / in_f: that is 0 when in_f is 0.
         let rows: usize = x.shape()[..x.dim() - 1].iter().product();
@@ -84,7 +83,7 @@ impl LinearBackward {
 impl Backward for LinearBackward {
     fn apply(&mut self, grads: &[Option<Tensor>], needs: &[bool]) -> Result<Vec<Option<Tensor>>> {
         let g = grads[0].as_ref().expect("single output");
-        let (x, w) = (self.input.get()?.clone(), self.weight.get()?.clone());
+        let (x, w) = (self.input.get()?, self.weight.get()?);
         let dev = g.device();
         let (out_f, in_f) = (w.shape()[0], w.shape()[1]);
         let rows: usize = x.shape()[..x.dim() - 1].iter().product();
@@ -100,7 +99,7 @@ impl Backward for LinearBackward {
                 None => {
                     let gx = Tensor::empty(dev, x.shape())?;
                     if gx.numel() > 0 {
-                        self.pass(0, g, &gx, [u32_dim(in_f, "in")?, u32_dim(rows, "rows")?])?;
+                        Self::pass(&x, &w, 0, g, &gx, [u32_dim(in_f, "in")?, u32_dim(rows, "rows")?])?;
                     }
                     gx
                 }
@@ -112,7 +111,7 @@ impl Backward for LinearBackward {
                 None => {
                     let gw = Tensor::empty(dev, w.shape())?;
                     if gw.numel() > 0 {
-                        self.pass(1, g, &gw, [u32_dim(in_f, "in")?, u32_dim(out_f, "out")?])?;
+                        Self::pass(&x, &w, 1, g, &gw, [u32_dim(in_f, "in")?, u32_dim(out_f, "out")?])?;
                     }
                     gw
                 }
@@ -124,7 +123,7 @@ impl Backward for LinearBackward {
                 None => {
                     let gb = Tensor::empty(dev, &[out_f])?;
                     if out_f > 0 {
-                        self.pass(2, g, &gb, [u32_dim(out_f, "out")?, 1])?;
+                        Self::pass(&x, &w, 2, g, &gb, [u32_dim(out_f, "out")?, 1])?;
                     }
                     gb
                 }
@@ -202,9 +201,8 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<
 
     let mut inputs = vec![input, weight];
     inputs.extend(bias);
-    autograd::record("LinearBackward0", &inputs, &mut [&mut out], |_| LinearBackward {
-        input: SavedTensor::save(input),
-        weight: SavedTensor::save(weight),
-    });
+    autograd::record("LinearBackward0", &inputs, &mut [&mut out], |_| {
+        Ok(LinearBackward { input: SavedTensor::save(input)?, weight: SavedTensor::save(weight)? })
+    })?;
     Ok(out)
 }

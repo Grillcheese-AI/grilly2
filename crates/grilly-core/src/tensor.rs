@@ -102,7 +102,7 @@ impl Tensor {
     pub fn clone_data(&self) -> Result<Tensor> {
         let mut out = Tensor::empty(self.device(), &self.shape)?;
         self.device().record_copy(&self.storage, self.byte_offset(), &out.storage, 0, self.byte_len())?;
-        autograd::record("CloneBackward0", &[self], &mut [&mut out], |_| CloneBackward);
+        autograd::record("CloneBackward0", &[self], &mut [&mut out], |_| Ok(CloneBackward))?;
         Ok(out)
     }
 
@@ -155,7 +155,7 @@ impl Tensor {
         }
         let mut out = Tensor::from_parts(self.storage.clone(), shape.to_vec(), self.offset);
         let input_shape = self.shape.clone();
-        autograd::record("ViewBackward0", &[self], &mut [&mut out], |_| ViewBackward { input_shape });
+        autograd::record("ViewBackward0", &[self], &mut [&mut out], |_| Ok(ViewBackward { input_shape }))?;
         Ok(out)
     }
 

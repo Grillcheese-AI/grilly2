@@ -46,7 +46,7 @@ pub fn add(input: &Tensor, other: &Tensor) -> Result<Tensor> {
     if n > 0 {
         ADD.launch(input.device(), &[Arg::Tensor(input), Arg::Tensor(other), Arg::Tensor(&out)], [n, 1, 1], &[n])?;
     }
-    autograd::record("AddBackward0", &[input, other], &mut [&mut out], |_| AddBackward);
+    autograd::record("AddBackward0", &[input, other], &mut [&mut out], |_| Ok(AddBackward))?;
     Ok(out)
 }
 

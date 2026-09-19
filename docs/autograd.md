@@ -1,8 +1,11 @@
 # Autograd design
 
-**Status: accepted by the owner 2026-09-18, with the three recommendations in §6.**
-The `use_deterministic_algorithms` switch arrives with the first op that uses an
-atomic kernel; none of the ops built so far does.
+**Status: accepted by the owner 2026-09-18, with the three recommendations in §6,
+and built (all four steps of §7).** The `use_deterministic_algorithms` switch
+arrives with the first op that uses an atomic kernel; none of the ops built so
+far does. One refinement while building: `record` and `SavedTensor::save` are
+fallible, because a saved-tensor hook may fail. Checkpoint is written in Python
+on top of the core's hooks, as torch's is.
 
 Autograd belongs in `grilly-core` (CLAUDE.md §4). This document fixes its
 structure before any code: the graph, the engine, grad mode, saved tensors,

@@ -125,46 +125,93 @@ pub trait Backward: Send {
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
+// ── saved tensors and their hooks ────────────────────────────────────────
+
+/// A saved tensor as packed by a [`SavedTensorHooks`]; unpacked at backward.
+pub trait PackedTensor: Send {
+    fn unpack(&mut self) -> Result<Tensor>;
+}
+
+/// torch's `saved_tensors_hooks`: while installed, every tensor an op saves
+/// for backward is handed to `pack`, and the returned value is unpacked
+/// instead when backward needs the tensor. Non-reentrant checkpointing is
+/// built on this.
+pub trait SavedTensorHooks {
+    fn pack(&self, t: &Tensor) -> Result<Box<dyn PackedTensor>>;
+}
+
+thread_local! {
+    static HOOKS: std::cell::RefCell<Vec<std::rc::Rc<dyn SavedTensorHooks>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Install hooks on this thread; the innermost installed hooks apply.
+pub fn push_saved_tensor_hooks(hooks: std::rc::Rc<dyn SavedTensorHooks>) {
+    HOOKS.with(|h| h.borrow_mut().push(hooks));
+}
+
+/// Remove the innermost hooks.
+pub fn pop_saved_tensor_hooks() -> Result<()> {
+    HOOKS
+        .with(|h| h.borrow_mut().pop())
+        .map(|_| ())
+        .ok_or_else(|| Error::Invalid("no saved-tensor hooks to pop".into()))
+}
+
+enum Saved {
+    Plain { data: Tensor, version: u64 },
+    Packed(Box<dyn PackedTensor>),
+    Released,
+}
+
 /// A tensor kept for backward. It is freed with the rest of the graph after
 /// `backward()`, and a later use raises torch's "second time" error. If the
 /// tensor is modified in place after being saved, using it raises torch's
 /// in-place error instead of silently computing a wrong gradient.
 pub struct SavedTensor {
-    data: Option<Tensor>,
-    version: u64,
+    state: Saved,
 }
 
 impl SavedTensor {
-    pub fn save(t: &Tensor) -> SavedTensor {
-        SavedTensor { data: Some(t.detach()), version: t.version() }
+    /// Save `t`, through the innermost saved-tensor hooks if any are installed.
+    pub fn save(t: &Tensor) -> Result<SavedTensor> {
+        let hooks = HOOKS.with(|h| h.borrow().last().cloned());
+        let state = match hooks {
+            Some(h) => Saved::Packed(h.pack(&t.detach())?),
+            None => Saved::Plain { data: t.detach(), version: t.version() },
+        };
+        Ok(SavedTensor { state })
     }
 
-    pub fn get(&self) -> Result<&Tensor> {
-        let t = self.data.as_ref().ok_or_else(|| {
-            Error::Invalid(
+    pub fn get(&mut self) -> Result<Tensor> {
+        match &mut self.state {
+            Saved::Plain { data, version } => {
+                if data.version() != *version {
+                    return Err(Error::Invalid(format!(
+                        "one of the variables needed for gradient computation has been modified \
+                         by an inplace operation: [FloatTensor {:?}] is at version {}; expected \
+                         version {} instead.",
+                        data.shape(),
+                        data.version(),
+                        version
+                    )));
+                }
+                Ok(data.clone())
+            }
+            Saved::Packed(p) => p.unpack(),
+            Saved::Released => Err(Error::Invalid(
                 "Trying to backward through the graph a second time (or directly access saved \
                  tensors after they have already been freed). Saved intermediate values of the \
                  graph are freed when you call .backward() or autograd.grad(). Specify \
                  retain_graph=True if you need to backward through the graph a second time or \
                  if you need to access saved tensors after calling backward."
                     .into(),
-            )
-        })?;
-        if t.version() != self.version {
-            return Err(Error::Invalid(format!(
-                "one of the variables needed for gradient computation has been modified by an \
-                 inplace operation: [FloatTensor {:?}] is at version {}; expected version {} \
-                 instead.",
-                t.shape(),
-                t.version(),
-                self.version
-            )));
+            )),
         }
-        Ok(t)
     }
 
     pub fn release(&mut self) {
-        self.data = None;
+        self.state = Saved::Released;
     }
 }
 
@@ -195,19 +242,20 @@ fn edge_for(t: &Tensor) -> Option<Edge> {
 
 /// Record an op for autograd. Does nothing, and never calls `make`, unless
 /// grad mode is on and some input requires grad. `make` receives the op's
-/// outputs, so a formula can save them (see [`SavedTensor`]).
+/// outputs, so a formula can save them (see [`SavedTensor`]); it fails only
+/// if a saved-tensor hook does.
 pub fn record<B: Backward + 'static>(
     name: &'static str,
     inputs: &[&Tensor],
     outputs: &mut [&mut Tensor],
-    make: impl FnOnce(&[&Tensor]) -> B,
-) {
+    make: impl FnOnce(&[&Tensor]) -> Result<B>,
+) -> Result<()> {
     if !is_grad_enabled() || !inputs.iter().any(|t| t.requires_grad()) {
-        return;
+        return Ok(());
     }
     let backward = {
         let outs: Vec<&Tensor> = outputs.iter().map(|t| &**t).collect();
-        make(&outs)
+        make(&outs)?
     };
     let node = Arc::new(Node {
         seq: SEQ.fetch_add(1, AtomicOrdering::Relaxed),
@@ -219,6 +267,7 @@ pub fn record<B: Backward + 'static>(
     for (i, out) in outputs.iter_mut().enumerate() {
         out.set_meta(Arc::new(Meta::with_grad_fn(Edge { node: node.clone(), input_nr: i })));
     }
+    Ok(())
 }
 
 // ── tensor-facing state ──────────────────────────────────────────────────

@@ -6,12 +6,32 @@
 // `_C` mirrors torch's native module name.
 #![allow(non_snake_case)]
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use grilly_core::autograd::{PackedTensor, SavedTensorHooks};
 use grilly_core::{autograd, rng, Device, Error, Tensor};
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+thread_local! {
+    /// A Python exception raised inside a callback the core invoked (a
+    /// saved-tensor hook). The core sees a plain Error; `err` re-raises the
+    /// original so its type (e.g. CheckpointError) reaches the caller.
+    static PENDING: RefCell<Option<PyErr>> = const { RefCell::new(None) };
+}
+
+fn from_py(e: PyErr) -> Error {
+    let msg = e.to_string();
+    PENDING.with(|p| *p.borrow_mut() = Some(e));
+    Error::Invalid(format!("Python exception in a saved-tensor hook: {msg}"))
+}
+
 fn err(e: Error) -> PyErr {
+    if let Some(original) = PENDING.with(|p| p.borrow_mut().take()) {
+        return original;
+    }
     match e {
         Error::NotImplemented(_) => PyNotImplementedError::new_err(e.to_string()),
         // torch raises RuntimeError for shape, argument and device failures.
@@ -160,6 +180,49 @@ impl PyTensor {
     }
 }
 
+// ── saved-tensor hooks backed by Python callables ──────────────────────────
+
+struct PyHooks {
+    pack: Py<PyAny>,
+    unpack: Py<PyAny>,
+}
+
+struct PyPacked {
+    obj: Py<PyAny>,
+    unpack: Py<PyAny>,
+}
+
+impl SavedTensorHooks for PyHooks {
+    fn pack(&self, t: &Tensor) -> grilly_core::Result<Box<dyn PackedTensor>> {
+        Python::attach(|py| {
+            let obj = self.pack.call1(py, (wrap(t.clone()),)).map_err(from_py)?;
+            Ok(Box::new(PyPacked { obj, unpack: self.unpack.clone_ref(py) }) as Box<dyn PackedTensor>)
+        })
+    }
+}
+
+impl PackedTensor for PyPacked {
+    fn unpack(&mut self) -> grilly_core::Result<Tensor> {
+        Python::attach(|py| {
+            let out = self.unpack.call1(py, (self.obj.clone_ref(py),)).map_err(from_py)?;
+            let t = out.bind(py).cast::<PyTensor>().map_err(|e| from_py(PyErr::from(e)))?;
+            Ok(t.get().inner.clone())
+        })
+    }
+}
+
+/// Install saved-tensor hooks on this thread: `pack(_C.Tensor) -> object`,
+/// `unpack(object) -> _C.Tensor`.
+#[pyfunction]
+fn push_saved_tensor_hooks(pack: Py<PyAny>, unpack: Py<PyAny>) {
+    autograd::push_saved_tensor_hooks(Rc::new(PyHooks { pack, unpack }));
+}
+
+#[pyfunction]
+fn pop_saved_tensor_hooks() -> PyResult<()> {
+    autograd::pop_saved_tensor_hooks().map_err(err)
+}
+
 /// A seeded random stream; see grilly_core::rng for the exact algorithm.
 #[pyclass(name = "Generator", module = "grilly._C")]
 struct PyGenerator {
@@ -179,6 +242,14 @@ impl PyGenerator {
 
     fn initial_seed(&self) -> u64 {
         self.inner.initial_seed()
+    }
+
+    fn get_state_pair(&self) -> (u64, u64) {
+        self.inner.state()
+    }
+
+    fn set_state_pair(&mut self, state: (u64, u64)) {
+        self.inner.set_state(state);
     }
 
     /// Standard-normal float32 tensor of the given shape.
@@ -244,6 +315,8 @@ fn _C(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(linear, m)?)?;
     m.add_function(wrap_pyfunction!(is_grad_enabled, m)?)?;
     m.add_function(wrap_pyfunction!(swap_grad_mode, m)?)?;
+    m.add_function(wrap_pyfunction!(push_saved_tensor_hooks, m)?)?;
+    m.add_function(wrap_pyfunction!(pop_saved_tensor_hooks, m)?)?;
     m.add_function(wrap_pyfunction!(device_name, m)?)?;
     Ok(())
 }

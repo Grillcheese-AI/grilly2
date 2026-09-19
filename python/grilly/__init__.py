@@ -473,3 +473,4 @@ def randint(*args, **kwargs):
 from .autograd import enable_grad, is_grad_enabled, no_grad, set_grad_enabled  # noqa: E402
 
 from . import nn  # noqa: E402  (needs Tensor defined)
+from . import utils  # noqa: E402
