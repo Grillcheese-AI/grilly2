@@ -113,6 +113,7 @@ struct gc_ctx {
     // held Qwen2.5-0.5B's 1.84 GiB of float32 weights in 3.00 GiB of VRAM.
     std::unordered_set<gc_buf> persistent;
     uint64_t persistentBytes = 0;
+    uint64_t persistentPeak = 0;  // the most alive at once: what a load has to fit in
     // released while a batch was recording: destroyed once it has run
     std::vector<grilly::GrillyBuffer> deferredDestroy;
 
@@ -469,6 +470,7 @@ int32_t gc_buffer_create(gc_ctx* ctx, uint64_t bytes, uint32_t mem, gc_buf* out)
         if (mem == GC_MEM_DEVICE_PERSISTENT) {
             ctx->persistent.insert(h);
             ctx->persistentBytes += bytes;
+            ctx->persistentPeak = std::max(ctx->persistentPeak, ctx->persistentBytes);
         }
         *out = h;
     });
@@ -681,7 +683,16 @@ int32_t gc_submit_stats_get(gc_ctx* ctx, gc_submit_stats* out) {
         *out = gc_submit_stats{ctx->submits, ctx->dispatches, ctx->submitNs, ctx->waitNs, ctx->waitNsMax,
                                ctx->waitNsLast, static_cast<uint64_t>(ctx->descPools.size()),
                                pool.allocations, pool.totalAcquired - pool.totalReleased, ctx->batchReuses,
-                               static_cast<uint64_t>(ctx->persistent.size()), ctx->persistentBytes};
+                               static_cast<uint64_t>(ctx->persistent.size()), ctx->persistentBytes,
+                               ctx->persistentPeak};
+    });
+}
+
+int32_t gc_persistent_peak_reset(gc_ctx* ctx) {
+    return guarded([&] {
+        requireCtx(ctx);
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        ctx->persistentPeak = ctx->persistentBytes;
     });
 }
 

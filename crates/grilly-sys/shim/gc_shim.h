@@ -71,6 +71,7 @@ typedef struct gc_submit_stats {
     uint64_t batch_reuses;         /* device buffers reused within a batch */
     uint64_t persistent_buffers;   /* GC_MEM_DEVICE_PERSISTENT buffers alive */
     uint64_t persistent_bytes;     /* and their total size */
+    uint64_t persistent_peak;      /* the most persistent bytes alive at once */
 } gc_submit_stats;
 
 const char* gc_last_error(void);
@@ -110,6 +111,8 @@ int32_t gc_copy(gc_ctx* ctx, gc_buf src, uint64_t src_offset, gc_buf dst,
 int32_t gc_fill(gc_ctx* ctx, gc_buf dst, uint64_t offset, uint64_t bytes, uint32_t word);
 int32_t gc_submit(gc_ctx* ctx);
 int32_t gc_submit_stats_get(gc_ctx* ctx, gc_submit_stats* out);
+/* Start persistent_peak again from what is alive now, to measure one phase. */
+int32_t gc_persistent_peak_reset(gc_ctx* ctx);
 
 #ifdef __cplusplus
 }

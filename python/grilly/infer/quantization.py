@@ -30,7 +30,7 @@ from .. import Size, Tensor, _C, _DEVICE, _not_yet, _require_tensor, _resolve_de
 from ..nn.modules.layers import Linear
 from ..nn.parameter import Parameter
 
-__all__ = ["Int8Tensor", "Int8WeightOnlyConfig", "PerRow", "quantize_"]
+__all__ = ["Int8Tensor", "Int8WeightOnlyConfig", "PerRow", "load_quantized_", "quantize_"]
 
 
 @dataclass(frozen=True)
@@ -179,6 +179,62 @@ def _is_linear(mod, *args) -> bool:
     """torchao's default filter: an ``nn.Linear`` whose weight is not
     quantized yet."""
     return isinstance(mod, Linear) and hasattr(mod, "weight") and not isinstance(mod.weight, Int8Tensor)
+
+
+def load_quantized_(model, filename, config, filter_fn=_is_linear, strict: bool = True) -> None:
+    """Load a safetensors checkpoint into ``model``, quantizing each weight as
+    it arrives.
+
+        model.load_state_dict(load_file(path), assign=True)   # float32, then
+        quantize_(model, Int8WeightOnlyConfig())              # int8: both at once
+
+    holds every float32 weight *and* its int8 copy at the peak. This holds one
+    float32 tensor at a time instead (measured on Qwen2.5-0.5B: 2.98 GiB
+    against 1.12). The result is the same tensors, bit for bit.
+
+    ``strict`` reports missing and unexpected names as ``load_state_dict``
+    does. A weight the checkpoint does not carry is left as it is, so a tied
+    output projection is restored and quantized afterwards, exactly as after
+    ``load_state_dict``::
+
+        load_quantized_(model, path, Int8WeightOnlyConfig(), strict=False)
+        model.tie_weights()
+        quantize_(model, Int8WeightOnlyConfig())  # only what is still float32
+
+    Quantizing it matters: left float32, a 152K-row output projection costs
+    more per token than everything the streaming saved (measured 110.7
+    tokens/s against 163.4).
+    """
+    if not isinstance(config, Int8WeightOnlyConfig):
+        raise _not_yet(f"load_quantized_ with {type(config).__name__} (grilly has Int8WeightOnlyConfig)")
+    from .safetensors import safe_open
+
+    targets = {f"{name}.weight" if name else "weight": module
+               for name, module in model.named_modules() if filter_fn(module, name)}
+    with safe_open(filename, framework="pt") as f:
+        names = f.offset_keys()
+        unexpected = [k for k in names if k not in model.state_dict()]
+        for key in names:
+            value = f.get_tensor(key)
+            module = targets.get(key)
+            if module is None:
+                model.load_state_dict({key: value}, assign=True, strict=False)
+            elif tuple(value.shape) != tuple(module.weight.shape):
+                raise RuntimeError(f"size mismatch for {key}: copying a param with shape {value.shape} from "
+                                   f"checkpoint, the shape in current model is {module.weight.shape}.")
+            else:
+                module.weight = Int8Tensor.from_hp(value, config.granularity)
+            del value  # the float32 tensor's device memory goes back now
+    if strict:
+        missing = [k for k in model.state_dict() if k not in set(names)]
+        errors = []
+        if missing:
+            errors.append("Missing key(s) in state_dict: " + ", ".join(f'"{k}"' for k in missing))
+        if unexpected:
+            errors.append("Unexpected key(s) in state_dict: " + ", ".join(f'"{k}"' for k in unexpected))
+        if errors:
+            joined = "\n\t".join(errors)
+            raise RuntimeError(f"Error(s) in loading state_dict for {type(model).__name__}:\n\t{joined}")
 
 
 def quantize_(model, config, filter_fn=_is_linear, device=None) -> None:

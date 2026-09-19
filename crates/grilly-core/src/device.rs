@@ -224,6 +224,12 @@ impl Device {
         Ok(out)
     }
 
+    /// Start `persistent_peak` again from the persistent bytes alive now, so
+    /// the next phase's high-water mark can be read on its own.
+    pub fn reset_persistent_peak(&self) -> Result<()> {
+        check(unsafe { sys::gc_persistent_peak_reset(self.inner.ctx) })
+    }
+
     /// Run everything recorded so far and wait for it.
     pub fn synchronize(&self) -> Result<()> {
         let mut state = self.lock();

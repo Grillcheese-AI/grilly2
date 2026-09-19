@@ -30,7 +30,7 @@ from pathlib import Path
 
 import grilly
 from grilly.infer.models import LlamaConfig, LlamaForCausalLM
-from grilly.infer.quantization import Int8WeightOnlyConfig, quantize_
+from grilly.infer.quantization import Int8WeightOnlyConfig, load_quantized_, quantize_
 from grilly.infer.safetensors import load_file
 
 REPO = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -142,22 +142,31 @@ def main() -> None:
     config = config_from(path)
     ids = chat(tokenizer, args.prompt)
 
+    grilly._C.reset_persistent_peak()
     with PeakVram() as load_vram:
         t0 = time.perf_counter()
         model = LlamaForCausalLM(config)
-        model.load_state_dict(load_file(path / "model.safetensors"), assign=True, strict=False)
+        checkpoint = path / "model.safetensors"
+        stream = not args.no_quantize and not args.check_hf
+        if stream:  # quantize each weight as it arrives: no float32 copy of the model
+            load_quantized_(model, checkpoint, Int8WeightOnlyConfig(), strict=False)
+        else:
+            model.load_state_dict(load_file(checkpoint), assign=True, strict=False)
         model.tie_weights()
         grilly._C.synchronize()
         print(f"loaded {config.num_hidden_layers} layers, {sum(p.numel() for p in model.parameters()) / 1e6:.0f}M parameters "
-              f"in {time.perf_counter() - t0:.1f} s")
+              f"in {time.perf_counter() - t0:.1f} s{' (quantized while loading)' if stream else ''}")
         if args.check_hf:
             for penalty in (1.0, gen.get("repetition_penalty", 1.0)):
                 check_against_transformers(path, model, ids, 32, penalty)
         if not args.no_quantize:
             t0 = time.perf_counter()
+            # after streaming, this quantizes only what the checkpoint did not
+            # carry: the tied output projection
             quantize_(model, Int8WeightOnlyConfig())
             grilly._C.synchronize()
             print(f"quantized to int8 in {time.perf_counter() - t0:.2f} s")
+        load_peak = grilly._C.submit_stats()["persistent_peak"]
 
         settings = {k: gen[k] for k in ("do_sample", "temperature", "top_k", "top_p", "repetition_penalty") if k in gen}
         eos = gen.get("eos_token_id")
@@ -202,7 +211,8 @@ def main() -> None:
     print(f"per decoded token: {(after['dispatches'] - mid['dispatches']) / steps:.0f} dispatches and "
           f"{(after['wait_ns_total'] - mid['wait_ns_total']) / steps / 1e6:.1f} ms of GPU wait, "
           f"{(after['submits'] - mid['submits']) / steps:.1f} submits")
-    print(f"weights and cache in persistent memory: {after['persistent_bytes'] / 2**30:.2f} GiB")
+    print(f"weights and cache in persistent memory: {after['persistent_bytes'] / 2**30:.2f} GiB, "
+          f"peak while loading {load_peak / 2**30:.2f} GiB")
     if vram.peak is not None:
         print(f"peak dedicated VRAM: {load_vram.peak / 2**30:.2f} GiB while loading and quantizing (float32 weights first), "
               f"{vram.peak / 2**30:.2f} GiB while generating")

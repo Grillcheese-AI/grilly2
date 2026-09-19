@@ -523,13 +523,13 @@ a chat prompt sampled with the model's own `generation_config.json`
 
 | | |
 |---|---:|
-| decode (int8, sampled) | **161.7 tokens/s** (6.2 ms per token) |
-| prompt of 40 tokens + first token | 57 ms |
+| decode (int8, sampled) | **168.4 tokens/s** (5.9 ms per token) |
+| prompt of 40 tokens + first token | 74 ms |
 | peak dedicated VRAM while generating | **1.24 GiB** |
-| peak while loading (float32 weights, then quantized) | 2.98 GiB |
+| peak while loading and quantizing | 2.07 GiB |
 | weights + KV cache in persistent memory | 1.19 GiB |
 
-**Where a token's 6.2 ms goes:** 280 dispatches, 4.2 ms of GPU wait, and the
+**Where a token's 5.9 ms goes:** 273 dispatches, 3.7 ms of GPU wait, and the
 rest host-side recording. The loop is still host-bound, so the lever is
 still dispatches per token.
 
@@ -583,5 +583,60 @@ generating became 1.24. Quantizing straight from the checkpoint into the
 fused layout would remove both that and the 2.98 GiB loading peak below;
 that is the next step.
 
-The loading peak (2.98 GiB) holds the float32 weights before they are
-quantized. Quantizing each tensor as it is read would remove it.
+### 7. Quantizing while loading
+
+`load_state_dict(load_file(path), assign=True)` followed by `quantize_`
+holds three copies of the weights at once: the model's own (from its
+constructor), the checkpoint's, and the int8 result.
+`quantization.load_quantized_` holds one tensor at a time instead — it
+reads the file in offset order, quantizes each weight that `filter_fn`
+picks as it arrives, and lets the float32 tensor go before reading the
+next. The int8 values are the same, bit for bit
+(`tests/python/test_load_quantized.py`), because it is the same kernel on
+the same values.
+
+A weight the checkpoint does not carry is left alone, so a tied output
+projection is restored and quantized afterwards:
+
+    load_quantized_(model, path, Int8WeightOnlyConfig(), strict=False)
+    model.tie_weights()
+    quantize_(model, Int8WeightOnlyConfig())   # only what is still float32
+
+That last line matters more than it looks: Qwen2.5-0.5B ties its 151,936-row
+output projection to the embedding, and leaving it in float32 costs
+**110.7 tokens/s against 168.4**.
+
+**Measured** (Qwen2.5-0.5B, the shim's own high-water mark of persistent
+bytes, `submit_stats()["persistent_peak"]`):
+
+| | peak | alive after |
+|---|---:|---:|
+| load float32, then quantize | 2.98 GiB | 0.97 GiB |
+| quantize while loading | **2.37 GiB** | 0.97 GiB |
+
+and, inside the second number, where it now goes:
+
+| after | alive | peak so far |
+|---|---:|---:|
+| the model's constructor | 1.84 GiB | 2.35 GiB |
+| streaming the checkpoint | 1.35 GiB | 2.37 GiB |
+| quantizing the tied head | 0.97 GiB | 2.37 GiB |
+
+**The peak is now the model's own constructor, not the loading.** Building
+`LlamaForCausalLM` allocates and initializes 1.84 GiB of float32
+parameters that the checkpoint is about to overwrite, and the extra 0.5 GiB
+on top is the untied `lm_head` weight, allocated and then freed when
+`tie_weights` points it at the embedding. Streaming cannot help with
+either: both happen before it runs.
+
+What would is constructing the model without materializing weights, which
+is what `from_pretrained` needs anyway (torch spells it
+`with torch.device("meta")`, accelerate `init_empty_weights`). That is an
+open decision for the Hugging Face adapter, not something to slip in
+silently here.
+
+The test asserts the peak, not just the values: it measures both paths'
+high-water marks and requires the streaming one to stay within the
+quantized weights plus a couple of float32 tensors, while the two-step
+path exceeds it by a whole float32 copy. A memory claim that is only a
+sentence in a document is not a claim.

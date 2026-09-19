@@ -56,6 +56,7 @@ pub struct gc_submit_stats {
     pub batch_reuses: u64,
     pub persistent_buffers: u64,
     pub persistent_bytes: u64,
+    pub persistent_peak: u64,
 }
 
 extern "C" {
@@ -68,6 +69,7 @@ extern "C" {
     pub fn gc_load_shader(ctx: *mut gc_ctx, name: *const c_char, spv_path: *const c_char) -> i32;
     pub fn gc_load_shader_dir(ctx: *mut gc_ctx, dir: *const c_char, loaded: *mut u32) -> i32;
     pub fn gc_submit_stats_get(ctx: *mut gc_ctx, out: *mut gc_submit_stats) -> i32;
+    pub fn gc_persistent_peak_reset(ctx: *mut gc_ctx) -> i32;
     pub fn gc_compile_shader(ctx: *mut gc_ctx, name: *const c_char, glsl: *const c_char, len: u64) -> i32;
     pub fn gc_has_shader(ctx: *mut gc_ctx, name: *const c_char, out: *mut u32) -> i32;
 

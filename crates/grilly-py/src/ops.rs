@@ -339,6 +339,12 @@ fn scatter(py: Python<'_>, x: &PyTensor, dim: usize, index: &PyTensor, src: &PyT
 }
 
 /// In place into `x`'s storage; returns the handle the caller should hold.
+/// Start the persistent high-water mark again from what is alive now.
+#[pyfunction]
+fn reset_persistent_peak() -> PyResult<()> {
+    grilly_core::Device::default_device().and_then(|d| d.reset_persistent_peak()).map_err(err)
+}
+
 #[pyfunction]
 fn scatter_(py: Python<'_>, x: &PyTensor, dim: usize, index: &PyTensor, src: &PyTensor) -> PyResult<PyTensor> {
     let (x, i, s) = (x.inner.clone(), index.inner.clone(), src.inner.clone());
@@ -407,6 +413,7 @@ fn submit_stats(py: Python<'_>) -> PyResult<Bound<'_, pyo3::types::PyDict>> {
         ("batch_reuses", s.batch_reuses),
         ("persistent_buffers", s.persistent_buffers),
         ("persistent_bytes", s.persistent_bytes),
+        ("persistent_peak", s.persistent_peak),
     ] {
         d.set_item(k, v)?;
     }
@@ -494,6 +501,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flex_attention, m)?)?;
     m.add_function(wrap_pyfunction!(flash_tiles, m)?)?;
     m.add_function(wrap_pyfunction!(submit_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_persistent_peak, m)?)?;
     m.add_function(wrap_pyfunction!(synchronize, m)?)?;
     m.add_function(wrap_pyfunction!(scatter, m)?)?;
     m.add_function(wrap_pyfunction!(scatter_, m)?)?;
