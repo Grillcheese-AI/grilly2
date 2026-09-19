@@ -44,7 +44,7 @@ void main() {
             uint k = line + (p.reverse == 1u ? p.len - 1u - t : t) * p.inner;
             precise float y = uintBitsToFloat(src[p.in_off + k]) - comp;
             precise float s = acc + y;
-            comp = (s - acc) - y;
+            comp = isinf(s) ? 0.0 : (s - acc) - y;  // see g2-reduce: keep inf, not NaN
             acc = s;
             dst[p.out_off + k] = floatBitsToUint(acc);
         }

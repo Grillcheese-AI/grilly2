@@ -149,3 +149,28 @@ def test_python_scalar_conversions_match_torch():
         with pytest.raises(RuntimeError, match="ambiguous"):
             bool(lib.ones(2))
 
+
+
+@pytest.mark.parametrize("values", [
+    [1.0, float("inf"), 2.0], [float("inf"), float("inf")], [1.0, float("-inf"), 3.0],
+    [float("inf"), float("-inf")], [3.4e38, 3.4e38, -1.0], [float("nan"), 1.0],
+])
+def test_sums_through_infinity_match_torch(values):
+    """Kahan compensation must not turn an infinite running sum into NaN
+    (it did: sum([inf, inf]) was NaN; a -inf logit made cross_entropy NaN)."""
+    g, t = grilly.tensor(values), torch.tensor(values)
+    np.testing.assert_array_equal(g.sum().numpy(), t.sum().numpy())
+    np.testing.assert_array_equal(g.mean().numpy(), t.mean().numpy())
+    np.testing.assert_array_equal(g.cumsum(0).numpy(), t.cumsum(0).numpy())
+    np.testing.assert_array_equal(g.reshape(1, -1).sum(1).numpy(), t.reshape(1, -1).sum(1).numpy())
+
+
+def test_cross_entropy_with_minus_inf_logits_matches_torch():
+    """CubbyLLM's top-k retrieval head: logits are -inf outside the top k, so a
+    target outside it has infinite loss; torch returns inf, not NaN."""
+    x = np.full((4, 6), -np.inf, np.float32)
+    x[:, :3] = np.random.default_rng(0).standard_normal((4, 3))
+    target = [0, 1, 5, 2]
+    got = grilly.nn.functional.cross_entropy(grilly.tensor(x), grilly.tensor(target))
+    want = torch.nn.functional.cross_entropy(torch.tensor(x), torch.tensor(target))
+    assert got.item() == want.item() == float("inf")

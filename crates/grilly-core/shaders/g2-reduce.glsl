@@ -34,7 +34,9 @@ void main() {
         for (uint k = 0; k < p.len; ++k) {
             precise float yv = src[base + k * p.inner] - comp;
             precise float t = sum + yv;
-            comp = (t - sum) - yv;
+            // once the sum is infinite the correction is (inf - sum) - yv =
+            // NaN; drop it so inf + x stays inf (inf + -inf is still NaN)
+            comp = isinf(t) ? 0.0 : (t - sum) - yv;
             sum = t;
         }
         r = (p.op == MEAN) ? sum / float(p.len) : sum;
