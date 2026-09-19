@@ -33,6 +33,9 @@ applies to v1's modules.
 | `g2-flash-bwd-kv`, `g2-flash-bwd-q` | its backward as two kernels (dK, dV per key tile; dQ per query tile), no atomics | the gradients of both |
 | `g2-flash-tiles` | a bool mask's bit mask and per-tile key / query lists, on the device | create_block_mask, SDPA masks |
 | `g2-bmm` | batched `op(A) @ op(B)`, optional transposes, broadcast batch dims; 16x16 tiles through shared memory | matmul / bmm with batch dims, and both gradients (no transpose copies) |
+| `g2-quantize-q8` | per-row int8 of a float32 weight, torchao's formula, with correctly rounded division (`div_rn`) | `quantize_(model, Int8WeightOnlyConfig())` (grilly.infer) |
+| `g2-linear-q8` | `(x @ q.T) * scale + bias` with the int8 weight unpacked in the kernel; 64 threads per output feature, 16-byte weight loads, up to 8 rows of x per weight read | `F.linear` on an `Int8Tensor` weight |
+| `g2-dequantize-q8` | `q * scale` back to float32 | any other use of an `Int8Tensor`; its linear's input gradient |
 
 All are prefixed `g2-` so they cannot shadow a v1 kernel. Every tensor is
 passed as its whole storage buffer plus an element offset, so views never

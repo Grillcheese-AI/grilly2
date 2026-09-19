@@ -122,6 +122,20 @@ void pair_add(inout float a_hi, inout float a_lo, float b_hi, float b_lo) {
     a_hi = t;
 }
 
+// a / b rounded to nearest, as IEEE division (OpFDiv may be 2.5 ulp off in
+// Vulkan). One Newton step refines the hardware reciprocal, then the
+// quotient's residual, exact through fma, corrects it (Markstein). For
+// finite, normal operands and quotients; tested against numpy on 2^24 pairs
+// (crates/grilly-core/tests/div_rn.rs).
+float div_rn(float a, float b) {
+    precise float y = 1.0 / b;
+    precise float e = fma(-b, y, 1.0);
+    y = fma(e, y, y);
+    precise float q = a * y;
+    precise float r = fma(-q, b, a);
+    return fma(r, y, q);
+}
+
 // ── elementwise ops, shared by g2-unary, g2-binary and fused kernels ─────
 // One definition per op, so a fused kernel (grilly_core::fusion) computes
 // exactly what the unfused kernels do. Results are `precise`: no

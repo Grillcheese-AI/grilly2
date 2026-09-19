@@ -137,3 +137,106 @@ Building the model takes about 3.7 s. I have not profiled it. The likely
 cost is drawing 494M random initial values on the host, which a load then
 overwrites. torch avoids this with meta-device initialisation, which
 grilly does not have yet.
+
+## 2. int8 weight-only quantization
+
+```python
+from grilly.infer.quantization import quantize_, Int8WeightOnlyConfig   # was: from torchao.quantization import ...
+
+quantize_(model, Int8WeightOnlyConfig())
+```
+
+`grilly.infer.quantization` has torchao's API:
+
+| name | what it does |
+|---|---|
+| `quantize_(model, config, filter_fn=..., device=None)` | quantizes, in place, the weight of every module `filter_fn(module, fqn)` accepts; by default every `nn.Linear` not quantized yet |
+| `Int8WeightOnlyConfig(group_size=None, granularity=PerRow(), ...)` | version 2, per-row only |
+| `PerRow` | the granularity: one scale per output feature |
+| `Int8Tensor` | the quantized weight; `from_hp(w)`, `dequantize()`, `scale`, `nbytes` |
+
+**Numerics: torchao's, exactly.**
+- `scale = max|w| / 127.5` per output row, at least float32 eps;
+- `q = clamp(round(w · (1/scale)), −128, 127)`, rounding half to even;
+- `F.linear(x, q) = (x @ q.T) · scale + bias`, the scale applied to the
+  finished dot product, as in torchao's weight-only path.
+
+Both divisions have to be correctly rounded to reproduce torchao's values.
+Vulkan allows `a / b` to be 2.5 ulp off, and on this card it is: the
+native division missed IEEE's result on many of 2^24 random pairs.
+`div_rn` in `g2-common.glsl` refines it with fused multiply-adds (a
+Newton step on the reciprocal, then a residual correction). It matches
+IEEE division on all 2^24 pairs, in `crates/grilly-core/tests/div_rn.rs`.
+
+Checked against torchao 0.18's own code (its pure-Python quantization
+path, run from the downloaded wheel): **0 of 10,019,412 int8 values and 0
+scales differ**, over six weight shapes up to 4864×896. The linear outputs
+agree to within 5e-7 of the output's magnitude.
+
+**How it runs.**
+- The weight is held as int8, four values to a 32-bit word, each row padded
+  to 16 bytes, plus a float32 scale per row, all in persistent memory. The
+  float32 weight is freed.
+- `F.linear` goes to `g2-linear-q8`, which dequantizes inside the kernel.
+  - 64 threads own one output feature and read its row 16 bytes per load.
+    Up to 8 rows of `x` share each weight read.
+  - `x` is read as `vec4` when its rows are 16-byte aligned.
+  - Sums run in a fixed order, so results are deterministic.
+- Any other use of the weight sees `dequantize()`, computed on demand.
+- The weight is frozen. Gradients reach the layer's input and bias (the
+  backward dequantizes for the duration of the step), so a quantized model
+  runs with or without `no_grad`, as with torchao.
+
+**Tests.**
+- `crates/grilly-infer/tests/quant.rs` runs from Rust only:
+  - bit-exact values, scales and dequantized weights, including zero rows
+    and ties;
+  - the linear against float64 under the error bound its summation order
+    implies (worst measured ratio 0.043);
+  - gradients.
+- `tests/python/test_quantization.py` runs the same checks against
+  torchao's formula in torch, plus:
+  - a quantized model against torch running torchao's weight-only math
+    (rtol 1e-5);
+  - the API: filters, the configs torchao refuses, and memory.
+
+### Measured, RX 6750 XT
+
+GPU time per call at Qwen2.5-0.5B's shapes (`tools/int8_linear.py`: 200
+calls per batch, the shim's wait divided by 200). GB/s counts the weight
+bytes read.
+
+| layer (out × in) | rows | float32 µs | int8 µs | int8 GB/s | int8 vs float32 |
+|---|---:|---:|---:|---:|---:|
+| q/o_proj (896 × 896) | 1 | 24.5 | 6.0 | 135 | 4.1× faster |
+| k/v_proj (128 × 896) | 1 | 22.3 | 3.4 | 34 | 6.5× faster |
+| gate/up_proj (4864 × 896) | 1 | 73.9 | 20.6 | 213 | 3.6× faster |
+| down_proj (896 × 4864) | 1 | 122.4 | 11.7 | 372 | 10.4× faster |
+| lm_head (151936 × 896) | 1 | 2745 | 570 | 240 | 4.8× faster |
+| gate/up_proj | 8 | 74.8 | 67.2 | 65 | 1.1× faster |
+| down_proj | 8 | 124.9 | 49.0 | 89 | 2.5× faster |
+| gate/up_proj | 128 | 553 | 886 | 5 | **0.62×, slower** |
+| down_proj | 128 | 596 | 714 | 6 | **0.83×, slower** |
+
+- **Decode (one row)** is where int8 pays: 3.6–10.4× faster.
+- **Prefill** of a 128-token prompt is slower in int8 (0.62–0.92×). The
+  kernel re-reads the weight for each 8-row chunk. A tiled kernel that
+  unpacks each int8 tile into shared memory once per 64 rows is the fix.
+  It is not built yet.
+- **Loading `x` as `vec4`** made decode 1.4–2.4× faster than scalar loads.
+  The kernel had been limited by load instructions, not by bandwidth.
+
+**Error** on Qwen2.5-0.5B's real weights, as the int8 output's relative
+error against float32, on random normal inputs:
+- mean 0.9–1.2% by layer type;
+- worst 1.5% (down_proj and v_proj).
+
+Real activations need the decode loop (step 4).
+
+**Memory.** A grilly model with Qwen2.5-0.5B's shapes and weights holds
+1.94 GiB of dedicated VRAM loaded, and **0.91 GiB** after `quantize_`:
+- 0.33 GiB of int8 linear weights;
+- the 0.51 GiB embedding, which stays float32 as with torchao's default
+  filter.
+
+`quantize_` takes 0.12 s for the whole model.

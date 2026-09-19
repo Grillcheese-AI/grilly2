@@ -4,10 +4,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use grilly_infer::{LoadError, SafeTensorsFile};
+use grilly_infer::{Int8Weight, LoadError, SafeTensorsFile};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyFileNotFoundError, PyOSError};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 use crate::{device, err, wrap, PyTensor};
 
@@ -71,8 +72,54 @@ impl PySafeFile {
     }
 }
 
+/// A linear weight quantized to int8 per output row (grilly_infer::Int8Weight).
+#[pyclass(name = "Int8Weight", module = "grilly._C", frozen)]
+struct PyInt8Weight {
+    inner: Int8Weight,
+}
+
+#[pymethods]
+impl PyInt8Weight {
+    #[staticmethod]
+    fn quantize(py: Python<'_>, weight: &PyTensor) -> PyResult<PyInt8Weight> {
+        py.detach(|| Int8Weight::quantize(&weight.inner)).map(|inner| PyInt8Weight { inner }).map_err(err)
+    }
+
+    /// (out_features, in_features)
+    #[getter]
+    fn shape(&self) -> Vec<usize> {
+        self.inner.shape().to_vec()
+    }
+
+    /// Device bytes held.
+    #[getter]
+    fn nbytes(&self) -> usize {
+        self.inner.nbytes()
+    }
+
+    fn scale(&self) -> PyTensor {
+        wrap(self.inner.scale().clone())
+    }
+
+    /// The int8 values, row-major, as bytes.
+    fn qdata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let q = py.detach(|| self.inner.qdata()).map_err(err)?;
+        Ok(PyBytes::new(py, &q.iter().map(|&v| v as u8).collect::<Vec<u8>>()))
+    }
+
+    fn dequantize(&self, py: Python<'_>) -> PyResult<PyTensor> {
+        py.detach(|| self.inner.dequantize()).map(wrap).map_err(err)
+    }
+
+    #[pyo3(signature = (input, bias=None))]
+    fn linear(&self, py: Python<'_>, input: &PyTensor, bias: Option<&PyTensor>) -> PyResult<PyTensor> {
+        py.detach(|| self.inner.linear(&input.inner, bias.map(|b| &b.inner))).map(wrap).map_err(err)
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySafeFile>()?;
+    m.add_class::<PyInt8Weight>()?;
     m.add("SafetensorError", m.py().get_type::<SafetensorError>())?;
     Ok(())
 }

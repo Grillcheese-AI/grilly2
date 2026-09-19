@@ -19,6 +19,9 @@ __all__ = [
 
 def linear(input: Tensor, weight: Tensor, bias: Tensor | None = None) -> Tensor:
     """``input @ weight.T + bias`` over the last dimension of ``input``."""
+    own = getattr(type(weight), "_grilly_linear", None)
+    if own is not None:  # a weight with its own kernel, e.g. a quantized one (grilly.infer)
+        return own(weight, input, bias)
     x = _require_tensor("input", input)
     w = _require_tensor("weight", weight)
     b = None if bias is None else _require_tensor("bias", bias)._t

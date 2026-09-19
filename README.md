@@ -50,11 +50,14 @@ x = torch.tensor([[1.0, -2.0]])
 torch.nn.functional.linear(x, torch.ones(3, 2))
 ```
 
-To load a safetensors checkpoint (see `docs/inference.md`):
+To load a safetensors checkpoint and quantize it (see `docs/inference.md`):
 
 ```python
 from grilly.infer.safetensors import load_file   # safetensors.torch's API
-model.load_state_dict(load_file("model.safetensors"))
+model.load_state_dict(load_file("model.safetensors"), assign=True)
+
+from grilly.infer.quantization import quantize_, Int8WeightOnlyConfig   # torchao's API
+quantize_(model, Int8WeightOnlyConfig())         # int8 linear weights
 ```
 
 Only float32 tensors on the default GPU exist so far. Anything torch supports
