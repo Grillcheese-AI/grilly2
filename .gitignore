@@ -1,0 +1,7 @@
+/target/
+Cargo.lock.bak
+*.pdb
+__pycache__/
+*.pyd
+*.so
+.venv/
