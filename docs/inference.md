@@ -306,15 +306,34 @@ iterations on one GPU thread. The dev machine has the Windows GPU watchdog
 off (`TdrLevel = 0`), so that loop froze the desktop for minutes and needed
 a reset. The loop is now bounded, and a regression test covers the case.
 
-**Speed, not tuned yet.** GPU time per call for one row, measured with
-launch blocking:
+**Speed.** Measured with launch blocking, one row, 151,936-token vocabulary:
 
-| vocab | greedy | top_k 20 | top_k 50, top_p 0.8 | top_p 0.9 (top_k off) |
-|---:|---:|---:|---:|---:|
-| 10,000 | 0.8 ms (with penalty) | 0.14 ms | 0.38 ms | 0.45 ms |
-| 151,936 | 11.3 ms (with penalty) | 1.0 ms | 4.0 ms | 5.4 ms |
+| sampling setting | first version | tuned |
+|---|---:|---:|
+| greedy, with repetition penalty | 11.26 ms | **0.24 ms** |
+| top_k 20 | 1.00 ms | **0.69 ms** |
+| top_k 50, top_p 0.8, temperature 0.7, penalty 1.3 | 3.99 ms | **0.78 ms** |
+| top_p 0.3, top_k off | 5.05 ms | **0.99 ms** |
+| top_p 0.9, top_k off, flat distribution (6,200 kept) | 5.38 ms | **2.46 ms** |
 
-That is too slow next to a decode step. One workgroup per row is four
-waves on one CU of forty, so the passes are bound by memory latency, not
-bandwidth. Greedy is slow because grilly's generic argmax scans a row on
-one thread. Both are the next pass.
+Three changes, each measured on its own:
+1. **Greedy.** grilly's generic argmax scanned each row on a single
+   thread. Contiguous rows of 256 or more now take `g2-argreduce-rows`: a
+   workgroup per row, then a tree that keeps torch's rule (NaN is the
+   extreme, a tie goes to the lower index). That serves `torch.argmax` and
+   `torch.argmin` too.
+2. **Candidates in shared memory.**
+   - After top-k, the survivors (up to 2048) are copied into shared memory
+     in token order. Top-p, the tie rule, the draw and the distribution
+     then run there, instead of 32 masked passes over the whole row.
+   - With top-k off, the 2048 largest scores serve as a pool, but only
+     when the mass below the pool is at most (1 − p)·Z, which proves HF
+     drops everything below it. Otherwise the kernel takes the full-row
+     path. The flat case above does, and the pool attempt costs it a
+     little.
+3. **1024 threads per workgroup** instead of 256. Each pass over a 152K row
+   was bound by memory latency, not bandwidth.
+
+A pass over the row now costs about 0.07 ms, which is the limit for one
+workgroup. Going further would mean splitting a row across workgroups in
+extra dispatches.

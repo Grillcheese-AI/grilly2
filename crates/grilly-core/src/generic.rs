@@ -29,6 +29,8 @@ pub const INDEX_ADD: Kernel = Kernel { shader: "g2-index-add", bindings: 3, push
 pub const INDEX_ADD_ATOMIC: Kernel = Kernel { shader: "g2-index-add-atomic", bindings: 3, push_words: 9 + 2 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 
 pub const ARG_REDUCE: Kernel = Kernel { shader: "g2-argreduce", bindings: 2, push_words: 7, local_size: [256, 1, 1] };
+/// Contiguous rows, a workgroup each. Push: rows, len, is_max, is_int, in_off, out_off.
+pub const ARG_REDUCE_ROWS: Kernel = Kernel { shader: "g2-argreduce-rows", bindings: 2, push_words: 6, local_size: [256, 1, 1] };
 pub const SORT_INIT: Kernel = Kernel { shader: "g2-sort-init", bindings: 3, push_words: 5, local_size: [256, 1, 1] };
 pub const SORT_STEP: Kernel = Kernel { shader: "g2-sort-step", bindings: 2, push_words: 7, local_size: [256, 1, 1] };
 pub const SORT_TAKE: Kernel = Kernel { shader: "g2-sort-take", bindings: 2, push_words: 3, local_size: [256, 1, 1] };
@@ -44,7 +46,7 @@ pub const LAYER_NORM_BACKWARD: Kernel =
 
 pub const ALL: &[Kernel] = &[
     UNARY, BINARY, REDUCE, COPY, CAST, BINARY_INT, WHERE, REDUCE_INT, INDEX, INDEX_ADD, INDEX_ADD_ATOMIC,
-    ARG_REDUCE, SORT_INIT, SORT_STEP, SORT_TAKE, SCATTER, SCAN, BMM, REDUCE_ROWS, LAYER_NORM,
+    ARG_REDUCE, ARG_REDUCE_ROWS, SORT_INIT, SORT_STEP, SORT_TAKE, SCATTER, SCAN, BMM, REDUCE_ROWS, LAYER_NORM,
     LAYER_NORM_BACKWARD,
 ];
 
@@ -669,6 +671,9 @@ pub fn index_add_backward(g: &Tensor, dim: usize, index: &Tensor, mode: IndexMod
 /// `argmax` (`max`) or `argmin` of a float32 or int64 tensor along `dim`,
 /// as int64 with `dim` kept as size 1. Ties go to the first position, and
 /// NaN is both the largest and the smallest value, as in torch.
+/// Rows at least this long take the workgroup-per-row argmax.
+const ARG_ROWS_MIN_LEN: usize = 256;
+
 pub fn arg_reduce(x: &Tensor, dim: usize, max: bool) -> Result<Tensor> {
     let is_int = match x.dtype() {
         DType::F32 => 0,
@@ -689,6 +694,15 @@ pub fn arg_reduce(x: &Tensor, dim: usize, max: bool) -> Result<Tensor> {
     let mut out_shape = shape.to_vec();
     out_shape[dim] = 1;
     let out = Tensor::empty_typed(x.device(), &out_shape, DType::I64)?;
+    if inner == 1 && len >= ARG_ROWS_MIN_LEN {
+        // A thread per output would scan a whole row alone: 11 ms for one
+        // 152K-vocabulary row, against ~0.1 ms for a workgroup per row.
+        let push = [u32_of(outer, "rows")?, u32_of(len, "len")?, max as u32, is_int, u32_of(x.offset(), "offset")?, 0];
+        if outer > 0 {
+            ARG_REDUCE_ROWS.launch(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], row_grid(outer)?, &push)?;
+        }
+        return Ok(out);
+    }
     let push = [u32_of(outer, "outer")?, u32_of(len, "len")?, u32_of(inner, "inner")?, max as u32, is_int, u32_of(x.offset(), "offset")?, 0];
     ARG_REDUCE.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], outer * inner, &push)?;
     Ok(out)

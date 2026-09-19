@@ -26,7 +26,7 @@ use grilly_core::{require_float, Arg, DType, Error, Kernel, Result, Tensor};
 /// Bindings: logits, history, scores, tokens, ex. Push: v, hist_len, flags,
 /// top_k, temperature, penalty, one_minus_p, logits_off, hist_off, row0,
 /// rows, u[8].
-const SAMPLE: Kernel = Kernel { shader: "g2-sample", bindings: 5, push_words: 19, local_size: [256, 1, 1] };
+const SAMPLE: Kernel = Kernel { shader: "g2-sample", bindings: 5, push_words: 19, local_size: [1024, 1, 1] };
 pub const KERNELS: &[Kernel] = &[SAMPLE];
 
 const F_PENALTY: u32 = 1;
@@ -140,7 +140,7 @@ fn run(r: Run<'_>, uniforms: &[f32]) -> Result<(Tensor, Tensor, Tensor)> {
         SAMPLE.launch(
             dev,
             &[Arg::Storage(r.logits), hist, Arg::Tensor(&scores), Arg::Tensor(&tokens), Arg::Tensor(&ex)],
-            [u32_of(n * 256, "rows")?, 1, 1],
+            [u32_of(n * 1024, "rows")?, 1, 1],
             &push,
         )?;
     }

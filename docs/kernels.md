@@ -25,6 +25,7 @@ applies to v1's modules.
 | `g2-index-add` | backward of `g2-index`, one thread per destination, fixed order | the gradient under `use_deterministic_algorithms(True)` |
 | `g2-index-add-atomic` | backward of `g2-index`, one thread per gradient element | the gradient by default (fast; last bits vary with duplicate indices) |
 | `g2-argreduce` | index of the first extreme along one axis (NaN is the extreme) | argmax, argmin, `max(dim)`, `min(dim)` |
+| `g2-argreduce-rows` | argmax / argmin along contiguous rows of 256 or more, a workgroup per row, torch's tie and NaN rule | argmax, argmin, `max(dim)`, `min(dim)` over long rows; greedy decoding |
 | `g2-sort-init`, `g2-sort-step`, `g2-sort-take` | bitonic sort of every row (padded to a power of two), float32 or int64 keys, ties by position | sort, argsort, topk |
 | `g2-scatter` | `dst[c with c[dim] := index[c]] = src[c]`, any dtype | scatter, scatter_, the input gradient of scatter |
 | `g2-scan` | inclusive scan along one axis, one thread per line, forward or reversed | cumsum (and its gradient), logcumsumexp (and its gradient) |
@@ -36,7 +37,7 @@ applies to v1's modules.
 | `g2-quantize-q8` | per-row int8 of a float32 weight, torchao's formula, with correctly rounded division (`div_rn`) | `quantize_(model, Int8WeightOnlyConfig())` (grilly.infer) |
 | `g2-linear-q8` | `(x @ q.T) * scale + bias` with the int8 weight unpacked in the kernel; 64 threads per output feature, 16-byte weight loads, up to 8 rows of x per weight read | `F.linear` on an `Int8Tensor` weight |
 | `g2-dequantize-q8` | `q * scale` back to float32 | any other use of an `Int8Tensor`; its linear's input gradient |
-| `g2-sample` | next-token sampling, a workgroup per row: repetition penalty, temperature, top-k (radix select), top-p (binary search over values), inverse-CDF draw; no sort | `grilly.infer.sampling`, `torch.multinomial` |
+| `g2-sample` | next-token sampling, a workgroup of 1024 per row: repetition penalty, temperature, top-k (radix select), top-p (binary search over values), inverse-CDF draw; no sort; candidates in shared memory when they fit | `grilly.infer.sampling`, `torch.multinomial` |
 
 All are prefixed `g2-` so they cannot shadow a v1 kernel. Every tensor is
 passed as its whole storage buffer plus an element offset, so views never
