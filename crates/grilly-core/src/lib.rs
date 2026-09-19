@@ -10,6 +10,7 @@
 mod device;
 mod error;
 mod kernel;
+pub mod rng;
 mod tensor;
 
 pub use device::{Buffer, Caps, Device, MemClass};

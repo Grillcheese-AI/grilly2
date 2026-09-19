@@ -15,8 +15,10 @@ import numpy as _np
 from . import _C
 
 __all__ = [
-    "Size", "Tensor", "add", "dtype", "empty", "float32", "from_numpy",
-    "is_tensor", "ones", "relu", "tensor", "zeros",
+    "Generator", "Size", "Tensor", "add", "default_generator", "dtype", "empty",
+    "float32", "from_numpy", "initial_seed", "is_tensor", "manual_seed", "ones",
+    "rand", "rand_like", "randint", "randn", "randn_like", "relu", "seed",
+    "tensor", "zeros",
 ]
 
 
@@ -280,6 +282,52 @@ def add(input, other, *, alpha=1) -> Tensor:
     if a.shape != b.shape:
         raise _not_yet(f"broadcasting in add ({list(a.shape)} vs {list(b.shape)})")
     return Tensor._wrap(_C.add(a._t, b._t))
+
+
+# ── random ───────────────────────────────────────────────────────────────
+
+from .random import Generator, default_generator, initial_seed, manual_seed, seed  # noqa: E402
+
+
+def _random(kind: str, size, generator, dtype_, device, requires_grad, out) -> Tensor:
+    if out is not None:
+        raise _not_yet("the out= argument")
+    _check_factory_args(dtype_, device, requires_grad)
+    g = default_generator if generator is None else generator
+    if not isinstance(g, Generator):
+        raise TypeError(f"generator must be a grilly.Generator, not {type(g).__name__}")
+    return Tensor._wrap(getattr(g._g, kind)(list(_size_args(size))))
+
+
+def randn(*size, generator=None, out=None, dtype=None, layout=None, device=None,
+          requires_grad=False, pin_memory=False) -> Tensor:
+    """Standard-normal samples; deterministic per seed, not torch's values."""
+    return _random("normal", size, generator, dtype, device, requires_grad, out)
+
+
+def rand(*size, generator=None, out=None, dtype=None, layout=None, device=None,
+         requires_grad=False, pin_memory=False) -> Tensor:
+    """Samples uniform in [0, 1); deterministic per seed, not torch's values."""
+    return _random("uniform", size, generator, dtype, device, requires_grad, out)
+
+
+def randn_like(input: Tensor, *, dtype=None, layout=None, device=None,
+               requires_grad=False, memory_format=None) -> Tensor:
+    return randn(*_require_tensor("input", input).shape, dtype=dtype, device=device,
+                 requires_grad=requires_grad)
+
+
+def rand_like(input: Tensor, *, dtype=None, layout=None, device=None,
+              requires_grad=False, memory_format=None) -> Tensor:
+    return rand(*_require_tensor("input", input).shape, dtype=dtype, device=device,
+                requires_grad=requires_grad)
+
+
+def randint(*args, **kwargs):
+    raise NotImplementedError(
+        "grilly: randint is not implemented yet (it returns int64 tensors, "
+        "and integer dtypes are not implemented yet)"
+    )
 
 
 from . import nn  # noqa: E402  (needs Tensor defined)

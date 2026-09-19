@@ -5,7 +5,7 @@
 // `_C` mirrors torch's native module name.
 #![allow(non_snake_case)]
 
-use grilly_core::{Device, Error, Tensor};
+use grilly_core::{rng, Device, Error, Tensor};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -68,6 +68,44 @@ impl PyTensor {
     }
 }
 
+/// A seeded random stream; see grilly_core::rng for the exact algorithm.
+#[pyclass(name = "Generator", module = "grilly._C")]
+struct PyGenerator {
+    inner: rng::Generator,
+}
+
+#[pymethods]
+impl PyGenerator {
+    #[new]
+    fn new(seed: u64) -> PyGenerator {
+        PyGenerator { inner: rng::Generator::new(seed) }
+    }
+
+    fn manual_seed(&mut self, seed: u64) {
+        self.inner.manual_seed(seed);
+    }
+
+    fn initial_seed(&self) -> u64 {
+        self.inner.initial_seed()
+    }
+
+    /// Standard-normal float32 tensor of the given shape.
+    fn normal(&mut self, py: Python<'_>, shape: Vec<usize>) -> PyResult<PyTensor> {
+        let n = shape.iter().product();
+        let values = self.inner.normal(n);
+        let dev = device()?;
+        py.detach(|| Tensor::from_slice(&dev, &values, &shape)).map(wrap).map_err(err)
+    }
+
+    /// Float32 tensor uniform in [0, 1).
+    fn uniform(&mut self, py: Python<'_>, shape: Vec<usize>) -> PyResult<PyTensor> {
+        let n = shape.iter().product();
+        let values = self.inner.uniform(n);
+        let dev = device()?;
+        py.detach(|| Tensor::from_slice(&dev, &values, &shape)).map(wrap).map_err(err)
+    }
+}
+
 #[pyfunction]
 fn relu(py: Python<'_>, input: &PyTensor) -> PyResult<PyTensor> {
     py.detach(|| grilly_torch::relu(&input.inner)).map(wrap).map_err(err)
@@ -95,6 +133,8 @@ fn device_name() -> PyResult<String> {
 #[pymodule]
 fn _C(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
+    m.add_class::<PyGenerator>()?;
+    m.add("DEFAULT_SEED", rng::DEFAULT_SEED)?;
     m.add_function(wrap_pyfunction!(relu, m)?)?;
     m.add_function(wrap_pyfunction!(add, m)?)?;
     m.add_function(wrap_pyfunction!(linear, m)?)?;
