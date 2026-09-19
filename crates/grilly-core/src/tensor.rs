@@ -1,10 +1,15 @@
 use std::sync::Arc;
 
+use crate::autograd::{self, Backward, Meta};
 use crate::device::{Buffer, Device, MemClass};
 use crate::error::{Error, Result};
 
 /// A float32 tensor in GPU memory: a shape over a contiguous row-major run of
-/// elements in a shared buffer. Cloning shares the storage, as a view does.
+/// elements in a shared buffer, plus its autograd state.
+///
+/// Cloning a `Tensor` makes another handle to the *same* tensor (same data,
+/// same `requires_grad` and `.grad`), like a second Python reference in torch.
+/// [`Tensor::clone_data`] is torch's `clone()`.
 ///
 /// Strided views and other dtypes are not implemented yet; every tensor is
 /// contiguous float32.
@@ -14,6 +19,7 @@ pub struct Tensor {
     shape: Vec<usize>,
     /// Offset of the first element, in elements.
     offset: usize,
+    meta: Arc<Meta>,
 }
 
 const ELEM: usize = std::mem::size_of::<f32>();
@@ -29,7 +35,30 @@ fn as_bytes(data: &[f32]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)) }
 }
 
+struct ViewBackward {
+    input_shape: Vec<usize>,
+}
+
+impl Backward for ViewBackward {
+    fn apply(&mut self, grads: &[Option<Tensor>], _: &[bool]) -> Result<Vec<Option<Tensor>>> {
+        let g = grads[0].as_ref().expect("single output");
+        Ok(vec![Some(g.reshape(&self.input_shape)?)])
+    }
+}
+
+struct CloneBackward;
+
+impl Backward for CloneBackward {
+    fn apply(&mut self, grads: &[Option<Tensor>], _: &[bool]) -> Result<Vec<Option<Tensor>>> {
+        Ok(vec![grads[0].clone()])
+    }
+}
+
 impl Tensor {
+    fn from_parts(storage: Arc<Buffer>, shape: Vec<usize>, offset: usize) -> Tensor {
+        Tensor { storage, shape, offset, meta: Arc::new(Meta::leaf()) }
+    }
+
     /// A tensor with undefined contents.
     pub fn empty(device: &Device, shape: &[usize]) -> Result<Tensor> {
         let bytes = numel_of(shape)?
@@ -37,7 +66,7 @@ impl Tensor {
             .ok_or_else(|| Error::Shape(format!("shape {shape:?} is too large")))?;
         // Zero-element tensors still get a minimal allocation.
         let storage = device.alloc(bytes.max(ELEM) as u64, MemClass::Device)?;
-        Ok(Tensor { storage: Arc::new(storage), shape: shape.to_vec(), offset: 0 })
+        Ok(Tensor::from_parts(Arc::new(storage), shape.to_vec(), 0))
     }
 
     /// Copy `data` (row-major) to a new tensor of the given shape.
@@ -56,8 +85,28 @@ impl Tensor {
         Ok(t)
     }
 
+    /// Every element `value`, filled on the device.
+    pub fn full(device: &Device, shape: &[usize], value: f32) -> Result<Tensor> {
+        let t = Tensor::empty(device, shape)?;
+        device.record_fill(&t.storage, t.byte_offset(), t.byte_len(), value.to_bits())?;
+        Ok(t)
+    }
+
     pub fn zeros(device: &Device, shape: &[usize]) -> Result<Tensor> {
-        Tensor::from_slice(device, &vec![0.0; numel_of(shape)?], shape)
+        Tensor::full(device, shape, 0.0)
+    }
+
+    /// A copy of the data in new storage (torch's `clone()`); differentiable.
+    pub fn clone_data(&self) -> Result<Tensor> {
+        let mut out = Tensor::empty(self.device(), &self.shape)?;
+        self.device().record_copy(&self.storage, self.byte_offset(), &out.storage, 0, self.byte_len())?;
+        autograd::record("CloneBackward0", &[self], &mut [&mut out], |_| CloneBackward);
+        Ok(out)
+    }
+
+    /// The same data, cut off from the graph (torch's `detach()`).
+    pub fn detach(&self) -> Tensor {
+        Tensor::from_parts(self.storage.clone(), self.shape.clone(), self.offset)
     }
 
     /// Copy the elements back to the host (row-major). Waits for pending work.
@@ -97,7 +146,70 @@ impl Tensor {
                 self.numel()
             )));
         }
-        Ok(Tensor { storage: self.storage.clone(), shape: shape.to_vec(), offset: self.offset })
+        let mut out = Tensor::from_parts(self.storage.clone(), shape.to_vec(), self.offset);
+        let input_shape = self.shape.clone();
+        autograd::record("ViewBackward0", &[self], &mut [&mut out], |_| ViewBackward { input_shape });
+        Ok(out)
+    }
+
+    // ── autograd ─────────────────────────────────────────────────────────
+
+    pub fn requires_grad(&self) -> bool {
+        autograd::requires_grad(&self.meta)
+    }
+
+    /// torch's `requires_grad_()`: only leaves can change it.
+    pub fn set_requires_grad(&self, value: bool) -> Result<()> {
+        autograd::set_requires_grad(&self.meta, value)
+    }
+
+    pub fn is_leaf(&self) -> bool {
+        autograd::is_leaf(&self.meta)
+    }
+
+    /// Name of the node that produced this tensor, as torch prints `grad_fn`.
+    pub fn grad_fn_name(&self) -> Option<&'static str> {
+        autograd::grad_fn_name(&self.meta)
+    }
+
+    /// The accumulated gradient (`.grad`); set on leaves by `backward`.
+    pub fn grad(&self) -> Option<Tensor> {
+        autograd::grad(&self.meta)
+    }
+
+    /// Replace `.grad`; `None` is what `zero_grad(set_to_none=True)` does.
+    pub fn set_grad(&self, grad: Option<Tensor>) -> Result<()> {
+        if let Some(g) = &grad {
+            if g.shape() != self.shape() {
+                return Err(Error::Shape(format!(
+                    "assigned grad has data of shape {:?} but the tensor has shape {:?}",
+                    g.shape(),
+                    self.shape()
+                )));
+            }
+        }
+        autograd::set_grad(&self.meta, grad);
+        Ok(())
+    }
+
+    /// torch's `backward(gradient=None, retain_graph=False)`.
+    pub fn backward(&self, gradient: Option<&Tensor>, retain_graph: bool) -> Result<()> {
+        autograd::backward(self, gradient, retain_graph)
+    }
+
+    // ── crate internals ─────────────────────────────────────────────────
+
+    pub(crate) fn meta(&self) -> &Arc<Meta> {
+        &self.meta
+    }
+
+    pub(crate) fn set_meta(&mut self, meta: Arc<Meta>) {
+        self.meta = meta;
+    }
+
+    /// Nothing but this handle can reach this data.
+    pub(crate) fn is_sole_owner(&self) -> bool {
+        Arc::strong_count(&self.storage) == 1 && Arc::strong_count(&self.meta) == 1
     }
 
     pub(crate) fn storage(&self) -> &Buffer {
@@ -115,6 +227,11 @@ impl Tensor {
 
 impl std::fmt::Debug for Tensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Tensor(shape={:?}, device={:?})", self.shape, self.device())
+        write!(f, "Tensor(shape={:?}, device={:?}", self.shape, self.device())?;
+        match self.grad_fn_name() {
+            Some(name) => write!(f, ", grad_fn={name})"),
+            None if self.requires_grad() => write!(f, ", requires_grad=True)"),
+            None => write!(f, ")"),
+        }
     }
 }

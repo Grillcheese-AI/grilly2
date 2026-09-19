@@ -11,9 +11,10 @@ pub const RELU: Kernel = Kernel {
     local_size: [256, 1, 1],
 };
 
-/// `out[i] = a[i] + b[i]`. Bindings: a, b, out. Push: {n}.
-pub const ADD: Kernel = Kernel {
-    shader: "fnn-residual",
+/// `grad_in[i] = grad_out[i] * (x[i] > 0)`. Bindings: grad_out, x, grad_in.
+/// Push: {n}.
+pub const RELU_BACKWARD: Kernel = Kernel {
+    shader: "activation-relu-backward",
     bindings: 3,
     push_words: 1,
     local_size: [256, 1, 1],
@@ -29,4 +30,18 @@ pub const LINEAR: Kernel = Kernel {
     local_size: [16, 16, 1],
 };
 
-pub const ALL: &[Kernel] = &[RELU, ADD, LINEAR];
+/// Linear backward, one pass per push `pass`; each pass writes only its own
+/// output, without atomics.
+/// Bindings: grad_out, x, W, grad_x, grad_W, grad_b.
+/// Push: {rows, in, out, pass}.
+/// - pass 0: grad_x = grad_out @ W; threads (in, rows)
+/// - pass 1: grad_W = grad_out^T @ x; threads (in, out)
+/// - pass 2: grad_b = sum over rows of grad_out; threads (out, 1)
+pub const LINEAR_BACKWARD: Kernel = Kernel {
+    shader: "fnn-linear-backward",
+    bindings: 6,
+    push_words: 4,
+    local_size: [16, 16, 1],
+};
+
+pub const ALL: &[Kernel] = &[RELU, RELU_BACKWARD, LINEAR, LINEAR_BACKWARD];

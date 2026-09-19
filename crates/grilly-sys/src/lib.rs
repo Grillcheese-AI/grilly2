@@ -70,6 +70,8 @@ extern "C" {
         push_bytes: u32,
     ) -> i32;
     pub fn gc_barrier(ctx: *mut gc_ctx) -> i32;
+    pub fn gc_copy(ctx: *mut gc_ctx, src: gc_buf, src_offset: u64, dst: gc_buf, dst_offset: u64, bytes: u64) -> i32;
+    pub fn gc_fill(ctx: *mut gc_ctx, dst: gc_buf, offset: u64, bytes: u64, word: u32) -> i32;
     pub fn gc_submit(ctx: *mut gc_ctx) -> i32;
 }
 

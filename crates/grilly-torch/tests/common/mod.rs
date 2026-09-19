@@ -1,3 +1,4 @@
+#![allow(dead_code)] // shared by several test binaries, each using a subset
 //! Reference results from real torch on CPU.
 //!
 //! Runs the interpreter named by `GRILLY_PYTHON` (default `python`), which
@@ -10,13 +11,24 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const SCRIPT: &str = r#"
 import sys, numpy as np, torch
 import torch.nn.functional as F
+
+def grads(f, args, g):
+    """Gradients of f(*args) w.r.t. every arg, for output gradient g."""
+    args = [a.detach().requires_grad_(True) for a in args]
+    return torch.autograd.grad(f(*args), args, g, allow_unused=True, materialize_grads=True)
+
 expr, out_path, rest = sys.argv[1], sys.argv[2], sys.argv[3:]
-env = {"torch": torch, "F": F}
+env = {"torch": torch, "F": F, "grads": grads}
 for name, path, shape in zip(rest[0::3], rest[1::3], rest[2::3]):
     dims = tuple(int(d) for d in shape.split(",")) if shape else ()
     env[name] = torch.from_numpy(np.fromfile(path, dtype="<f4").reshape(dims))
 out = eval(expr, env)
-out.detach().contiguous().numpy().astype("<f4").tofile(out_path)
+outs = out if isinstance(out, (tuple, list)) else [out]
+with open(out_path, "wb") as f:
+    for t in outs:
+        a = t.detach().contiguous().numpy().astype("<f4").ravel()
+        f.write(np.int64(a.size).tobytes())
+        f.write(a.tobytes())
 "#;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -43,6 +55,13 @@ fn write_f32(path: &PathBuf, data: &[f32]) {
 /// Evaluate `expr` in torch with the named inputs bound as float32 tensors,
 /// returning the result flattened row-major.
 pub fn torch(expr: &str, inputs: &[(&str, &[f32], &[usize])]) -> Vec<f32> {
+    let mut all = torch_many(expr, inputs);
+    assert_eq!(all.len(), 1, "`{expr}` returned {} tensors", all.len());
+    all.remove(0)
+}
+
+/// Like [`torch`] for an expression returning a tuple of tensors.
+pub fn torch_many(expr: &str, inputs: &[(&str, &[f32], &[usize])]) -> Vec<Vec<f32>> {
     let dir = scratch_dir();
     let out = dir.join("out.bin");
     let mut cmd = Command::new(python());
@@ -61,13 +80,23 @@ pub fn torch(expr: &str, inputs: &[(&str, &[f32], &[usize])]) -> Vec<f32> {
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr))
             .unwrap_or_default();
         panic!(
-            "torch reference failed for `{expr}`\ninterpreter: {about}\n{}",
+            "torch reference failed for `{expr}`
+interpreter: {about}
+{}",
             String::from_utf8_lossy(&result.stderr)
         );
     }
     let bytes = std::fs::read(&out).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
+    let mut tensors = Vec::new();
+    let mut rest = &bytes[..];
+    while !rest.is_empty() {
+        let n = i64::from_le_bytes(rest[..8].try_into().unwrap()) as usize;
+        let data = &rest[8..8 + n * 4];
+        tensors.push(data.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect());
+        rest = &rest[8 + n * 4..];
+    }
+    tensors
 }
 
 /// Deterministic values in [-1, 1).

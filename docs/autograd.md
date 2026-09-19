@@ -1,6 +1,8 @@
 # Autograd design
 
-**Status: proposed, for owner review. Nothing here is built yet.**
+**Status: accepted by the owner 2026-09-18, with the three recommendations in §6.**
+The `use_deterministic_algorithms` switch arrives with the first op that uses an
+atomic kernel; none of the ops built so far does.
 
 Autograd belongs in `grilly-core` (CLAUDE.md §4). This document fixes its
 structure before any code: the graph, the engine, grad mode, saved tensors,

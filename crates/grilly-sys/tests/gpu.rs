@@ -233,3 +233,27 @@ fn misuse_is_reported_not_thrown() {
     ok!(gc_buffer_release(ctx.0, b));
     assert_eq!(unsafe { gc_buffer_release(ctx.0, b) }, GC_ERR);
 }
+
+#[test]
+fn fill_and_copy_at_offsets() {
+    let ctx = Ctx::new();
+    let (a, b) = (ctx.buffer(64), ctx.buffer(64));
+    ctx.upload(b, 0, &[0.0f32; 16]);
+    ok!(gc_begin(ctx.0));
+    ok!(gc_fill(ctx.0, a, 0, 64, 2.5f32.to_bits()));
+    ok!(gc_barrier(ctx.0));
+    ok!(gc_fill(ctx.0, a, 16, 8, (-1.0f32).to_bits()));
+    ok!(gc_barrier(ctx.0));
+    ok!(gc_copy(ctx.0, a, 8, b, 32, 24)); // a[2..8] -> b[8..14]
+    // unaligned fill and out-of-bounds copy are refused, not recorded
+    assert_eq!(unsafe { gc_fill(ctx.0, a, 2, 8, 0) }, GC_ERR);
+    assert_eq!(unsafe { gc_copy(ctx.0, a, 48, b, 0, 32) }, GC_ERR);
+    ok!(gc_submit(ctx.0));
+    let mut want_a = [2.5f32; 16];
+    want_a[4] = -1.0;
+    want_a[5] = -1.0;
+    assert_eq!(ctx.download(a, 0, 16), want_a);
+    let mut want_b = [0.0f32; 16];
+    want_b[8..14].copy_from_slice(&want_a[2..8]);
+    assert_eq!(ctx.download(b, 0, 16), want_b);
+}

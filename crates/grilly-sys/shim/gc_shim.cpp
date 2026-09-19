@@ -403,15 +403,46 @@ int32_t gc_barrier(gc_ctx* ctx) {
         requireCtx(ctx);
         std::lock_guard<std::mutex> lock(ctx->mutex);
         require(ctx->recording, "gc_barrier called without gc_begin");
-        // Unlike CommandBatch::barrier, also orders write-after-write.
+        // Orders every earlier dispatch, copy and fill before every later
+        // one, including write-after-write (CommandBatch::barrier does not).
+        const VkPipelineStageFlags stages =
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
         VkMemoryBarrier mb{};
         mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(ctx->batch.cmdBuffer(),
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
+        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                           VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(ctx->batch.cmdBuffer(), stages, stages, 0, 1, &mb, 0,
                              nullptr, 0, nullptr);
+    });
+}
+
+int32_t gc_copy(gc_ctx* ctx, gc_buf src, uint64_t src_offset, gc_buf dst,
+                uint64_t dst_offset, uint64_t bytes) {
+    return guarded([&] {
+        requireCtx(ctx);
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        require(ctx->recording, "gc_copy called without gc_begin");
+        grilly::GrillyBuffer& s = ctx->lookup(src);
+        grilly::GrillyBuffer& d = ctx->lookup(dst);
+        require(src_offset <= s.size && bytes <= s.size - src_offset, "copy source out of bounds");
+        require(dst_offset <= d.size && bytes <= d.size - dst_offset, "copy destination out of bounds");
+        if (bytes == 0) return;
+        VkBufferCopy region{src_offset, dst_offset, bytes};
+        vkCmdCopyBuffer(ctx->batch.cmdBuffer(), s.handle, d.handle, 1, &region);
+    });
+}
+
+int32_t gc_fill(gc_ctx* ctx, gc_buf dst, uint64_t offset, uint64_t bytes, uint32_t word) {
+    return guarded([&] {
+        requireCtx(ctx);
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        require(ctx->recording, "gc_fill called without gc_begin");
+        grilly::GrillyBuffer& d = ctx->lookup(dst);
+        require(offset % 4 == 0 && bytes % 4 == 0, "fill offset and size must be multiples of 4");
+        require(offset <= d.size && bytes <= d.size - offset, "fill out of bounds");
+        if (bytes == 0) return;
+        vkCmdFillBuffer(ctx->batch.cmdBuffer(), d.handle, offset, bytes, word);
     });
 }
 

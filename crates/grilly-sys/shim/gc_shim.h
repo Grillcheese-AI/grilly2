@@ -8,8 +8,8 @@
  * and must release handles before destroying the context. Descriptor sets,
  * pipelines and allocations stay on the C++ side and are never exposed.
  *
- * Batching: gc_begin opens a command batch, gc_dispatch / gc_barrier record into
- * it, gc_submit submits it and waits. Upload and download are refused while a
+ * Batching: gc_begin opens a command batch, gc_dispatch / gc_copy / gc_fill /
+ * gc_barrier record into it, gc_submit submits it and waits. Upload and download are refused while a
  * batch is open, because they run immediately and would race recorded work.
  * A buffer released while a batch is open is returned to the pool only after
  * that batch has been submitted.
@@ -75,7 +75,13 @@ int32_t gc_begin(gc_ctx* ctx);
 int32_t gc_dispatch(gc_ctx* ctx, const char* shader, const gc_binding* bindings,
                     uint32_t num_bindings, uint32_t gx, uint32_t gy, uint32_t gz,
                     const void* push, uint32_t push_bytes);
+/* Orders all earlier recorded work (dispatch, copy, fill) before all later work. */
 int32_t gc_barrier(gc_ctx* ctx);
+/* Device-side copy of `bytes` from src+src_offset to dst+dst_offset. */
+int32_t gc_copy(gc_ctx* ctx, gc_buf src, uint64_t src_offset, gc_buf dst,
+                uint64_t dst_offset, uint64_t bytes);
+/* Fill `bytes` at `offset` with the 32-bit pattern `word`; both multiples of 4. */
+int32_t gc_fill(gc_ctx* ctx, gc_buf dst, uint64_t offset, uint64_t bytes, uint32_t word);
 int32_t gc_submit(gc_ctx* ctx);
 
 #ifdef __cplusplus

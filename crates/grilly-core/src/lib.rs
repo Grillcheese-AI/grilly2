@@ -1,19 +1,22 @@
-//! grilly-core: the device, GPU memory, the single kernel-dispatch path, and
-//! tensor storage. Everything a module (`grilly-torch`, `grilly-vsa`, ...)
-//! needs from the GPU, and nothing more.
+//! grilly-core: the device, GPU memory, the single kernel-dispatch path,
+//! tensor storage and autograd. Everything a module (`grilly-torch`,
+//! `grilly-vsa`, ...) needs from the GPU, and nothing more.
 //!
-//! Execution model: launches are recorded into an open command batch on the
-//! device and run when the host next needs data (a download, an upload, or an
-//! explicit [`Device::synchronize`]). Consecutive launches are separated by a
-//! full compute barrier, so they observe each other's writes in order.
+//! Execution model: work is recorded into an open command batch on the
+//! device and runs when the host next needs data (a download, an upload, or
+//! an explicit [`Device::synchronize`]). Consecutive commands are separated
+//! by a full barrier, so they observe each other's writes in order.
 
+pub mod autograd;
 mod device;
 mod error;
 mod kernel;
+pub mod ops;
 pub mod rng;
 mod tensor;
 
 pub use device::{Buffer, Caps, Device, MemClass};
 pub use error::{Error, Result};
 pub use kernel::{Arg, Kernel};
+pub use ops::add;
 pub use tensor::Tensor;

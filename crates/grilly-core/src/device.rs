@@ -182,6 +182,24 @@ impl Device {
         check(unsafe { sys::gc_submit(self.inner.ctx) })
     }
 
+    /// Record one command into the open batch, after a barrier that orders
+    /// it behind everything recorded before it.
+    fn record_command(&self, command: impl FnOnce(*mut sys::gc_ctx) -> i32) -> Result<()> {
+        let mut state = self.lock();
+        if state.open {
+            check(unsafe { sys::gc_barrier(self.inner.ctx) })?;
+        } else {
+            check(unsafe { sys::gc_begin(self.inner.ctx) })?;
+            state.open = true;
+        }
+        check(command(self.inner.ctx))?;
+        state.launches += 1;
+        if state.launches >= MAX_LAUNCHES_PER_BATCH {
+            self.flush(&mut state)?;
+        }
+        Ok(())
+    }
+
     /// Record one kernel launch. The only route from Rust to a dispatch.
     pub(crate) fn record(
         &self,
@@ -190,16 +208,9 @@ impl Device {
         groups: [u32; 3],
         push: &[u32],
     ) -> Result<()> {
-        let mut state = self.lock();
-        if state.open {
-            check(unsafe { sys::gc_barrier(self.inner.ctx) })?;
-        } else {
-            check(unsafe { sys::gc_begin(self.inner.ctx) })?;
-            state.open = true;
-        }
-        check(unsafe {
+        self.record_command(|ctx| unsafe {
             sys::gc_dispatch(
-                self.inner.ctx,
+                ctx,
                 shader.as_ptr(),
                 bindings.as_ptr(),
                 bindings.len() as u32,
@@ -209,12 +220,25 @@ impl Device {
                 push.as_ptr() as *const c_void,
                 std::mem::size_of_val(push) as u32,
             )
-        })?;
-        state.launches += 1;
-        if state.launches >= MAX_LAUNCHES_PER_BATCH {
-            self.flush(&mut state)?;
+        })
+    }
+
+    /// Record a device-side copy of `bytes` between buffers.
+    pub(crate) fn record_copy(&self, src: &Buffer, src_offset: u64, dst: &Buffer, dst_offset: u64, bytes: u64) -> Result<()> {
+        if bytes == 0 {
+            return Ok(());
         }
-        Ok(())
+        self.record_command(|ctx| unsafe {
+            sys::gc_copy(ctx, src.handle, src_offset, dst.handle, dst_offset, bytes)
+        })
+    }
+
+    /// Record filling `bytes` at `offset` with the 32-bit pattern `word`.
+    pub(crate) fn record_fill(&self, dst: &Buffer, offset: u64, bytes: u64, word: u32) -> Result<()> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        self.record_command(|ctx| unsafe { sys::gc_fill(ctx, dst.handle, offset, bytes, word) })
     }
 }
 
