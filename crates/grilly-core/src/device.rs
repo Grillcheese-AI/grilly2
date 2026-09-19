@@ -12,6 +12,19 @@ use crate::error::{Error, Result};
 /// buffer and descriptor usage of a long run with no host reads.
 const MAX_LAUNCHES_PER_BATCH: u32 = 1024;
 
+/// `GRILLY_LAUNCH_BLOCKING=1`: submit and wait after every launch, as
+/// `CUDA_LAUNCH_BLOCKING=1` does for torch. For diagnosis: each submit's wait
+/// is then one kernel's run time, and an error surfaces at the launch that
+/// caused it.
+fn launch_blocking() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("GRILLY_LAUNCH_BLOCKING").is_ok_and(|v| v == "1"))
+}
+
+/// Submission counters (`Device::submit_stats`), for diagnosing throughput
+/// and pool growth: see CLAUDE.md §11 on the fence timeout.
+pub use sys::gc_submit_stats as SubmitStats;
+
 /// Memory class of a GPU buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemClass {
@@ -190,6 +203,14 @@ impl Device {
         Ok(Buffer { device: self.clone(), handle, bytes, version: AtomicU64::new(0) })
     }
 
+    /// Submission counters since the device opened.
+    pub fn submit_stats(&self) -> Result<SubmitStats> {
+        let mut out = SubmitStats::default();
+        let _state = self.lock();
+        check(unsafe { sys::gc_submit_stats_get(self.inner.ctx, &mut out) })?;
+        Ok(out)
+    }
+
     /// Run everything recorded so far and wait for it.
     pub fn synchronize(&self) -> Result<()> {
         let mut state = self.lock();
@@ -225,7 +246,7 @@ impl Device {
         }
         check(command(self.inner.ctx))?;
         state.launches += 1;
-        if state.launches >= MAX_LAUNCHES_PER_BATCH {
+        if state.launches >= MAX_LAUNCHES_PER_BATCH || launch_blocking() {
             self.flush(&mut state)?;
         }
         Ok(())
@@ -279,8 +300,10 @@ impl std::fmt::Debug for Device {
     }
 }
 
-/// GPU memory, released when dropped. Memory still in use by recorded work
-/// is returned to the pool only after that work has run.
+/// GPU memory, released when dropped (the only path to `gc_buffer_release`;
+/// not `Clone`, so one owner per handle). Device memory dropped while a batch
+/// is recording can be reused by later commands of that batch, which run
+/// after it behind a barrier; it returns to the pool when the batch has run.
 pub struct Buffer {
     device: Device,
     handle: sys::gc_buf,

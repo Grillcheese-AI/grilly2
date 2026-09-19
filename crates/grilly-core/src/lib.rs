@@ -18,7 +18,7 @@ pub mod ops;
 pub mod rng;
 mod tensor;
 
-pub use device::{Buffer, Caps, Device, MemClass};
+pub use device::{Buffer, Caps, Device, MemClass, SubmitStats};
 pub use dtype::{require_float, DType};
 pub use error::{Error, Result};
 pub use kernel::{Arg, Kernel};

@@ -39,6 +39,22 @@ pub struct gc_binding {
     pub range: u64,
 }
 
+/// `gc_submit_stats` (gc_shim.h): submission counters for diagnosis.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct gc_submit_stats {
+    pub submits: u64,
+    pub dispatches: u64,
+    pub submit_ns_total: u64,
+    pub wait_ns_total: u64,
+    pub wait_ns_max: u64,
+    pub wait_ns_last: u64,
+    pub desc_pools: u64,
+    pub buffer_allocations: u64,
+    pub buffers_outstanding: u64,
+    pub batch_reuses: u64,
+}
+
 extern "C" {
     pub fn gc_last_error() -> *const c_char;
 
@@ -48,6 +64,7 @@ extern "C" {
 
     pub fn gc_load_shader(ctx: *mut gc_ctx, name: *const c_char, spv_path: *const c_char) -> i32;
     pub fn gc_load_shader_dir(ctx: *mut gc_ctx, dir: *const c_char, loaded: *mut u32) -> i32;
+    pub fn gc_submit_stats_get(ctx: *mut gc_ctx, out: *mut gc_submit_stats) -> i32;
     pub fn gc_compile_shader(ctx: *mut gc_ctx, name: *const c_char, glsl: *const c_char, len: u64) -> i32;
     pub fn gc_has_shader(ctx: *mut gc_ctx, name: *const c_char, out: *mut u32) -> i32;
 

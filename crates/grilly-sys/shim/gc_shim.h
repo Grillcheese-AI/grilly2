@@ -51,6 +51,21 @@ typedef struct gc_binding {
     uint64_t range;
 } gc_binding;
 
+/* Counters for diagnosing submission (CLAUDE.md §11): how often batches are
+   submitted, how long the host waits for them, and whether pools grow. */
+typedef struct gc_submit_stats {
+    uint64_t submits;          /* batches submitted */
+    uint64_t dispatches;       /* dispatches recorded, all batches */
+    uint64_t submit_ns_total;  /* host time handing batches to the queue */
+    uint64_t wait_ns_total;    /* host time waiting for batches to finish */
+    uint64_t wait_ns_max;
+    uint64_t wait_ns_last;
+    uint64_t desc_pools;       /* descriptor pools allocated (reset, never freed per batch) */
+    uint64_t buffer_allocations;   /* v1 BufferPool: fresh allocations (pool misses) */
+    uint64_t buffers_outstanding;  /* v1 BufferPool: acquired - released */
+    uint64_t batch_reuses;         /* device buffers reused within a batch */
+} gc_submit_stats;
+
 const char* gc_last_error(void);
 
 int32_t gc_create(gc_ctx** out);
@@ -87,6 +102,7 @@ int32_t gc_copy(gc_ctx* ctx, gc_buf src, uint64_t src_offset, gc_buf dst,
 /* Fill `bytes` at `offset` with the 32-bit pattern `word`; both multiples of 4. */
 int32_t gc_fill(gc_ctx* ctx, gc_buf dst, uint64_t offset, uint64_t bytes, uint32_t word);
 int32_t gc_submit(gc_ctx* ctx);
+int32_t gc_submit_stats_get(gc_ctx* ctx, gc_submit_stats* out);
 
 #ifdef __cplusplus
 }

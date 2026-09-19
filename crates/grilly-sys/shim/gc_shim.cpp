@@ -8,6 +8,7 @@
 #include "gc_shim.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <exception>
 #include <cstdlib>
@@ -57,7 +58,52 @@ struct gc_ctx {
     gc_buf nextHandle = 1;
     std::vector<grilly::GrillyBuffer> deferredRelease;
 
+    // Device-local buffers freed while a batch is recording, by bucket
+    // size, reusable by later commands in the same batch. Every recorded
+    // command sits behind a full barrier, so a buffer whose last use is
+    // recorded can be rewritten by a later command. They are NOT handed to
+    // v1's BufferPool mid-batch: its release() destroys a buffer when a
+    // bucket is full, which would free one the unsubmitted command buffer
+    // still uses. Without this, a batch's footprint was the sum of all its
+    // intermediates (CLAUDE.md §11: 20 GB and 12x slower at S=4096).
+    std::unordered_map<size_t, std::vector<grilly::GrillyBuffer>> batchFree;
+    uint64_t batchReuses = 0;
+
+    // v1 BufferPool's bucket rule (private there): powers of two from 256 B
+    // to 256 MB, the exact size above. A mismatch would only miss a reuse.
+    static size_t bucketFor(size_t bytes) {
+        size_t bucket = size_t(1) << 8;
+        while (bucket < bytes && bucket < (size_t(1) << 28)) bucket <<= 1;
+        return bucket < bytes ? bytes : bucket;
+    }
+
+    grilly::GrillyBuffer acquireDeviceLocal(size_t bytes) {
+        auto it = batchFree.find(bucketFor(bytes));
+        if (recording && it != batchFree.end() && !it->second.empty() && it->second.back().bucketSize >= bytes) {
+            grilly::GrillyBuffer buf = it->second.back();
+            it->second.pop_back();
+            buf.size = bytes;
+            ++batchReuses;
+            return buf;
+        }
+        return pool.acquireDeviceLocal(bytes);
+    }
+
+    // After a batch has finished: everything freed during it goes back to v1.
+    void releaseAfterBatch() {
+        for (auto& buf : deferredRelease) pool.release(buf);
+        deferredRelease.clear();
+        for (auto& [bucket, bufs] : batchFree) {
+            for (auto& buf : bufs) pool.release(buf);
+        }
+        batchFree.clear();
+    }
+
     std::unordered_map<std::string, Signature> signatures;
+
+    // gc_submit_stats counters
+    uint64_t submits = 0, dispatches = 0;
+    uint64_t submitNs = 0, waitNs = 0, waitNsMax = 0, waitNsLast = 0;
 
     // Descriptor pools for the open batch. All are reset after submit;
     // `activePool` indexes the one currently being allocated from.
@@ -77,7 +123,7 @@ struct gc_ctx {
         }
         vkDeviceWaitIdle(device.device());
         for (auto& [h, buf] : buffers) pool.release(buf);
-        for (auto& buf : deferredRelease) pool.release(buf);
+        releaseAfterBatch();
         for (VkDescriptorPool p : descPools)
             vkDestroyDescriptorPool(device.device(), p, nullptr);
     }
@@ -277,7 +323,7 @@ int32_t gc_buffer_create(gc_ctx* ctx, uint64_t bytes, uint32_t mem, gc_buf* out)
         std::lock_guard<std::mutex> lock(ctx->mutex);
         grilly::GrillyBuffer buf;
         switch (mem) {
-            case GC_MEM_DEVICE: buf = ctx->pool.acquireDeviceLocal(bytes); break;
+            case GC_MEM_DEVICE: buf = ctx->acquireDeviceLocal(bytes); break;
             case GC_MEM_UPLOAD: buf = ctx->pool.acquire(bytes); break;
             case GC_MEM_READBACK: buf = ctx->pool.acquireReadback(bytes); break;
             default: throw std::runtime_error("unknown memory class " + std::to_string(mem));
@@ -296,10 +342,12 @@ int32_t gc_buffer_release(gc_ctx* ctx, gc_buf h) {
         require(it != ctx->buffers.end(), "invalid buffer handle " + std::to_string(h));
         grilly::GrillyBuffer buf = it->second;
         ctx->buffers.erase(it);
-        if (ctx->recording)
-            ctx->deferredRelease.push_back(buf);
-        else
+        if (!ctx->recording)
             ctx->pool.release(buf);
+        else if (buf.deviceLocal)
+            ctx->batchFree[buf.bucketSize].push_back(buf);  // reusable within this batch
+        else
+            ctx->deferredRelease.push_back(buf);  // host-visible: only after the batch
     });
 }
 
@@ -426,6 +474,7 @@ int32_t gc_dispatch(gc_ctx* ctx, const char* shader, const gc_binding* bindings,
 
         ctx->batch.dispatch(pipe.pipeline, pipe.layout, set, gx, gy, gz, push,
                             push_bytes);
+        ctx->dispatches += 1;
     });
 }
 
@@ -477,16 +526,59 @@ int32_t gc_fill(gc_ctx* ctx, gc_buf dst, uint64_t offset, uint64_t bytes, uint32
     });
 }
 
+int32_t gc_submit_stats_get(gc_ctx* ctx, gc_submit_stats* out) {
+    return guarded([&] {
+        requireCtx(ctx);
+        require(out != nullptr, "null stats");
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        auto pool = ctx->pool.stats();
+        *out = gc_submit_stats{ctx->submits, ctx->dispatches, ctx->submitNs, ctx->waitNs, ctx->waitNsMax,
+                               ctx->waitNsLast, static_cast<uint64_t>(ctx->descPools.size()),
+                               pool.allocations, pool.totalAcquired - pool.totalReleased, ctx->batchReuses};
+    });
+}
+
 int32_t gc_submit(gc_ctx* ctx) {
     return guarded([&] {
         requireCtx(ctx);
         std::lock_guard<std::mutex> lock(ctx->mutex);
         require(ctx->recording, "gc_submit called without gc_begin");
         ctx->recording = false;
-        ctx->batch.submit();  // submit + wait
+        // v1's CommandBatch::submit() is submitDeferred() + waitForCompletion(),
+        // and waitForCompletion() waits on the fence with a hard-coded 2 s
+        // timeout and throws when it expires — even though the GPU is still
+        // working and finishes fine. v1 cannot be changed, so submit in two
+        // steps instead: hand the work to the queue, then block on the queue
+        // itself, which has no timeout. vkQueueWaitIdle is safe here without
+        // extra synchronization because the compute queue is only ever
+        // touched while ctx->mutex is held (the lock above).
+        using clock = std::chrono::steady_clock;
+        auto ns = [](clock::duration d) {
+            return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(d).count());
+        };
+        auto t0 = clock::now();
+        ctx->batch.submitDeferred();
+        auto t1 = clock::now();
+        VkResult wait = vkQueueWaitIdle(ctx->device.computeQueue());
+        auto t2 = clock::now();
+        ctx->submits += 1;
+        ctx->submitNs += ns(t1 - t0);
+        ctx->waitNsLast = ns(t2 - t1);
+        ctx->waitNs += ctx->waitNsLast;
+        ctx->waitNsMax = std::max(ctx->waitNsMax, ctx->waitNsLast);
+        if (wait != VK_SUCCESS) {
+            throw std::runtime_error("vkQueueWaitIdle failed (VkResult=" +
+                                     std::to_string(wait) + ")");
+        }
+        // The GPU is idle now, so this just observes the already-signalled
+        // fence and clears v1's pending flag.
+        ctx->batch.waitForCompletion();
+        // Only past this point is it safe to reclaim descriptor sets and
+        // buffers: v1 once freed descriptor sets that an in-flight command
+        // buffer was still using and got garbage/NaN gradients back (v1
+        // commit 49a1a89). Keep the reset and releases after the wait above.
         ctx->resetDescPools();
-        for (auto& buf : ctx->deferredRelease) ctx->pool.release(buf);
-        ctx->deferredRelease.clear();
+        ctx->releaseAfterBatch();
     });
 }
 

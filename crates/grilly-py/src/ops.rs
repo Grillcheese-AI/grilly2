@@ -361,6 +361,28 @@ fn flash_tiles(py: Python<'_>, mask: &PyTensor) -> PyResult<Vec<PyTensor>> {
         .map_err(err)
 }
 
+/// Submission counters of the default device (CLAUDE.md §11), as a dict.
+#[pyfunction]
+fn submit_stats(py: Python<'_>) -> PyResult<Bound<'_, pyo3::types::PyDict>> {
+    let s = grilly_core::Device::default_device().and_then(|d| d.submit_stats()).map_err(err)?;
+    let d = pyo3::types::PyDict::new(py);
+    for (k, v) in [
+        ("submits", s.submits),
+        ("dispatches", s.dispatches),
+        ("submit_ns_total", s.submit_ns_total),
+        ("wait_ns_total", s.wait_ns_total),
+        ("wait_ns_max", s.wait_ns_max),
+        ("wait_ns_last", s.wait_ns_last),
+        ("desc_pools", s.desc_pools),
+        ("buffer_allocations", s.buffer_allocations),
+        ("buffers_outstanding", s.buffers_outstanding),
+        ("batch_reuses", s.batch_reuses),
+    ] {
+        d.set_item(k, v)?;
+    }
+    Ok(d)
+}
+
 #[pyfunction]
 fn set_deterministic(on: bool) {
     grilly_core::generic::set_deterministic(on);
@@ -378,6 +400,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(embedding, m)?)?;
     m.add_function(wrap_pyfunction!(flex_attention, m)?)?;
     m.add_function(wrap_pyfunction!(flash_tiles, m)?)?;
+    m.add_function(wrap_pyfunction!(submit_stats, m)?)?;
     m.add_function(wrap_pyfunction!(scatter, m)?)?;
     m.add_function(wrap_pyfunction!(scatter_, m)?)?;
     m.add_function(wrap_pyfunction!(cumsum, m)?)?;
