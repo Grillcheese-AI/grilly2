@@ -383,6 +383,13 @@ fn submit_stats(py: Python<'_>) -> PyResult<Bound<'_, pyo3::types::PyDict>> {
     Ok(d)
 }
 
+/// Run everything recorded on the default device and wait (no kernel of its
+/// own), as torch.cuda.synchronize.
+#[pyfunction]
+fn synchronize(py: Python<'_>) -> PyResult<()> {
+    py.detach(|| grilly_core::Device::default_device().and_then(|d| d.synchronize())).map_err(err)
+}
+
 #[pyfunction]
 fn set_deterministic(on: bool) {
     grilly_core::generic::set_deterministic(on);
@@ -401,6 +408,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flex_attention, m)?)?;
     m.add_function(wrap_pyfunction!(flash_tiles, m)?)?;
     m.add_function(wrap_pyfunction!(submit_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(synchronize, m)?)?;
     m.add_function(wrap_pyfunction!(scatter, m)?)?;
     m.add_function(wrap_pyfunction!(scatter_, m)?)?;
     m.add_function(wrap_pyfunction!(cumsum, m)?)?;
