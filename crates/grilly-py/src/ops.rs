@@ -1,8 +1,8 @@
 //! Bindings for grilly-torch's math and shape ops. Ops are named by string;
 //! argument checking and torch's calling conventions live in Python.
 
-use grilly_core::generic::{Binary, Unary};
-use grilly_core::Tensor;
+use grilly_core::generic::{Binary, IntBinary, Reduce, Unary};
+use grilly_core::{DType, Tensor};
 use grilly_torch::{math, shape};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -181,7 +181,74 @@ fn is_view_copy(x: &PyTensor) -> bool {
     x.inner.is_view_copy()
 }
 
+fn dtype_of(code: u32) -> PyResult<DType> {
+    DType::from_code(code).map_err(err)
+}
+
+/// isfinite / isinf / isnan: a bool tensor.
+#[pyfunction]
+fn predicate(py: Python<'_>, x: &PyTensor, op: &str) -> PyResult<PyTensor> {
+    let op = match op {
+        "isfinite" => Unary::IsFinite,
+        "isinf" => Unary::IsInf,
+        "isnan" => Unary::IsNan,
+        _ => return Err(PyValueError::new_err(format!("unknown predicate {op:?}"))),
+    };
+    let x = x.inner.clone();
+    run(py, move || math::predicate(&x, op))
+}
+
+/// Comparison of two same-dtype tensors: a bool tensor.
+#[pyfunction]
+fn compare(py: Python<'_>, a: &PyTensor, b: &PyTensor, op: &str) -> PyResult<PyTensor> {
+    let (a, b, op) = (a.inner.clone(), b.inner.clone(), binary_op(op)?);
+    run(py, move || math::compare(&a, &b, op))
+}
+
+/// Exact integer/bool arithmetic or bitwise ops, returned as dtype `out`.
+#[pyfunction]
+fn integer(py: Python<'_>, a: &PyTensor, b: &PyTensor, op: &str, out: u32) -> PyResult<PyTensor> {
+    let op = match op {
+        "add" => IntBinary::Add,
+        "sub" => IntBinary::Sub,
+        "mul" => IntBinary::Mul,
+        "maximum" => IntBinary::Maximum,
+        "minimum" => IntBinary::Minimum,
+        "and" => IntBinary::And,
+        "or" => IntBinary::Or,
+        "xor" => IntBinary::Xor,
+        _ => return Err(PyValueError::new_err(format!("unknown integer op {op:?}"))),
+    };
+    let (a, b, out) = (a.inner.clone(), b.inner.clone(), dtype_of(out)?);
+    run(py, move || math::integer(&a, &b, op, out))
+}
+
+/// int64 sum / max / min over dims (all when empty).
+#[pyfunction]
+fn integer_reduce(py: Python<'_>, x: &PyTensor, dims: Vec<usize>, op: &str, keepdim: bool) -> PyResult<PyTensor> {
+    let op = match op {
+        "sum" => Reduce::Sum,
+        "max" => Reduce::Max,
+        "min" => Reduce::Min,
+        _ => return Err(PyValueError::new_err(format!("unknown integer reduction {op:?}"))),
+    };
+    let x = x.inner.clone();
+    run(py, move || math::integer_reduce(&x, &dims, op, keepdim))
+}
+
+#[pyfunction]
+#[pyo3(name = "where_")]
+fn where_py(py: Python<'_>, cond: &PyTensor, a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
+    let (c, a, b) = (cond.inner.clone(), a.inner.clone(), b.inner.clone());
+    run(py, move || math::where_(&c, &a, &b))
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(predicate, m)?)?;
+    m.add_function(wrap_pyfunction!(compare, m)?)?;
+    m.add_function(wrap_pyfunction!(integer, m)?)?;
+    m.add_function(wrap_pyfunction!(integer_reduce, m)?)?;
+    m.add_function(wrap_pyfunction!(where_py, m)?)?;
     m.add_function(wrap_pyfunction!(unary, m)?)?;
     m.add_function(wrap_pyfunction!(binary, m)?)?;
     m.add_function(wrap_pyfunction!(sum, m)?)?;

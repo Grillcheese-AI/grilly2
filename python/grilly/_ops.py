@@ -53,44 +53,116 @@ def _binary(a, b, op) -> Tensor:
     return _w(_C.binary(a._t, b._t, op))
 
 
+# ── type promotion ───────────────────────────────────────────────────────
+
+def _dt():
+    from . import bool as b_, float32, int32, int64
+    return b_, int32, int64, float32
+
+
+def _category(dt) -> builtins.int:
+    b_, i32, i64, f32 = _dt()
+    return 0 if dt is b_ else (2 if dt is f32 else 1)
+
+
+def _promote(a, b):
+    b_, i32, i64, f32 = _dt()
+    order = {b_: 0, i32: 1, i64: 2, f32: 3}
+    return a if order[a] >= order[b] else b
+
+
+def _number_dtype(v):
+    b_, i32, i64, f32 = _dt()
+    if isinstance(v, (builtins.bool, np.bool_)):
+        return b_
+    if isinstance(v, (builtins.int, np.integer)):
+        return i64
+    return f32
+
+
+def result_type(*operands):
+    """torch's promotion: dimensioned tensors, then 0-d tensors, then Python
+    numbers; a later tier only matters if it is of a higher category (bool <
+    int < float), and a Python number contributes its category's default."""
+    tiers = [
+        [o.dtype for o in operands if isinstance(o, Tensor) and o.dim() > 0],
+        [o.dtype for o in operands if isinstance(o, Tensor) and o.dim() == 0],
+        [_number_dtype(o) for o in operands if _is_number(o)],
+    ]
+    result = None
+    for tier in tiers:
+        if not tier:
+            continue
+        t = tier[0]
+        for d in tier[1:]:
+            t = _promote(t, d)
+        if result is None or _category(t) > _category(result):
+            result = t
+    return result
+
+
+def _as(v, dt) -> Tensor:
+    """A tensor of dtype `dt`: a cast tensor, or a 0-d tensor for a number."""
+    if _is_number(v):
+        from . import _code
+        return _w(_C.Tensor.full([], builtins.float(v), _code(dt)))
+    t = _require_tensor("input", v)
+    return t if t.dtype is dt else t.to(dt)
+
+
+def _is_float(dt) -> builtins.bool:
+    return _category(dt) == 2
+
+
 # ── arithmetic ───────────────────────────────────────────────────────────
+
+def _arith(input, other, float_op, int_op, scalar=None) -> Tensor:
+    """`float_op`/`int_op` on the promoted operands. `scalar(tensor, number)`,
+    when given, is the float fast path for a Python number operand."""
+    rt = result_type(input, other)
+    if rt is None:
+        raise TypeError("expected at least one Tensor operand")
+    if _is_float(rt):
+        if scalar is not None:
+            if _is_number(other):
+                return scalar(_as(input, rt), other, False)
+            if _is_number(input):
+                return scalar(_as(other, rt), input, True)
+        return _binary(_as(input, rt), _as(other, rt), float_op)
+    from . import _code
+    return _w(_C.integer(_as(input, rt)._t, _as(other, rt)._t, int_op, _code(rt)))
+
 
 def add(input, other, *, alpha=1) -> Tensor:
     if alpha != 1:
         other = mul(other, alpha)
-    if _is_number(other):
-        return _unary(input, "add_scalar", other)
-    if _is_number(input):
-        return _unary(other, "add_scalar", input)
-    return _binary(_require_tensor("input", input), _require_tensor("other", other), "add")
+    return _arith(input, other, "add", "add",
+                  lambda t, v, _: _unary(t, "add_scalar", v))
 
 
 def sub(input, other, *, alpha=1) -> Tensor:
     if alpha != 1:
         other = mul(other, alpha)
-    if _is_number(other):
-        return _unary(input, "add_scalar", -other)
-    if _is_number(input):
-        return _unary(other, "rsub_scalar", input)
-    return _binary(_require_tensor("input", input), _require_tensor("other", other), "sub")
+    b_ = _dt()[0]
+    if builtins.all(isinstance(x, Tensor) and x.dtype is b_ for x in (input, other)):
+        raise RuntimeError("Subtraction, the `-` operator, with two bool tensors is not supported. "
+                           "Use the `^` or `logical_xor()` operator instead.")
+    return _arith(input, other, "sub", "sub",
+                  lambda t, v, rev: _unary(t, "rsub_scalar", v) if rev else _unary(t, "add_scalar", -v))
 
 
 def mul(input, other) -> Tensor:
-    if _is_number(other):
-        return _unary(input, "mul_scalar", other)
-    if _is_number(input):
-        return _unary(other, "mul_scalar", input)
-    return _binary(_require_tensor("input", input), _require_tensor("other", other), "mul")
+    return _arith(input, other, "mul", "mul",
+                  lambda t, v, _: _unary(t, "mul_scalar", v))
 
 
 def div(input, other, *, rounding_mode=None) -> Tensor:
     if rounding_mode is not None:
         raise _not_yet(f"div(rounding_mode={rounding_mode!r})")
-    if _is_number(input):
-        return _unary(other, "rdiv_scalar", input)
-    # x / c as a true division (not x * (1/c)), as torch computes it
-    b = _const(other) if _is_number(other) else _require_tensor("other", other)
-    return _binary(_require_tensor("input", input), b, "div")
+    f32 = _dt()[3]
+    if _is_number(input):  # true division is always floating
+        return _unary(_as(other, f32), "rdiv_scalar", input)
+    return _binary(_as(input, f32), _as(other, f32), "div")
 
 
 true_divide = divide = div
@@ -99,71 +171,89 @@ subtract = sub
 
 
 def pow(input, exponent) -> Tensor:
+    rt = result_type(input, exponent)
+    if not _is_float(rt):
+        raise _not_yet("integer pow")
     if _is_number(exponent):
-        return _unary(input, "pow_scalar", exponent)
-    base = _const(input) if _is_number(input) else _require_tensor("input", input)
-    return _binary(base, _require_tensor("exponent", exponent), "pow")
+        return _unary(_as(input, rt), "pow_scalar", exponent)
+    return _binary(_as(input, rt), _as(exponent, rt), "pow")
 
 
 def maximum(input, other) -> Tensor:
-    return _binary(_require_tensor("input", input), _require_tensor("other", other), "maximum")
+    _require_tensor("input", input)
+    _require_tensor("other", other)
+    return _arith(input, other, "maximum", "maximum")
 
 
 def minimum(input, other) -> Tensor:
-    return _binary(_require_tensor("input", input), _require_tensor("other", other), "minimum")
+    _require_tensor("input", input)
+    _require_tensor("other", other)
+    return _arith(input, other, "minimum", "minimum")
 
 
 def neg(input) -> Tensor:
-    return _unary(input, "neg")
+    x = _require_tensor("input", input)
+    if x.dtype is _dt()[0]:
+        raise RuntimeError("Negation, the `-` operator, on a bool tensor is not supported. "
+                           "If you are trying to invert a mask, use the `~` or `logical_not()` operator instead.")
+    if _is_float(x.dtype):
+        return _unary(x, "neg")
+    return sub(0, x)
 
 
 negative = neg
 
 
 def abs(input) -> Tensor:  # noqa: A001 - torch.abs
-    return _unary(input, "abs")
+    x = _require_tensor("input", input)
+    if _is_float(x.dtype):
+        return _unary(x, "abs")
+    return x if x.dtype is _dt()[0] else maximum(x, neg(x))
 
 
 def sign(input) -> Tensor:
-    return _unary(input, "sign")
+    x = _require_tensor("input", input)
+    if _is_float(x.dtype):
+        return _unary(x, "sign")
+    return sub(_compare(x, 0, "gt").to(x.dtype), _compare(x, 0, "lt").to(x.dtype))
 
 
-def exp(input) -> Tensor:
-    return _unary(input, "exp")
+def _float_unary(name):
+    """Transcendental ops: integer inputs are computed in float32, as torch does."""
+    def op(input) -> Tensor:
+        x = _require_tensor("input", input)
+        return _unary(x if _is_float(x.dtype) else x.to(_dt()[3]), name)
+    op.__name__ = name
+    return op
 
 
-def log(input) -> Tensor:
-    return _unary(input, "log")
-
-
-def sqrt(input) -> Tensor:
-    return _unary(input, "sqrt")
-
-
-def rsqrt(input) -> Tensor:
-    return _unary(input, "rsqrt")
-
-
-def tanh(input) -> Tensor:
-    return _unary(input, "tanh")
-
-
-def sigmoid(input) -> Tensor:
-    return _unary(input, "sigmoid")
+exp = _float_unary("exp")
+log = _float_unary("log")
+sqrt = _float_unary("sqrt")
+rsqrt = _float_unary("rsqrt")
+tanh = _float_unary("tanh")
+sigmoid = _float_unary("sigmoid")
 
 
 def square(input) -> Tensor:
-    return _unary(input, "pow_scalar", 2.0)
+    x = _require_tensor("input", input)
+    return mul(x, x) if not _is_float(x.dtype) else _unary(x, "pow_scalar", 2.0)
 
 
 def clamp(input, min=None, max=None) -> Tensor:  # noqa: A002 - torch's names
     if min is None and max is None:
         raise RuntimeError("torch.clamp: At least one of 'min' or 'max' must not be None")
-    if isinstance(min, Tensor) or isinstance(max, Tensor):
-        raise _not_yet("clamp with tensor bounds")
+    x = _require_tensor("input", input)
+    if isinstance(min, Tensor) or isinstance(max, Tensor) or not _is_float(x.dtype):
+        out = x
+        if min is not None:
+            out = maximum(out, _as(min, x.dtype))
+        if max is not None:
+            out = minimum(out, _as(max, x.dtype))
+        return out
     lo = -math.inf if min is None else min
     hi = math.inf if max is None else max
-    return _unary(input, "clamp", lo, hi)
+    return _unary(x, "clamp", lo, hi)
 
 
 clip = clamp
@@ -177,34 +267,178 @@ def clamp_max(input, max) -> Tensor:  # noqa: A002
     return clamp(input, max=max)
 
 
+def outer(input, vec2) -> Tensor:
+    a, b = _require_tensor("input", input), _require_tensor("vec2", vec2)
+    if a.dim() != 1 or b.dim() != 1:
+        raise RuntimeError("outer: expected 1-D tensors")
+    return mul(a.reshape(-1, 1), b.reshape(1, -1))
+
+
+ger = outer
+
+
+# ── comparisons, logic and selection ────────────────────────────────────
+
+def _compare(a, b, op) -> Tensor:
+    rt = result_type(a, b)
+    return _w(_C.compare(_as(a, rt)._t, _as(b, rt)._t, op))
+
+
+def eq(input, other) -> Tensor:
+    return _compare(input, other, "eq")
+
+
+def ne(input, other) -> Tensor:
+    return _compare(input, other, "ne")
+
+
+def gt(input, other) -> Tensor:
+    return _compare(input, other, "gt")
+
+
+def ge(input, other) -> Tensor:
+    return _compare(input, other, "ge")
+
+
+def lt(input, other) -> Tensor:
+    return _compare(input, other, "lt")
+
+
+def le(input, other) -> Tensor:
+    return _compare(input, other, "le")
+
+
+greater, greater_equal, less, less_equal, not_equal = gt, ge, lt, le, ne
+
+
+def _bitwise(a, b, op) -> Tensor:
+    rt = result_type(a, b)
+    if _is_float(rt):
+        raise TypeError(f"bitwise {op} is only supported for integer and boolean tensors")
+    from . import _code
+    return _w(_C.integer(_as(a, rt)._t, _as(b, rt)._t, op, _code(rt)))
+
+
+def bitwise_and(input, other) -> Tensor:
+    return _bitwise(input, other, "and")
+
+
+def bitwise_or(input, other) -> Tensor:
+    return _bitwise(input, other, "or")
+
+
+def bitwise_xor(input, other) -> Tensor:
+    return _bitwise(input, other, "xor")
+
+
+def bitwise_not(input) -> Tensor:
+    x = _require_tensor("input", input)
+    if _is_float(x.dtype):
+        raise TypeError("bitwise_not is only supported for integer and boolean tensors")
+    return _bitwise(x, True if x.dtype is _dt()[0] else -1, "xor")
+
+
+def _as_bool(x) -> Tensor:
+    return _require_tensor("input", x).to(_dt()[0])
+
+
+def logical_and(input, other) -> Tensor:
+    return _bitwise(_as_bool(input), _as_bool(other), "and")
+
+
+def logical_or(input, other) -> Tensor:
+    return _bitwise(_as_bool(input), _as_bool(other), "or")
+
+
+def logical_xor(input, other) -> Tensor:
+    return _bitwise(_as_bool(input), _as_bool(other), "xor")
+
+
+def logical_not(input) -> Tensor:
+    return _bitwise(_as_bool(input), True, "xor")
+
+
+def isfinite(input) -> Tensor:
+    return _w(_C.predicate(_require_tensor("input", input)._t, "isfinite"))
+
+
+def isinf(input) -> Tensor:
+    return _w(_C.predicate(_require_tensor("input", input)._t, "isinf"))
+
+
+def isnan(input) -> Tensor:
+    return _w(_C.predicate(_require_tensor("input", input)._t, "isnan"))
+
+
+def where(condition, input=None, other=None) -> Tensor:
+    if input is None and other is None:
+        raise _not_yet("where(condition) (it returns int64 index tensors of nonzero entries)")
+    cond = _require_tensor("condition", condition)
+    if cond.dtype is not _dt()[0]:
+        raise RuntimeError(f"where expected condition to be a boolean tensor, but got a tensor with dtype {cond.dtype!r}")
+    rt = result_type(input, other)
+    return _w(_C.where_(cond._t, _as(input, rt)._t, _as(other, rt)._t))
+
+
+def masked_fill(input, mask, value) -> Tensor:
+    x = _require_tensor("input", input)
+    return where(_require_tensor("mask", mask), _as(value, x.dtype), x)
+
+
+def equal(input, other) -> builtins.bool:
+    a, b = _require_tensor("input", input), _require_tensor("other", other)
+    return tuple(a.shape) == tuple(b.shape) and builtins.bool(all_(eq(a, b)).item())
+
+
+def all_(input, dim=None, keepdim=False) -> Tensor:
+    x = _as_bool(input)
+    return _w(_C.integer_reduce(x._t, _dims(dim, x.dim()), "min", builtins.bool(keepdim))).to(_dt()[0])
+
+
+def any_(input, dim=None, keepdim=False) -> Tensor:
+    x = _as_bool(input)
+    return _w(_C.integer_reduce(x._t, _dims(dim, x.dim()), "max", builtins.bool(keepdim))).to(_dt()[0])
+
+
 # ── reductions ───────────────────────────────────────────────────────────
 
-def _no_dtype(dtype):
-    from . import float32
-    if dtype is not None and dtype is not float32:
-        raise _not_yet(f"reductions with dtype={dtype!r}")
+def _reduce_dtype(x, dtype):
+    if dtype is not None:
+        from . import _code
+        _code(dtype)
+        return x if x.dtype is dtype else x.to(dtype)
+    return x
 
 
 def sum(input, dim=None, keepdim=False, *, dtype=None) -> Tensor:  # noqa: A001
-    _no_dtype(dtype)
-    x = _require_tensor("input", input)
+    x = _reduce_dtype(_require_tensor("input", input), dtype)
+    if not _is_float(x.dtype):  # torch sums integers and bools as int64
+        return _w(_C.integer_reduce(x._t, _dims(dim, x.dim()), "sum", builtins.bool(keepdim)))
     return _w(_C.sum(x._t, _dims(dim, x.dim()), builtins.bool(keepdim)))
 
 
 def mean(input, dim=None, keepdim=False, *, dtype=None) -> Tensor:
-    _no_dtype(dtype)
-    x = _require_tensor("input", input)
+    x = _reduce_dtype(_require_tensor("input", input), dtype)
+    if not _is_float(x.dtype):
+        raise RuntimeError(f"mean(): could not infer output dtype. Input dtype must be either a floating "
+                           f"point or complex dtype. Got: {repr(x.dtype).split('.')[-1].capitalize()}")
     return _w(_C.mean(x._t, _dims(dim, x.dim()), builtins.bool(keepdim)))
 
 
-def amax(input, dim=(), keepdim=False) -> Tensor:
+def _extreme(input, dim, keepdim, is_max) -> Tensor:
     x = _require_tensor("input", input)
-    return _w(_C.amax(x._t, _dims(dim, x.dim()), builtins.bool(keepdim), True))
+    if _is_float(x.dtype):
+        return _w(_C.amax(x._t, _dims(dim, x.dim()), builtins.bool(keepdim), is_max))
+    r = _w(_C.integer_reduce(x._t, _dims(dim, x.dim()), "max" if is_max else "min", builtins.bool(keepdim)))
+    return r.to(x.dtype)
+
+
+def amax(input, dim=(), keepdim=False) -> Tensor:
+    return _extreme(input, dim, keepdim, True)
 
 
 def amin(input, dim=(), keepdim=False) -> Tensor:
-    x = _require_tensor("input", input)
-    return _w(_C.amax(x._t, _dims(dim, x.dim()), builtins.bool(keepdim), False))
+    return _extreme(input, dim, keepdim, False)
 
 
 def max(input, dim=None, keepdim=False):  # noqa: A001
@@ -212,7 +446,7 @@ def max(input, dim=None, keepdim=False):  # noqa: A001
         return maximum(input, dim)  # torch.max(a, b)
     if dim is None:
         return amax(input)
-    raise _not_yet("max(dim) (it returns int64 indices; integer dtypes are not implemented)")
+    raise _not_yet("max(dim) (it returns values and int64 indices)")
 
 
 def min(input, dim=None, keepdim=False):  # noqa: A001
@@ -220,18 +454,23 @@ def min(input, dim=None, keepdim=False):  # noqa: A001
         return minimum(input, dim)
     if dim is None:
         return amin(input)
-    raise _not_yet("min(dim) (it returns int64 indices; integer dtypes are not implemented)")
+    raise _not_yet("min(dim) (it returns values and int64 indices)")
+
+
+def _float_input(x, op):
+    x = _require_tensor("input", x)
+    if not _is_float(x.dtype):
+        raise RuntimeError(f"\"{op}\" not implemented for '{repr(x.dtype).split('.')[-1].capitalize()}'")
+    return x
 
 
 def softmax(input, dim, dtype=None) -> Tensor:
-    _no_dtype(dtype)
-    x = _require_tensor("input", input)
+    x = _float_input(_reduce_dtype(_require_tensor("input", input), dtype), "softmax")
     return _w(_C.softmax(x._t, _dim(dim, x.dim())))
 
 
 def log_softmax(input, dim, dtype=None) -> Tensor:
-    _no_dtype(dtype)
-    x = _require_tensor("input", input)
+    x = _float_input(_reduce_dtype(_require_tensor("input", input), dtype), "log_softmax")
     return _w(_C.log_softmax(x._t, _dim(dim, x.dim())))
 
 
@@ -473,12 +712,6 @@ def _setitem(x: Tensor, idx, value) -> None:
 
 # ── installation as Tensor methods ───────────────────────────────────────
 
-def _comparison(name):
-    def op(self, other):
-        raise _not_yet(f"tensor comparison ({name}), which returns a bool tensor; bool dtype")
-    return op
-
-
 def _install() -> None:
     T = Tensor
     for name in ("add", "sub", "mul", "div", "pow", "neg", "abs", "sign", "exp", "log",
@@ -505,10 +738,19 @@ def _install() -> None:
     T.__rmatmul__ = lambda self, other: matmul(other, self)
     T.__getitem__ = _index
     T.__setitem__ = _setitem
-    for dunder, sym in (("__eq__", "=="), ("__ne__", "!="), ("__lt__", "<"), ("__le__", "<="),
-                        ("__gt__", ">"), ("__ge__", ">=")):
-        setattr(T, dunder, _comparison(sym))
+    T.__eq__, T.__ne__, T.__lt__, T.__le__, T.__gt__, T.__ge__ = eq, ne, lt, le, gt, ge
     T.__hash__ = object.__hash__  # identity, as torch's
+    T.__and__ = T.__rand__ = bitwise_and
+    T.__or__ = T.__ror__ = bitwise_or
+    T.__xor__ = T.__rxor__ = bitwise_xor
+    T.__invert__ = bitwise_not
+    for name in ("eq", "ne", "gt", "ge", "lt", "le", "greater", "greater_equal", "less", "less_equal",
+                 "not_equal", "logical_and", "logical_or", "logical_xor", "logical_not",
+                 "bitwise_and", "bitwise_or", "bitwise_xor", "bitwise_not", "isfinite", "isinf",
+                 "isnan", "masked_fill", "equal", "outer", "ger", "where"):
+        setattr(T, name, globals()[name])
+    T.all = all_
+    T.any = any_
     T.T = property(lambda self: permute(self, list(range(self.dim() - 1, -1, -1))))
     T.expand_as = lambda self, other: expand(self, list(other.shape))
     T.view_as = lambda self, other: self.view(list(other.shape))

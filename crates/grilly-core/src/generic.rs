@@ -19,8 +19,11 @@ pub const REDUCE: Kernel = Kernel { shader: "g2-reduce", bindings: 2, push_words
 pub const COPY: Kernel = Kernel { shader: "g2-copy", bindings: 2, push_words: 4 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 
 pub const CAST: Kernel = Kernel { shader: "g2-cast", bindings: 2, push_words: 5, local_size: [256, 1, 1] };
+pub const BINARY_INT: Kernel = Kernel { shader: "g2-binary-int", bindings: 3, push_words: 7 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
+pub const WHERE: Kernel = Kernel { shader: "g2-where", bindings: 4, push_words: 7 + 4 * MAX_DIMS as u32, local_size: [256, 1, 1] };
+pub const REDUCE_INT: Kernel = Kernel { shader: "g2-reduce-int", bindings: 2, push_words: 6, local_size: [256, 1, 1] };
 
-pub const ALL: &[Kernel] = &[UNARY, BINARY, REDUCE, COPY, CAST];
+pub const ALL: &[Kernel] = &[UNARY, BINARY, REDUCE, COPY, CAST, BINARY_INT, WHERE, REDUCE_INT];
 
 /// Elementwise `f(x; a, b)`. Codes match g2-unary.glsl.
 #[repr(u32)]
@@ -53,6 +56,33 @@ pub enum Unary {
     Gelu,
     /// derivative of exact GELU
     GeluGrad,
+    /// `1` where finite, else `0`
+    IsFinite,
+    /// `1` where +-inf, else `0`
+    IsInf,
+    /// `1` where NaN, else `0`
+    IsNan,
+}
+
+/// int64 ops with broadcasting (g2-binary-int.glsl); comparisons and the
+/// logical ops on bools produce bool.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntBinary {
+    Add = 0,
+    Sub,
+    Mul,
+    Maximum,
+    Minimum,
+    Eq,
+    Ne,
+    Gt,
+    Ge,
+    Lt,
+    Le,
+    And,
+    Or,
+    Xor,
 }
 
 /// Elementwise `op(a, b)` with broadcasting. Codes match g2-binary.glsl.
@@ -314,5 +344,91 @@ pub fn cast(x: &Tensor, dtype: DType) -> Result<Tensor> {
         0,
     ];
     CAST.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], x.numel(), &push)?;
+    Ok(out)
+}
+
+fn require(dtype: DType, want: DType, what: &str) -> Result<()> {
+    if dtype == want {
+        Ok(())
+    } else {
+        Err(Error::Invalid(format!("{what}: expected {} operands, got {}", want.name(), dtype.name())))
+    }
+}
+
+/// `op(a, b)` on int64 tensors with broadcasting. The result is bool for
+/// comparisons (and when `out_bool` is set, e.g. logical ops on bools cast
+/// to int64), else int64.
+pub fn binary_int(a: &Tensor, b: &Tensor, op: IntBinary, out_bool: bool) -> Result<Tensor> {
+    require(a.dtype(), DType::I64, "integer op")?;
+    require(b.dtype(), DType::I64, "integer op")?;
+    let shape = broadcast_shape(a.shape(), b.shape())?;
+    let comparison = matches!(op, IntBinary::Eq | IntBinary::Ne | IntBinary::Gt | IntBinary::Ge | IntBinary::Lt | IntBinary::Le);
+    let to_bool = out_bool || comparison;
+    let out = Tensor::empty_typed(a.device(), &shape, if to_bool { DType::Bool } else { DType::I64 })?;
+    let mut push = vec![
+        u32_of(out.numel(), "numel")?,
+        op as u32,
+        shape.len() as u32,
+        u32_of(a.offset(), "offset")?,
+        u32_of(b.offset(), "offset")?,
+        0,
+        u32::from(to_bool),
+    ];
+    push.extend(padded(&shape, "integer op")?);
+    push.extend(padded(&broadcast_strides(a.shape(), &shape), "integer op")?);
+    push.extend(padded(&broadcast_strides(b.shape(), &shape), "integer op")?);
+    BINARY_INT.launch_flat(a.device(), &[Arg::Storage(a), Arg::Storage(b), Arg::Storage(&out)], out.numel(), &push)?;
+    Ok(out)
+}
+
+/// `cond ? a : b` elementwise with broadcasting (torch's `where`); `a` and `b`
+/// share a dtype, `cond` is bool. Untracked.
+pub fn where_select(cond: &Tensor, a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    require(cond.dtype(), DType::Bool, "where condition")?;
+    if a.dtype() != b.dtype() {
+        return Err(Error::Invalid(format!("where: {} and {} values", a.dtype().name(), b.dtype().name())));
+    }
+    let shape = broadcast_shape(&broadcast_shape(cond.shape(), a.shape())?, b.shape())?;
+    let out = Tensor::empty_typed(a.device(), &shape, a.dtype())?;
+    let mut push = vec![
+        u32_of(out.numel(), "numel")?,
+        shape.len() as u32,
+        a.dtype().words() as u32,
+        u32_of(cond.offset(), "offset")?,
+        u32_of(a.offset(), "offset")?,
+        u32_of(b.offset(), "offset")?,
+        0,
+    ];
+    push.extend(padded(&shape, "where")?);
+    push.extend(padded(&broadcast_strides(cond.shape(), &shape), "where")?);
+    push.extend(padded(&broadcast_strides(a.shape(), &shape), "where")?);
+    push.extend(padded(&broadcast_strides(b.shape(), &shape), "where")?);
+    WHERE.launch_flat(a.device(), &[Arg::Storage(cond), Arg::Storage(a), Arg::Storage(b), Arg::Storage(&out)], out.numel(), &push)?;
+    Ok(out)
+}
+
+/// int64 sum, max or min along `dim` (Mean is not defined for integers).
+pub fn reduce_int(x: &Tensor, dim: usize, op: Reduce, keepdim: bool) -> Result<Tensor> {
+    require(x.dtype(), DType::I64, "integer reduction")?;
+    if op == Reduce::Mean {
+        return Err(Error::Invalid("mean(): could not infer output dtype. Input dtype must be either a floating point or complex dtype.".into()));
+    }
+    let shape = x.shape();
+    if dim >= shape.len() {
+        return Err(Error::Shape(format!("reduce: dim {dim} out of range for shape {shape:?}")));
+    }
+    let (outer, len, inner): (usize, usize, usize) = (shape[..dim].iter().product(), shape[dim], shape[dim + 1..].iter().product());
+    if len == 0 && op != Reduce::Sum {
+        return Err(Error::Invalid(format!("max(): Expected reduction dim {dim} to have non-zero size.")));
+    }
+    let mut out_shape = shape.to_vec();
+    if keepdim {
+        out_shape[dim] = 1;
+    } else {
+        out_shape.remove(dim);
+    }
+    let out = Tensor::empty_typed(x.device(), &out_shape, DType::I64)?;
+    let push = [u32_of(outer, "outer")?, u32_of(len, "len")?, u32_of(inner, "inner")?, op as u32, u32_of(x.offset(), "offset")?, 0];
+    REDUCE_INT.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], outer * inner, &push)?;
     Ok(out)
 }

@@ -94,7 +94,6 @@ def test_size_out_of_range_matches_torch_error_type():
     lambda: grilly.from_numpy(np.zeros(3)),             # torch: float64
     lambda: grilly.zeros(3, dtype=grilly.float64),
     lambda: grilly.zeros(3, device="cuda"),
-    lambda: g(rand(3)) > 0,                             # bool tensors
     lambda: g(rand(3))[g(rand(1))],                     # advanced indexing
     lambda: g(rand(2, 3)).max(1),                       # returns int64 indices
     lambda: grilly.Tensor(2, 3),

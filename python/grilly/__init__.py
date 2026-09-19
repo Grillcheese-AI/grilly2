@@ -695,6 +695,12 @@ def randint(*args, size=None, generator=None, out=None, dtype=None, layout=None,
 # ── tensor operations ────────────────────────────────────────────────────
 
 from . import _ops  # noqa: E402  (needs Tensor defined)
+from ._ops import all_ as all, any_ as any  # noqa: E402,F401,A001
+from ._ops import (  # noqa: E402,F401
+    bitwise_and, bitwise_not, bitwise_or, bitwise_xor, eq, equal, ge, ger, greater,
+    greater_equal, gt, isfinite, isinf, isnan, le, less, less_equal, logical_and, logical_not,
+    logical_or, logical_xor, lt, masked_fill, ne, not_equal, outer, result_type, where,
+)
 from ._ops import (  # noqa: E402,F401
     abs, add, allclose, amax, amin, bmm, cat, chunk, clamp, clamp_max, clamp_min, clip,
     concat, concatenate, contiguous, div, divide, empty_like, exp, expand, flatten,
@@ -706,7 +712,7 @@ from ._ops import (  # noqa: E402,F401
 
 _ops._install()
 __all__ += [n for n in dir(_ops) if not n.startswith("_") and callable(getattr(_ops, n))
-            and n not in __all__ and n not in ("Tensor",)]
+            and n not in __all__ and n not in ("Tensor", "all_", "any_")] + ["all", "any"]
 
 # ── autograd ─────────────────────────────────────────────────────────────
 

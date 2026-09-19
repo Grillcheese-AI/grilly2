@@ -132,10 +132,9 @@ def test_errors_match_torch(call, exc):
         call(grilly)
 
 
-def test_comparisons_say_they_need_bool():
+def test_comparisons_return_bool_tensors_and_hash_by_identity():
     x = grilly.ones(2)
-    with pytest.raises(NotImplementedError, match="bool"):
-        x == x  # noqa: B015
+    assert (x == x).dtype is grilly.bool and (x == x).tolist() == [True, True]
     assert hash(x) == hash(x) and {x: 1}[x] == 1   # identity hashing, as torch
 
 

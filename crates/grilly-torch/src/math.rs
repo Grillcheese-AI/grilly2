@@ -2,8 +2,8 @@
 //! kernels, with torch's broadcasting and torch's derivative formulas.
 
 use grilly_core::autograd::{self, Backward, SavedTensor};
-use grilly_core::generic::{self as k, Binary, Reduce, Unary};
-use grilly_core::{Error, Result, Tensor};
+use grilly_core::generic::{self as k, Binary, IntBinary, Reduce, Unary};
+use grilly_core::{DType, Error, Result, Tensor};
 
 use crate::shape;
 
@@ -167,7 +167,8 @@ pub fn unary(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<Tensor> {
         Unary::Gelu => record("GeluBackward0", &[x], o, &[x], false, |g, s, _| {
             Ok(vec![Some(mul(g, &k::unary(&s[0], Unary::GeluGrad, 0.0, 0.0)?)?)])
         })?,
-        Unary::ClampMask | Unary::GeluGrad => {} // internal helpers, not differentiable
+        // internal helpers and predicates: not differentiable
+        Unary::ClampMask | Unary::GeluGrad | Unary::IsFinite | Unary::IsInf | Unary::IsNan => {}
     }
     Ok(out)
 }
@@ -301,4 +302,90 @@ pub fn layer_norm(x: &Tensor, normalized: usize, weight: Option<&Tensor>, bias: 
 /// `F.silu(x) = x * sigmoid(x)`.
 pub fn silu(x: &Tensor) -> Result<Tensor> {
     binary(x, &unary(x, Unary::Sigmoid, 0.0, 0.0)?, Binary::Mul)
+}
+
+// ── integers, booleans, comparisons, selection ──────────────────────────
+
+/// `isfinite` / `isinf` / `isnan`: a bool tensor. Integer and bool tensors
+/// are always finite, as in torch.
+pub fn predicate(x: &Tensor, op: Unary) -> Result<Tensor> {
+    if !x.dtype().is_floating() {
+        let value = if op == Unary::IsFinite { 1.0 } else { 0.0 };
+        return Tensor::full_typed(x.device(), x.shape(), value, DType::Bool);
+    }
+    k::unary(x, op, 0.0, 0.0)?.cast(DType::Bool)
+}
+
+fn int_op(op: Binary) -> Result<IntBinary> {
+    Ok(match op {
+        Binary::Add => IntBinary::Add,
+        Binary::Sub => IntBinary::Sub,
+        Binary::Mul => IntBinary::Mul,
+        Binary::Maximum => IntBinary::Maximum,
+        Binary::Minimum => IntBinary::Minimum,
+        Binary::Eq => IntBinary::Eq,
+        Binary::Ne => IntBinary::Ne,
+        Binary::Gt => IntBinary::Gt,
+        Binary::Ge => IntBinary::Ge,
+        Binary::Lt => IntBinary::Lt,
+        Binary::Le => IntBinary::Le,
+        Binary::Div | Binary::Pow => {
+            return Err(Error::NotImplemented(format!("{op:?} on integer tensors")))
+        }
+    })
+}
+
+/// A comparison of two tensors of the same dtype (callers promote first):
+/// a bool tensor, not differentiable.
+pub fn compare(a: &Tensor, b: &Tensor, op: Binary) -> Result<Tensor> {
+    if a.dtype().is_floating() {
+        return k::binary(a, b, op)?.cast(DType::Bool);
+    }
+    k::binary_int(&a.cast(DType::I64)?, &b.cast(DType::I64)?, int_op(op)?, true)
+}
+
+/// Integer arithmetic (+, -, *, maximum, minimum) or bitwise/logical ops on
+/// integer or bool tensors, computed exactly in int64 and returned in
+/// `out` (the promoted dtype chosen by the caller).
+pub fn integer(a: &Tensor, b: &Tensor, op: IntBinary, out: DType) -> Result<Tensor> {
+    let r = k::binary_int(&a.cast(DType::I64)?, &b.cast(DType::I64)?, op, false)?;
+    r.cast(out)
+}
+
+/// Integer sum / max / min over dims (all when empty), computed in int64;
+/// torch's `sum` of integers or bools is int64.
+pub fn integer_reduce(x: &Tensor, dims: &[usize], op: Reduce, keepdim: bool) -> Result<Tensor> {
+    let mut d: Vec<usize> = if dims.is_empty() { (0..x.dim()).collect() } else { dims.to_vec() };
+    d.sort_unstable();
+    d.dedup();
+    let mut t = x.cast(DType::I64)?;
+    if x.dim() == 0 {
+        return Ok(t);
+    }
+    for &dim in d.iter().rev() {
+        t = k::reduce_int(&t, dim, op, true)?;
+    }
+    if keepdim {
+        return Ok(t);
+    }
+    let shape: Vec<usize> = x.shape().iter().enumerate().filter(|(i, _)| !d.contains(i)).map(|(_, &s)| s).collect();
+    t.reshape(&shape)
+}
+
+/// `torch.where(cond, a, b)` with broadcasting; `a` and `b` share a dtype
+/// (callers promote first). The gradient goes to the branch that was taken.
+pub fn where_(cond: &Tensor, a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    let mut out = k::where_select(cond, a, b)?;
+    if !a.dtype().is_floating() {
+        return Ok(out);
+    }
+    let (sa, sb) = (a.shape().to_vec(), b.shape().to_vec());
+    record("WhereBackward0", &[a, b], &mut out, &[cond], false, move |g, s, n| {
+        let zero = Tensor::zeros(g.device(), &[])?;
+        Ok(vec![
+            need(n, 0, || k::sum_to_shape(&k::where_select(&s[0], g, &zero)?, &sa))?,
+            need(n, 1, || k::sum_to_shape(&k::where_select(&s[0], &zero, g)?, &sb))?,
+        ])
+    })?;
+    Ok(out)
 }
