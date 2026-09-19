@@ -18,6 +18,8 @@
 use grilly_core::generic::write_strided;
 use grilly_core::{require_float, Arg, DType, Device, Error, Kernel, MemClass, Result, Tensor};
 
+use crate::ops::{rope_into, Heads, Rotary};
+
 /// Bindings: q, k cache, v cache, scratch, out. Push: heads, kv_heads,
 /// max_len, len, dim, scale, q_off, rows.
 const ATTN_DECODE: Kernel = Kernel { shader: "g2-attn-decode", bindings: 5, push_words: 8, local_size: [256, 1, 1] };
@@ -67,6 +69,14 @@ impl KvCache {
 
     pub fn max_len(&self) -> usize {
         self.max_len
+    }
+
+    pub fn kv_heads(&self) -> usize {
+        self.kv_heads
+    }
+
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
     }
 
     /// Positions filled in `layer` (Hugging Face's `get_seq_length`).
@@ -129,6 +139,41 @@ impl KvCache {
         let dst = [h * m * d, m * d, d, 1];
         write_strided(keys, keys.offset(), &src, &self.k[layer], pos * d, &dst, &[b, h, t, d])?;
         write_strided(values, values.offset(), &src, &self.v[layer], pos * d, &dst, &[b, h, t, d])?;
+        self.lens[layer] = pos + t;
+        Ok(())
+    }
+
+    /// Write a step's keys and values at `layer`'s next `T` positions,
+    /// taking them from projections in their own `(batch, T, row)` layout:
+    /// the keys are rotated into the cache by the rotary kernel and the
+    /// values copied, with no transpose or slice in between. Two dispatches.
+    pub fn append_rotary(&mut self, layer: usize, keys: &Heads<'_>, values: &Heads<'_>, rot: &Rotary<'_>) -> Result<()> {
+        self.layer(layer)?;
+        let (b, t, v_row) = values.layout()?;
+        let (kb, kt, _) = keys.layout()?;
+        let (h, d, m) = (self.kv_heads, self.head_dim, self.max_len);
+        if (kb, kt) != (b, t) || (keys.heads, keys.dim) != (h, d) || (values.heads, values.dim) != (h, d) || b != self.batch {
+            return Err(Error::Shape(format!(
+                "KV cache append: expected {h} heads of {d} for batch {}, got keys {}x{} and values {}x{} for batch {b}",
+                self.batch, keys.heads, keys.dim, values.heads, values.dim
+            )));
+        }
+        let pos = self.lens[layer];
+        if pos + t > m {
+            return Err(Error::Invalid(format!(
+                "KV cache full: layer {layer} holds {pos} of {m} positions, {t} more asked"
+            )));
+        }
+        rope_into(keys, rot, &self.k[layer], pos * d, [h * m * d, m * d, d])?;
+        write_strided(
+            values.src,
+            values.src.offset() + values.col,
+            &[t * v_row, d, v_row, 1],
+            &self.v[layer],
+            pos * d,
+            &[h * m * d, m * d, d, 1],
+            &[b, h, t, d],
+        )?;
         self.lens[layer] = pos + t;
         Ok(())
     }

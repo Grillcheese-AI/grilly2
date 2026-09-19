@@ -41,12 +41,14 @@ pub const SCAN: Kernel = Kernel { shader: "g2-scan", bindings: 2, push_words: 8,
 pub const BMM: Kernel = Kernel { shader: "g2-bmm", bindings: 3, push_words: 9 + 3 * MAX_BATCH_DIMS as u32, local_size: [16, 16, 1] };
 
 pub const LAYER_NORM: Kernel = Kernel { shader: "g2-layer-norm", bindings: 5, push_words: 7, local_size: [256, 1, 1] };
+/// Bindings: x, residual, weight, y, h. Push: rows, n, eps, flags, x_off, r_off, w_off.
+pub const RMS_NORM: Kernel = Kernel { shader: "g2-rms-norm", bindings: 5, push_words: 7, local_size: [256, 1, 1] };
 pub const LAYER_NORM_BACKWARD: Kernel =
     Kernel { shader: "g2-layer-norm-backward", bindings: 6, push_words: 7, local_size: [256, 1, 1] };
 
 pub const ALL: &[Kernel] = &[
     UNARY, BINARY, REDUCE, COPY, CAST, BINARY_INT, WHERE, REDUCE_INT, INDEX, INDEX_ADD, INDEX_ADD_ATOMIC,
-    ARG_REDUCE, ARG_REDUCE_ROWS, SORT_INIT, SORT_STEP, SORT_TAKE, SCATTER, SCAN, BMM, REDUCE_ROWS, LAYER_NORM,
+    ARG_REDUCE, ARG_REDUCE_ROWS, RMS_NORM, SORT_INIT, SORT_STEP, SORT_TAKE, SCATTER, SCAN, BMM, REDUCE_ROWS, LAYER_NORM,
     LAYER_NORM_BACKWARD,
 ];
 
@@ -929,6 +931,56 @@ pub fn layer_norm(x: &Tensor, n: usize, weight: Option<&Tensor>, bias: Option<&T
     let args = [Arg::Storage(x), Arg::Storage(w), Arg::Storage(b), Arg::Storage(&y), Arg::Storage(&stats)];
     LAYER_NORM.launch(x.device(), &args, row_grid(rows)?, &push)?;
     Ok((y, stats))
+}
+
+/// rms_norm over the last `n` elements of each row of float32 `x`, torch's
+/// formula `h * (1 / sqrt(mean(h^2) + eps)) * weight`, in one kernel. `h`
+/// is `x`, or `x + residual` when a residual is given, and is then returned
+/// too (a decoder layer's add-then-normalize). No autograd: F.rms_norm
+/// composes grilly ops when a gradient is needed.
+pub fn rms_norm(
+    x: &Tensor,
+    n: usize,
+    residual: Option<&Tensor>,
+    weight: Option<&Tensor>,
+    eps: f32,
+) -> Result<(Tensor, Option<Tensor>)> {
+    require_float("rms_norm", x.dtype())?;
+    if n == 0 || !x.numel().is_multiple_of(n) {
+        return Err(Error::Shape(format!("rms_norm: {:?} is not rows of {n}", x.shape())));
+    }
+    if let Some(r) = residual {
+        require_float("rms_norm", r.dtype())?;
+        if r.shape() != x.shape() {
+            return Err(Error::Shape(format!("rms_norm: residual {:?} does not match input {:?}", r.shape(), x.shape())));
+        }
+    }
+    if let Some(w) = weight {
+        require_float("rms_norm", w.dtype())?;
+        if w.numel() != n {
+            return Err(Error::Shape(format!("rms_norm: weight has {} elements, expected {n}", w.numel())));
+        }
+    }
+    let rows = x.numel() / n;
+    let y = Tensor::empty(x.device(), x.shape())?;
+    let h = residual.map(|_| Tensor::empty(x.device(), x.shape())).transpose()?;
+    if rows == 0 {
+        return Ok((y, h));
+    }
+    let flags = weight.is_some() as u32 | (residual.is_some() as u32) << 1;
+    let (r, w) = (residual.unwrap_or(x), weight.unwrap_or(x));
+    let push = [
+        u32_of(rows, "rows")?,
+        u32_of(n, "n")?,
+        eps.to_bits(),
+        flags,
+        u32_of(x.offset(), "offset")?,
+        u32_of(r.offset(), "offset")?,
+        u32_of(w.offset(), "offset")?,
+    ];
+    let args = [Arg::Storage(x), Arg::Storage(r), Arg::Storage(w), Arg::Tensor(&y), Arg::Tensor(h.as_ref().unwrap_or(&y))];
+    RMS_NORM.launch(x.device(), &args, row_grid(rows)?, &push)?;
+    Ok((y, h))
 }
 
 /// The input gradient of [`layer_norm`] from the output gradient `g`, and,

@@ -12,7 +12,7 @@
 //! torchao.
 
 use grilly_core::autograd::{self, Backward};
-use grilly_core::generic::{self, Reduce};
+use grilly_core::generic::{self, copy_strided, Reduce};
 use grilly_core::{require_float, Arg, DType, Error, Kernel, MemClass, Result, Tensor};
 
 /// Bindings: w, q, scale. Push: rows, k, words, w_off.
@@ -94,6 +94,34 @@ impl Int8Weight {
         let bytes = self.q.to_bytes()?;
         let row = self.q.shape()[1] * 4;
         Ok((0..self.out_features).flat_map(|r| bytes[r * row..r * row + self.in_features].iter().map(|&b| b as i8)).collect())
+    }
+
+    /// One weight holding `parts`' rows in order: a fused q/k/v or gate/up
+    /// projection. The scales are per row, so a fused linear computes each
+    /// row exactly as the separate ones did.
+    pub fn cat(parts: &[&Int8Weight]) -> Result<Int8Weight> {
+        let Some(first) = parts.first() else {
+            return Err(Error::Shape("Int8Weight::cat: no weights".into()));
+        };
+        let in_features = first.in_features;
+        if parts.iter().any(|p| p.in_features != in_features) {
+            return Err(Error::Shape(format!(
+                "Int8Weight::cat: in_features differ ({:?})",
+                parts.iter().map(|p| p.in_features).collect::<Vec<_>>()
+            )));
+        }
+        let words = first.q.shape()[1];
+        let out_features: usize = parts.iter().map(|p| p.out_features).sum();
+        let dev = first.q.device();
+        let q = Tensor::empty_in(dev, &[out_features, words], DType::I32, MemClass::Persistent)?;
+        let scale = Tensor::empty_in(dev, &[out_features], DType::F32, MemClass::Persistent)?;
+        let mut row = 0;
+        for p in parts {
+            copy_strided(&p.q, p.q.offset(), &[words, 1], &q, row * words, &[words, 1], &[p.out_features, words])?;
+            copy_strided(&p.scale, p.scale.offset(), &[1], &scale, row, &[1], &[p.out_features])?;
+            row += p.out_features;
+        }
+        Ok(Int8Weight { q, scale, out_features, in_features })
     }
 
     /// The weight as float32: `q * scale` per row (torchao's dequantize).

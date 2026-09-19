@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use grilly_infer::{sampling, Int8Weight, KvCache, LoadError, SafeTensorsFile, Sampling};
+use grilly_infer::{ops, sampling, Heads, Int8Weight, KvCache, LoadError, Rotary, SafeTensorsFile, Sampling};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyFileNotFoundError, PyOSError};
 use pyo3::prelude::*;
@@ -107,6 +107,14 @@ impl PyInt8Weight {
         Ok(PyBytes::new(py, &q.iter().map(|&v| v as u8).collect::<Vec<u8>>()))
     }
 
+    /// One weight holding several weights' rows: a fused q/k/v or gate/up
+    /// projection, computing each row exactly as the separate ones did.
+    #[staticmethod]
+    fn cat(py: Python<'_>, parts: Vec<PyRef<'_, PyInt8Weight>>) -> PyResult<PyInt8Weight> {
+        let parts: Vec<&Int8Weight> = parts.iter().map(|p| &p.inner).collect();
+        py.detach(|| Int8Weight::cat(&parts)).map(|inner| PyInt8Weight { inner }).map_err(err)
+    }
+
     fn dequantize(&self, py: Python<'_>) -> PyResult<PyTensor> {
         py.detach(|| self.inner.dequantize()).map(wrap).map_err(err)
     }
@@ -201,6 +209,34 @@ impl PyKvCache {
         py.detach(|| self.inner.attend(layer, &query.inner, scale)).map(wrap).map_err(err)
     }
 
+    /// Rotate a step's keys into the cache and copy its values, taking both
+    /// from projections in their own (batch, T, row) layout. Two dispatches.
+    #[allow(clippy::too_many_arguments)]
+    fn append_rotary(
+        &mut self,
+        py: Python<'_>,
+        layer: usize,
+        keys: &PyTensor,
+        k_col: usize,
+        values: &PyTensor,
+        v_col: usize,
+        cos: &PyTensor,
+        sin: &PyTensor,
+        pos0: usize,
+    ) -> PyResult<()> {
+        let (heads, dim) = (self.inner.kv_heads(), self.inner.head_dim());
+        let inner = &mut self.inner;
+        py.detach(|| {
+            inner.append_rotary(
+                layer,
+                &Heads { src: &keys.inner, col: k_col, heads, dim },
+                &Heads { src: &values.inner, col: v_col, heads, dim },
+                &Rotary { cos: &cos.inner, sin: &sin.inner, pos0 },
+            )
+        })
+        .map_err(err)
+    }
+
     fn len(&self, layer: usize) -> usize {
         self.inner.len(layer)
     }
@@ -225,6 +261,36 @@ impl PyKvCache {
     }
 }
 
+/// Rotary embedding of `heads` heads of `dim` from column `col` of a
+/// (batch, T, row) projection, as (batch, heads, T, dim).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn rope(
+    py: Python<'_>,
+    src: &PyTensor,
+    col: usize,
+    heads: usize,
+    dim: usize,
+    cos: &PyTensor,
+    sin: &PyTensor,
+    pos0: usize,
+) -> PyResult<PyTensor> {
+    py.detach(|| {
+        ops::rope(
+            &Heads { src: &src.inner, col, heads, dim },
+            &Rotary { cos: &cos.inner, sin: &sin.inner, pos0 },
+        )
+    })
+    .map(wrap)
+    .map_err(err)
+}
+
+/// silu(gate) * up, each read from its source's columns.
+#[pyfunction]
+fn swiglu(py: Python<'_>, gate: &PyTensor, gate_col: usize, up: &PyTensor, up_col: usize, width: usize) -> PyResult<PyTensor> {
+    py.detach(|| ops::swiglu(&gate.inner, gate_col, &up.inner, up_col, width)).map(wrap).map_err(err)
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySafeFile>()?;
     m.add_class::<PyInt8Weight>()?;
@@ -233,6 +299,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(processed_scores, m)?)?;
     m.add_function(wrap_pyfunction!(sample_probabilities, m)?)?;
     m.add_function(wrap_pyfunction!(multinomial, m)?)?;
+    m.add_function(wrap_pyfunction!(rope, m)?)?;
+    m.add_function(wrap_pyfunction!(swiglu, m)?)?;
     m.add("SafetensorError", m.py().get_type::<SafetensorError>())?;
     Ok(())
 }

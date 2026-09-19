@@ -120,6 +120,32 @@ fn layer_norm(py: Python<'_>, x: &PyTensor, normalized: usize, weight: Option<&P
     run(py, move || math::layer_norm(&x, normalized, w.as_ref(), b.as_ref(), eps))
 }
 
+/// Fused rms_norm (no autograd): y over rows of the last `n` elements.
+#[pyfunction]
+#[pyo3(signature = (x, n, weight, eps))]
+fn rms_norm(py: Python<'_>, x: &PyTensor, n: usize, weight: Option<&PyTensor>, eps: f32) -> PyResult<PyTensor> {
+    let (x, w) = (x.inner.clone(), weight.map(|t| t.inner.clone()));
+    run(py, move || Ok(grilly_core::generic::rms_norm(&x, n, None, w.as_ref(), eps)?.0))
+}
+
+/// (rms_norm(x + residual), x + residual) in one kernel (no autograd).
+#[pyfunction]
+#[pyo3(signature = (x, residual, n, weight, eps))]
+fn add_rms_norm(
+    py: Python<'_>,
+    x: &PyTensor,
+    residual: &PyTensor,
+    n: usize,
+    weight: Option<&PyTensor>,
+    eps: f32,
+) -> PyResult<(PyTensor, PyTensor)> {
+    let (x, r, w) = (x.inner.clone(), residual.inner.clone(), weight.map(|t| t.inner.clone()));
+    let (y, h) = py
+        .detach(|| grilly_core::generic::rms_norm(&x, n, Some(&r), w.as_ref(), eps))
+        .map_err(err)?;
+    Ok((wrap(y), wrap(h.expect("a residual gives h"))))
+}
+
 #[pyfunction]
 fn silu(py: Python<'_>, x: &PyTensor) -> PyResult<PyTensor> {
     let x = x.inner.clone();
@@ -460,6 +486,8 @@ fn deterministic() -> bool {
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gather, m)?)?;
+    m.add_function(wrap_pyfunction!(rms_norm, m)?)?;
+    m.add_function(wrap_pyfunction!(add_rms_norm, m)?)?;
     m.add_function(wrap_pyfunction!(index_select, m)?)?;
     m.add_function(wrap_pyfunction!(index_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(embedding, m)?)?;

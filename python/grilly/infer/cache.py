@@ -32,6 +32,14 @@ class KVCache:
         layer's next ``T`` positions."""
         self._c.append(int(layer), _require_tensor("keys", keys)._t, _require_tensor("values", values)._t)
 
+    def append_rotary(self, layer: int, keys, k_col: int, values, v_col: int, cos, sin, pos0: int) -> None:
+        """Rotate a step's keys into the cache and copy its values, taking
+        both from projections in their own ``(batch, T, row)`` layout: no
+        transpose or slice in between. Two dispatches."""
+        self._c.append_rotary(int(layer), _require_tensor("keys", keys)._t, int(k_col),
+                              _require_tensor("values", values)._t, int(v_col),
+                              _require_tensor("cos", cos)._t, _require_tensor("sin", sin)._t, int(pos0))
+
     def attend(self, layer: int, query, scale: float | None = None) -> Tensor:
         """``softmax(query @ K.T * scale) @ V`` over the layer's filled
         positions; ``query`` is ``(batch, heads, 1, head_dim)``. ``scale``

@@ -484,29 +484,65 @@ a chat prompt sampled with the model's own `generation_config.json`
 
 | | |
 |---|---:|
-| decode (int8, sampled) | **59.5 tokens/s** (16.8 ms per token) |
-| prompt of 40 tokens + first token | 50 ms |
-| peak dedicated VRAM while generating | **1.04 GiB** |
-| peak while loading (float32 weights, then quantized) | 2.63 GiB |
-| weights + KV cache in persistent memory | 0.97 GiB |
+| decode (int8, sampled) | **161.7 tokens/s** (6.2 ms per token) |
+| prompt of 40 tokens + first token | 57 ms |
+| peak dedicated VRAM while generating | **1.24 GiB** |
+| peak while loading (float32 weights, then quantized) | 2.98 GiB |
+| weights + KV cache in persistent memory | 1.19 GiB |
 
-**Where a token's 16.8 ms goes:**
-- 1,145 dispatches;
-- 5.8 ms of GPU wait;
-- the rest is host-side recording, about 10 µs per dispatch through
-  Python and Rust.
+**Where a token's 6.2 ms goes:** 280 dispatches, 4.2 ms of GPU wait, and the
+rest host-side recording. The loop is still host-bound, so the lever is
+still dispatches per token.
 
-That is what the dispatch-cost measurement (docs/submission.md) predicted:
-the decode loop is host-bound, and the lever is fewer dispatches per token.
+## 6. The fused decode step
 
-Per layer, the largest contributors are:
-- RMSNorm, composed from 6 ops, twice;
-- rotary embeddings, about 7 ops each for q and k;
-- layout copies for the transposes around attention.
+The first measurement of the loop said the same thing the dispatch-cost
+measurement did (docs/submission.md): 1,145 dispatches for one token, 16.8
+ms, 5.8 ms of it GPU. Per layer that was 47 dispatches — 16 for the rotary
+embeddings, 12 for two RMSNorms, 7 for the transposes and slices around
+attention, 6 for the MLP, 4 projections, 2 residual adds.
 
-The next pass: fused RMSNorm and rotary kernels, attention kernels that
-read the projections' layout directly, and one int8 linear for q, k and v.
-After that, replaying a recorded decode step, as CUDA graphs do.
+Four kernels and one weight layout take a layer to 11:
 
-The loading peak (2.63 GiB) holds the float32 weights before they are
+| | ops before | after |
+|---|---:|---:|
+| RMSNorm, and the residual add before it | 6 + 1, twice | **1**, twice (`g2-rms-norm` adds the residual and returns the sum) |
+| rotary embedding of q | 7 | **1** (`g2-rope`, straight from the projection's columns) |
+| rotary embedding of k, into the cache | 7 + 1 append | **2** (`KvCache::append_rotary`) |
+| q, k, v projections | 3 | **1** (one int8 weight holding all three) |
+| gate and up projections, silu, multiply | 4 | **2** (one weight, then `g2-swiglu`) |
+
+None of it is new arithmetic. `g2-rope` and `g2-swiglu` call the same op
+functions in the same order as the ops they replace and are bit-exact
+against them (`tests/python/test_fused_ops.py`,
+`crates/grilly-infer/tests/fused_ops.rs`). A fused int8 weight is exact
+because the scales are per row: no row's dot product changes, and
+`Int8Weight::cat` is asserted bit-for-bit against the separate weights.
+`g2-rms-norm` is the one exception — its sum of squares is compensated
+rather than reassociated — so it is measured against float64 instead:
+within 2.44 ulp of a 4 ulp bound derived from the operations it performs.
+
+Two things follow from that, and both are in the tests:
+
+- **the difference at the logits is the network's, not the kernel's.** The
+  norm differs from the composed ops by ~1 ulp; on a random 3-layer model
+  that becomes 1e-4 at the logits. So the paths are not compared to each
+  other under a fixed epsilon; both are compared against a float64
+  reference of the same model, and the fused path must be no less accurate
+  than the composed one (measured 7.3e-7 against 5.6e-7 — the same order).
+- **the property a user sees is the tokens.** Greedy generation from the
+  real Qwen2.5-0.5B is still identical to transformers for 32 tokens, with
+  and without a repetition penalty.
+
+The fused path runs only when no gradient is needed. With autograd on, the
+same modules run as plain grilly ops, which carry gradients; the fused
+kernels have no backward and do not need one.
+
+**What it cost:** the fused q/k/v and gate/up weights are copies, so the
+int8 weights are held twice for the projections that fuse — 1.04 GiB while
+generating became 1.24. Quantizing straight from the checkpoint into the
+fused layout would remove both that and the 2.98 GiB loading peak below;
+that is the next step.
+
+The loading peak (2.98 GiB) holds the float32 weights before they are
 quantized. Quantizing each tensor as it is read would remove it.

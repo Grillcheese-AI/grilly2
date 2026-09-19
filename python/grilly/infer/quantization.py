@@ -83,6 +83,15 @@ class Int8Tensor(Parameter):
         t._grad = None
         return t
 
+    @classmethod
+    def _cat(cls, parts) -> "Int8Tensor":
+        """One weight holding the parts' rows: a fused q/k/v or gate/up
+        projection. Per-row scales make it exact."""
+        t = object.__new__(cls)
+        t._q = _C.Int8Weight.cat([p._q for p in parts])
+        t._grad = None
+        return t
+
     def __init__(self, *args, **kwargs) -> None:
         pass
 

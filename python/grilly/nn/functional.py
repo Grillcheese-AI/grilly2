@@ -8,6 +8,7 @@ import warnings
 
 from .. import Tensor, _C, _not_yet, _require_tensor
 from .. import _ops
+from ..autograd import is_grad_enabled
 from .. import relu as _relu
 
 __all__ = [
@@ -93,9 +94,16 @@ def rms_norm(input: Tensor, normalized_shape, weight=None, eps: float | None = N
         raise RuntimeError(f"Given normalized_shape={list(shape)}, expected input with shape [*, "
                            f"{', '.join(map(str, shape))}], but got input of size {list(x.shape)}")
     eps = 1.1920928955078125e-07 if eps is None else float(eps)
+    w = None if weight is None else _require_tensor("weight", weight)
+    if not (is_grad_enabled() and (x.requires_grad or (w is not None and w.requires_grad))):
+        # one fused kernel (g2-rms-norm); composed ops below when autograd needs them
+        n = 1
+        for s in shape:
+            n *= s
+        return Tensor._wrap(_C.rms_norm(x._t, n, None if w is None else w._t, eps))
     dims = tuple(range(x.dim() - len(shape), x.dim()))
     y = x * (x.pow(2).mean(dims, keepdim=True) + eps).rsqrt()
-    return y if weight is None else y * _require_tensor("weight", weight)
+    return y if w is None else y * w
 
 
 def layer_norm(input: Tensor, normalized_shape, weight=None, bias=None, eps: float = 1e-5) -> Tensor:

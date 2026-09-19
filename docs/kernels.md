@@ -37,6 +37,9 @@ applies to v1's modules.
 | `g2-quantize-q8` | per-row int8 of a float32 weight, torchao's formula, with correctly rounded division (`div_rn`) | `quantize_(model, Int8WeightOnlyConfig())` (grilly.infer) |
 | `g2-linear-q8` | `(x @ q.T) * scale + bias` with the int8 weight unpacked in the kernel; 64 threads per output feature, 16-byte weight loads, up to 8 rows of x per weight read | `F.linear` on an `Int8Tensor` weight |
 | `g2-dequantize-q8` | `q * scale` back to float32 | any other use of an `Int8Tensor`; its linear's input gradient |
+| `g2-rms-norm` | `x * rsqrt(mean(x^2) + eps) * w`, a workgroup per row, optionally adding a residual first and writing the sum out too; compensated sum, correctly rounded mean and reciprocal | `F.rms_norm`, `nn.RMSNorm`, a decoder layer's add-then-normalize |
+| `g2-rope` | rotary embedding of `heads` heads read from one projection's columns, written as (batch, heads, T, dim) | `grilly.infer` decode and prefill; also straight into the KV cache |
+| `g2-swiglu` | `silu(gate) * up`, each read from its own source and column (two projections, or the halves of a fused one) | the SwiGLU MLP of `grilly.infer.models` |
 | `g2-attn-decode` | one query token against a KV cache's filled positions, a workgroup per (batch, head), grouped-query attention by index | `grilly.infer.cache.KVCache.attend` |
 | `g2-sample` | next-token sampling, a workgroup of 1024 per row: repetition penalty, temperature, top-k (radix select), top-p (binary search over values), inverse-CDF draw; no sort; candidates in shared memory when they fit | `grilly.infer.sampling`, `torch.multinomial` |
 
