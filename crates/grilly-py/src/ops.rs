@@ -298,6 +298,31 @@ fn sorted(py: Python<'_>, x: &PyTensor, dim: usize, descending: bool, take: usiz
 }
 
 #[pyfunction]
+fn scatter(py: Python<'_>, x: &PyTensor, dim: usize, index: &PyTensor, src: &PyTensor) -> PyResult<PyTensor> {
+    let (x, i, s) = (x.inner.clone(), index.inner.clone(), src.inner.clone());
+    run(py, move || shape::scatter(&x, dim, &i, &s))
+}
+
+/// In place into `x`'s storage; returns the handle the caller should hold.
+#[pyfunction]
+fn scatter_(py: Python<'_>, x: &PyTensor, dim: usize, index: &PyTensor, src: &PyTensor) -> PyResult<PyTensor> {
+    let (x, i, s) = (x.inner.clone(), index.inner.clone(), src.inner.clone());
+    run(py, move || shape::scatter_(&x, dim, &i, &s))
+}
+
+#[pyfunction]
+fn cumsum(py: Python<'_>, x: &PyTensor, dim: usize) -> PyResult<PyTensor> {
+    let x = x.inner.clone();
+    run(py, move || math::cumsum(&x, dim))
+}
+
+#[pyfunction]
+fn logcumsumexp(py: Python<'_>, x: &PyTensor, dim: usize) -> PyResult<PyTensor> {
+    let x = x.inner.clone();
+    run(py, move || math::logcumsumexp(&x, dim))
+}
+
+#[pyfunction]
 fn set_deterministic(on: bool) {
     grilly_core::generic::set_deterministic(on);
 }
@@ -312,6 +337,10 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(index_select, m)?)?;
     m.add_function(wrap_pyfunction!(index_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(embedding, m)?)?;
+    m.add_function(wrap_pyfunction!(scatter, m)?)?;
+    m.add_function(wrap_pyfunction!(scatter_, m)?)?;
+    m.add_function(wrap_pyfunction!(cumsum, m)?)?;
+    m.add_function(wrap_pyfunction!(logcumsumexp, m)?)?;
     m.add_function(wrap_pyfunction!(argmax, m)?)?;
     m.add_function(wrap_pyfunction!(max_dim, m)?)?;
     m.add_function(wrap_pyfunction!(sorted, m)?)?;

@@ -25,6 +25,8 @@ applies to v1's modules.
 | `g2-index-add-atomic` | backward of `g2-index`, one thread per gradient element | the gradient by default (fast; last bits vary with duplicate indices) |
 | `g2-argreduce` | index of the first extreme along one axis (NaN is the extreme) | argmax, argmin, `max(dim)`, `min(dim)` |
 | `g2-sort-init`, `g2-sort-step`, `g2-sort-take` | bitonic sort of every row (padded to a power of two), float32 or int64 keys, ties by position | sort, argsort, topk |
+| `g2-scatter` | `dst[c with c[dim] := index[c]] = src[c]`, any dtype | scatter, scatter_, the input gradient of scatter |
+| `g2-scan` | inclusive scan along one axis, one thread per line, forward or reversed | cumsum (and its gradient), logcumsumexp (and its gradient) |
 
 All are prefixed `g2-` so they cannot shadow a v1 kernel. Every tensor is
 passed as its whole storage buffer plus an element offset, so views never
@@ -48,3 +50,10 @@ padded to p, all recorded in one batch (120 for a 32768-wide row). Its
 order is total (equal values keep their original order), so `sort` is
 always stable and `topk` breaks ties toward the lower index. torch's default
 sort is not stable, so tests compare against `sort(stable=True)`.
+
+`g2-scan`'s cumsum is Kahan-compensated: within 0.5 eps * cumsum(|x|) of a
+float64 reference, as torch's CPU cumsum (which accumulates in double).
+logcumsumexp carries the running max `m` and a compensated
+`S = sum exp(x_j - m)`, giving `m + log S`: its absolute error stays within
+about eps * (|m| + log n + 1) at any length. Chaining `logaddexp` step by step
+was measured at 170 ULP after 8192 steps and was replaced.

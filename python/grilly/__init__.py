@@ -703,6 +703,7 @@ from ._ops import (  # noqa: E402,F401
     cos, sin,
     are_deterministic_algorithms_enabled, gather, index_select, use_deterministic_algorithms,
     argmax, argmin, argsort, sort, topk,
+    cumsum, logcumsumexp, scatter,
 )
 from ._ops import (  # noqa: E402,F401
     abs, add, allclose, amax, amin, bmm, cat, chunk, clamp, clamp_max, clamp_min, clip,

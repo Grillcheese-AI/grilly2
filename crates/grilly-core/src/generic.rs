@@ -32,9 +32,12 @@ pub const SORT_INIT: Kernel = Kernel { shader: "g2-sort-init", bindings: 3, push
 pub const SORT_STEP: Kernel = Kernel { shader: "g2-sort-step", bindings: 2, push_words: 7, local_size: [256, 1, 1] };
 pub const SORT_TAKE: Kernel = Kernel { shader: "g2-sort-take", bindings: 2, push_words: 3, local_size: [256, 1, 1] };
 
+pub const SCATTER: Kernel = Kernel { shader: "g2-scatter", bindings: 3, push_words: 8 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
+pub const SCAN: Kernel = Kernel { shader: "g2-scan", bindings: 2, push_words: 8, local_size: [256, 1, 1] };
+
 pub const ALL: &[Kernel] = &[
     UNARY, BINARY, REDUCE, COPY, CAST, BINARY_INT, WHERE, REDUCE_INT, INDEX, INDEX_ADD, INDEX_ADD_ATOMIC,
-    ARG_REDUCE, SORT_INIT, SORT_STEP, SORT_TAKE,
+    ARG_REDUCE, SORT_INIT, SORT_STEP, SORT_TAKE, SCATTER, SCAN,
 ];
 
 static DETERMINISTIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -141,6 +144,16 @@ pub enum Reduce {
     Mean,
     Max,
     Min,
+}
+
+/// Inclusive scans along one axis. Codes match g2-scan.glsl.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scan {
+    /// float32 (compensated) or int64 (exact)
+    Cumsum = 0,
+    /// float32 only
+    LogCumsumExp,
 }
 
 fn u32_of(v: usize, what: &str) -> Result<u32> {
@@ -641,5 +654,59 @@ pub fn sort_positions(x: &Tensor, descending: bool, take: usize) -> Result<Tenso
         k *= 2;
     }
     SORT_TAKE.launch_flat(dev, &[Arg::Storage(&idx), Arg::Storage(&out)], rows * take, &[rows32, take as u32, p32])?;
+    Ok(out)
+}
+
+/// torch's scatter, in place: `dst[c with c[dim] := index[c]] = src[c]`
+/// for every position `c` of `index` (int64, bounds-checked by the caller,
+/// non-negative). `src` has `dst`'s dtype and is at least `index`'s size in
+/// every dim; `dst` is at least `index`'s size in every dim but `dim`.
+/// Bumps `dst`'s version.
+pub fn scatter(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Result<()> {
+    require(index.dtype(), DType::I64, "scatter index")?;
+    require(src.dtype(), dst.dtype(), "scatter source")?;
+    let mut push = vec![
+        u32_of(index.numel(), "numel")?,
+        index.dim() as u32,
+        dim as u32,
+        dst.dtype().words() as u32,
+        u32_of(src.offset(), "offset")?,
+        u32_of(index.offset(), "offset")?,
+        u32_of(dst.offset(), "offset")?,
+        0,
+    ];
+    push.extend(padded(index.shape(), "scatter")?);
+    push.extend(padded(&contiguous_strides(src.shape()), "scatter")?);
+    push.extend(padded(&contiguous_strides(dst.shape()), "scatter")?);
+    SCATTER.launch_flat(dst.device(), &[Arg::Storage(src), Arg::Storage(index), Arg::Storage(dst)], index.numel(), &push)?;
+    dst.bump_version();
+    Ok(())
+}
+
+/// An inclusive scan of `x` along `dim` (reversed: from the end), into a new
+/// tensor. Cumsum takes float32 or int64; LogCumsumExp float32.
+pub fn scan(x: &Tensor, dim: usize, op: Scan, reverse: bool) -> Result<Tensor> {
+    let is_int = match (x.dtype(), op) {
+        (DType::F32, _) => 0,
+        (DType::I64, Scan::Cumsum) => 1,
+        (other, _) => return Err(Error::Invalid(format!("{op:?}: unsupported dtype {}", other.name()))),
+    };
+    let shape = x.shape();
+    if dim >= shape.len() {
+        return Err(Error::Shape(format!("scan: dim {dim} out of range for shape {shape:?}")));
+    }
+    let (outer, len, inner): (usize, usize, usize) = (shape[..dim].iter().product(), shape[dim], shape[dim + 1..].iter().product());
+    let out = Tensor::empty_typed(x.device(), shape, x.dtype())?;
+    let push = [
+        u32_of(outer, "outer")?,
+        u32_of(len, "len")?,
+        u32_of(inner, "inner")?,
+        op as u32,
+        reverse as u32,
+        is_int,
+        u32_of(x.offset(), "offset")?,
+        0,
+    ];
+    SCAN.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], outer * inner, &push)?;
     Ok(out)
 }

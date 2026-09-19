@@ -166,6 +166,12 @@ non-leaf with `grad_fn`) raise `NotImplementedError` at first. torch
 "rebases" that tensor's history; CubbyLLM's in-place uses are all on leaves
 under `no_grad`, so nothing needs rebasing yet.
 
+One case needs no rebasing and is supported: `dst.scatter_(dim, index, src)`
+where `dst` is not part of a graph but `src` requires grad (CubbyLLM's
+retrieval head writes top-k logits into a fresh `-inf` tensor). The values
+are written into `dst`'s storage, and `dst` then gets a `ScatterBackward0`
+node with `src` as its only input: it has no earlier history to rebase.
+
 ## 4. Gradient checkpointing (`use_reentrant=False`)
 
 torch's non-reentrant algorithm, which is what CubbyLLM uses:

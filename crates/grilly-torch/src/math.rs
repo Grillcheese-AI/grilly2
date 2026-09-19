@@ -2,7 +2,7 @@
 //! kernels, with torch's broadcasting and torch's derivative formulas.
 
 use grilly_core::autograd::{self, Backward, SavedTensor};
-use grilly_core::generic::{self as k, Binary, IntBinary, Reduce, Unary};
+use grilly_core::generic::{self as k, Binary, IntBinary, Reduce, Scan, Unary};
 use grilly_core::{DType, Error, Result, Tensor};
 
 use crate::shape;
@@ -394,4 +394,59 @@ pub fn where_(cond: &Tensor, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         ])
     })?;
     Ok(out)
+}
+
+// ── scans ────────────────────────────────────────────────────────────────
+
+/// `torch.cumsum(x, dim)`: float32 stays float32 (compensated summation);
+/// integers and bools sum exactly as int64, as in torch. The gradient is
+/// the gradient's cumsum taken from the end.
+pub fn cumsum(x: &Tensor, dim: usize) -> Result<Tensor> {
+    let src = match x.dtype() {
+        DType::F32 | DType::I64 => x.detach(),
+        _ => x.cast(DType::I64)?,
+    };
+    let mut out = k::scan(&src, dim, Scan::Cumsum, false)?;
+    record("CumsumBackward0", &[x], &mut out, &[], false, move |g, _, _| {
+        Ok(vec![Some(k::scan(g, dim, Scan::Cumsum, true)?)])
+    })?;
+    Ok(out)
+}
+
+/// `torch.logcumsumexp(x, dim)`: `log(sum_{j<=i} exp(x_j))`, stably, with
+/// torch's backward (FunctionsManual.cpp `logcumsumexp_backward`): the
+/// gradient's positive and negative parts go through reversed
+/// log-cumsum-exps, so nothing overflows.
+pub fn logcumsumexp(x: &Tensor, dim: usize) -> Result<Tensor> {
+    if !x.dtype().is_floating() {
+        return Err(Error::Invalid(format!("\"logcumsumexp_out_cpu\" not implemented for '{}'", type_label(x.dtype()))));
+    }
+    let mut out = k::scan(x, dim, Scan::LogCumsumExp, false)?;
+    record("LogcumsumexpBackward0", &[x], &mut out, &[x], true, move |g, s, _| {
+        let (x, y) = (&s[0], &s[1]);
+        if g.numel() <= 1 || g.shape()[dim] == 1 {
+            return Ok(vec![Some(g.clone())]);
+        }
+        let dev = g.device();
+        let (zero, lowest) = (Tensor::zeros(dev, &[])?, Tensor::full(dev, &[], f32::MIN)?);
+        let log_abs = k::unary(&k::unary(g, Unary::Abs, 0.0, 0.0)?, Unary::Log, 0.0, 0.0)?;
+        let part = |op: Binary| -> Result<Tensor> {
+            let mask = k::binary(g, &zero, op)?.cast(DType::Bool)?;
+            let log_part = k::where_select(&mask, &log_abs, &lowest)?;
+            let r = k::scan(&k::binary(&log_part, y, Binary::Sub)?, dim, Scan::LogCumsumExp, true)?;
+            k::unary(&k::binary(&r, x, Binary::Add)?, Unary::Exp, 0.0, 0.0)
+        };
+        Ok(vec![Some(k::binary(&part(Binary::Gt)?, &part(Binary::Lt)?, Binary::Sub)?)])
+    })?;
+    Ok(out)
+}
+
+/// torch's capitalized scalar-type name, as in its "not implemented for" errors.
+fn type_label(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F32 => "Float",
+        DType::I64 => "Long",
+        DType::I32 => "Int",
+        DType::Bool => "Bool",
+    }
 }

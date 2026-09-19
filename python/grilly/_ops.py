@@ -807,6 +807,52 @@ def index_select(input, dim, index) -> Tensor:
     return _w(_C.index_select(x._t, _dim(dim, x.dim()), i._t))
 
 
+def _scatter_args(x: Tensor, index, src, reduce):
+    if reduce is not None:
+        raise _not_yet(f"scatter(reduce={reduce!r})")
+    i = _require_tensor("index", index)
+    if _is_number(src):
+        from . import full
+        src = full(builtins.tuple(i.shape), src, dtype=x.dtype)
+    return i, _require_tensor("src", src)
+
+
+def scatter(input, dim, index, src=None, *, value=None, reduce=None) -> Tensor:
+    """A copy of ``input`` with ``src`` (a tensor or a number) written at
+    ``index`` along ``dim``. Duplicate indices leave which write wins
+    unspecified, as in torch."""
+    x = _require_tensor("input", input)
+    i, v = _scatter_args(x, index, value if src is None else src, reduce)
+    return _w(_C.scatter(x._t, _dim(dim, x.dim()), i._t, v._t))
+
+
+def _scatter_(self, dim, index, src=None, *, value=None, reduce=None) -> Tensor:
+    i, v = _scatter_args(self, index, value if src is None else src, reduce)
+    self._t = _C.scatter_(self._t, _dim(dim, self.dim()), i._t, v._t)
+    return self
+
+
+def cumsum(input, dim, *, dtype=None) -> Tensor:
+    """Running sums along ``dim``: float32 stays float32; integers and bools
+    give int64, as in torch."""
+    x = _require_tensor("input", input)
+    if dtype is not None:
+        x = x.to(dtype)
+    if x.dim() == 0:
+        _dim(dim, 1)
+        return _w(_C.cumsum(x.reshape(1)._t, 0)).reshape(())
+    return _w(_C.cumsum(x._t, _dim(dim, x.dim())))
+
+
+def logcumsumexp(input, dim) -> Tensor:
+    """``log(cumsum(exp(input)))`` along ``dim``, computed stably."""
+    x = _require_tensor("input", input)
+    if x.dim() == 0:
+        _dim(dim, 1)
+        return _w(_C.logcumsumexp(x.reshape(1)._t, 0)).reshape(())
+    return _w(_C.logcumsumexp(x._t, _dim(dim, x.dim())))
+
+
 def use_deterministic_algorithms(mode, *, warn_only=False) -> None:
     """When on, ops that would sum with atomics (in hardware order, e.g.
     embedding and gather backward) use fixed-order kernels instead."""
@@ -940,12 +986,13 @@ def _install() -> None:
     for name in ("sin", "cos", "add", "sub", "mul", "div", "pow", "neg", "abs", "sign", "exp", "log",
                  "sqrt", "rsqrt", "tanh", "sigmoid", "square", "clamp", "clip", "clamp_min",
                  "clamp_max", "sum", "mean", "amax", "amin", "max", "min", "argmax", "argmin", "sort",
-                 "argsort", "topk", "softmax",
+                 "argsort", "topk", "cumsum", "logcumsumexp", "scatter", "softmax",
                  "log_softmax", "transpose", "swapaxes", "t", "permute", "unsqueeze",
                  "squeeze", "flatten", "expand", "narrow", "select", "chunk", "split",
                  "matmul", "mm", "bmm", "contiguous", "maximum", "minimum", "true_divide",
                  "multiply", "subtract", "negative", "divide"):
         setattr(T, name, globals()[name])
+    T.scatter_ = _scatter_
     T.__add__ = add
     T.__radd__ = lambda self, other: add(other, self)
     T.__sub__ = sub

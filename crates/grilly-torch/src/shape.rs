@@ -411,3 +411,91 @@ pub fn sorted(x: &Tensor, dim: usize, descending: bool, take: usize, name: &'sta
     let values = indexed(x, dim, &idx, IndexMode::Gather, name)?;
     Ok((values, idx))
 }
+
+// ── scatter ─────────────────────────────────────────────────────────────
+
+/// torch's argument checks for scatter, with its messages.
+fn check_scatter(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Result<Tensor> {
+    let index = as_index(index, "scatter")?;
+    if src.dtype() != dst.dtype() {
+        return Err(Error::Invalid("scatter(): Expected self.dtype to be equal to src.dtype".into()));
+    }
+    if index.dim() != dst.dim() || (src.dim() != dst.dim() && index.numel() > 0) {
+        return Err(Error::Invalid("Index tensor must have the same number of dimensions as self tensor".into()));
+    }
+    let fits = (0..index.dim()).all(|d| index.shape()[d] <= src.shape()[d] && (d == dim || index.shape()[d] <= dst.shape()[d]));
+    if !fits {
+        return Err(Error::Invalid(format!(
+            "Expected index {:?} to be no larger than self {:?} apart from dimension {dim} and to be no larger size than src {:?}",
+            index.shape(),
+            dst.shape(),
+            src.shape()
+        )));
+    }
+    let size = dst.shape()[dim];
+    check_bounds(&index, size, false, |v| {
+        Error::Invalid(format!("index {v} is out of bounds for dimension {dim} with size {size}"))
+    })?;
+    Ok(index.detach())
+}
+
+/// A contiguous copy of `x` in new storage.
+fn copied(x: &Tensor) -> Result<Tensor> {
+    let out = Tensor::empty_typed(x.device(), x.shape(), x.dtype())?;
+    let strides = contiguous_strides(x.shape());
+    k::copy_strided(x, x.offset(), &strides, &out, 0, &strides, x.shape())?;
+    Ok(out)
+}
+
+/// The gradient reaching `src` through a scatter: the output gradient at
+/// the scattered positions, zero where `src` extends past the index. (torch
+/// returns `grad.gather(dim, index)` and so raises when `src` is larger than
+/// the index; the zero-padded gradient is the correct one.)
+fn scatter_src_grad(g: &Tensor, dim: usize, index: &Tensor, src_shape: &[usize]) -> Result<Tensor> {
+    let picked = k::index_gather(g, dim, index, IndexMode::Gather)?;
+    if picked.shape() == src_shape {
+        return Ok(picked);
+    }
+    let out = Tensor::zeros(g.device(), src_shape)?;
+    k::copy_strided(&picked, 0, &contiguous_strides(picked.shape()), &out, 0, &contiguous_strides(src_shape), picked.shape())?;
+    Ok(out)
+}
+
+/// `torch.scatter(input, dim, index, src)`: a copy of `input` with `src`
+/// written at the indexed positions. Differentiable in `input` (zero at the
+/// overwritten positions) and `src` (the gradient gathered back).
+pub fn scatter(input: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Result<Tensor> {
+    let index = check_scatter(input, dim, index, src)?;
+    let mut out = copied(input)?;
+    k::scatter(&out, dim, &index, src)?;
+    let src_shape = src.shape().to_vec();
+    record("ScatterBackward0", &[input, src], &mut out, &[], false, move |g, _, needs| {
+        let grad_input = if needs[0] {
+            let copy = copied(g)?;
+            k::scatter(&copy, dim, &index, &Tensor::zeros(g.device(), index.shape())?)?;
+            Some(copy)
+        } else {
+            None
+        };
+        let grad_src = if needs[1] { Some(scatter_src_grad(g, dim, &index, &src_shape)?) } else { None };
+        Ok(vec![grad_input, grad_src])
+    })?;
+    Ok(out)
+}
+
+/// `dst.scatter_(dim, index, src)`, written into `dst`'s storage. Returns
+/// the tensor the caller should now hold as `dst`: the same storage, and,
+/// when `src` requires grad, a ScatterBackward0 node, so the gradient
+/// reaches `src` as in torch. `dst` itself may not be part of a graph
+/// (grilly's in-place rule; see docs/autograd.md).
+pub fn scatter_(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Result<Tensor> {
+    dst.check_inplace(&[])?;
+    let index = check_scatter(dst, dim, index, src)?;
+    k::scatter(dst, dim, &index, src)?;
+    let mut out = dst.detach();
+    let src_shape = src.shape().to_vec();
+    record("ScatterBackward0", &[src], &mut out, &[], false, move |g, _, _| {
+        Ok(vec![Some(scatter_src_grad(g, dim, &index, &src_shape)?)])
+    })?;
+    Ok(out)
+}
