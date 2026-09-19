@@ -44,6 +44,14 @@ fn binary_op(name: &str) -> PyResult<Binary> {
         "pow" => Binary::Pow,
         "maximum" => Binary::Maximum,
         "minimum" => Binary::Minimum,
+        // 1.0 / 0.0 masks with no gradient; for library code (dropout), since
+        // user-facing comparisons must return bool tensors.
+        "eq" => Binary::Eq,
+        "ne" => Binary::Ne,
+        "gt" => Binary::Gt,
+        "ge" => Binary::Ge,
+        "lt" => Binary::Lt,
+        "le" => Binary::Le,
         _ => return Err(PyValueError::new_err(format!("unknown binary op {name:?}"))),
     })
 }

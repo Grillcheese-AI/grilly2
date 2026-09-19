@@ -226,6 +226,24 @@ class Tensor:
     def _version(self) -> _builtins.int:
         return self._t.version
 
+    def __deepcopy__(self, memo):
+        """A copy with its own storage, as torch's: leaves only; keeps
+        requires_grad and a copy of .grad."""
+        if not self.is_leaf:
+            raise RuntimeError("Only Tensors created explicitly by the user (graph leaves) support "
+                               "the deepcopy protocol at the moment.")
+        if id(self) in memo:
+            return memo[id(self)]
+        new = type(self)._wrap(self._t.detach().clone_data())
+        new.requires_grad_(self.requires_grad)
+        if self.grad is not None:
+            new.grad = self.grad.__deepcopy__(memo)
+        memo[id(self)] = new
+        return new
+
+    def __reduce_ex__(self, protocol):
+        raise _not_yet("pickling tensors")
+
     # in place
     def add_(self, other, *, alpha=1) -> "Tensor":
         if alpha != 1:
@@ -474,3 +492,4 @@ from .autograd import enable_grad, is_grad_enabled, no_grad, set_grad_enabled  #
 
 from . import nn  # noqa: E402  (needs Tensor defined)
 from . import utils  # noqa: E402
+from . import optim  # noqa: E402

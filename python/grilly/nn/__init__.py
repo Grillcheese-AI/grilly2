@@ -1,6 +1,15 @@
-"""grilly.nn, like torch.nn. Modules come with autograd; only
-functional ops exist so far."""
+"""grilly.nn, like torch.nn."""
 
-from . import functional
+from . import functional, init
+from .modules import (
+    GELU, Dropout, Embedding, Identity, LayerNorm, Linear, Module, ModuleDict, ModuleList, ReLU,
+    Sequential, Sigmoid, SiLU, Softmax, Tanh,
+)
+from .parameter import Parameter
+from . import utils
 
-__all__ = ["functional"]
+__all__ = [
+    "Dropout", "Embedding", "GELU", "Identity", "LayerNorm", "Linear", "Module", "ModuleDict",
+    "ModuleList", "Parameter", "ReLU", "Sequential", "SiLU", "Sigmoid", "Softmax", "Tanh",
+    "functional", "init", "utils",
+]

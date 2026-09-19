@@ -137,3 +137,15 @@ def test_comparisons_say_they_need_bool():
     with pytest.raises(NotImplementedError, match="bool"):
         x == x  # noqa: B015
     assert hash(x) == hash(x) and {x: 1}[x] == 1   # identity hashing, as torch
+
+
+def test_python_scalar_conversions_match_torch():
+    for lib in (grilly, torch):
+        assert float(lib.tensor([2.5])) == 2.5
+        assert int(lib.tensor(-2.7)) == -2 and int(lib.tensor(2.7)) == 2
+        assert bool(lib.zeros(1)) is False and bool(lib.ones(1, 1)) is True
+        with pytest.raises(ValueError, match="one element"):
+            float(lib.ones(2))
+        with pytest.raises(RuntimeError, match="ambiguous"):
+            bool(lib.ones(2))
+

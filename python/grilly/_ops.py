@@ -511,3 +511,20 @@ def _install() -> None:
     T.reshape_as = lambda self, other: self.reshape(list(other.shape))
     T.float = lambda self: self  # already float32
     T.__iter__ = lambda self: (self[i] for i in range(len(self)))
+    T.__float__ = _scalar(builtins.float)
+    T.__int__ = _scalar(builtins.int)       # truncates toward zero, as torch
+    T.__bool__ = _truth
+
+
+def _scalar(convert):
+    def to_python(self):
+        if self.numel() != 1:
+            raise ValueError("only one element tensors can be converted to Python scalars")
+        return convert(self._host().reshape(()).item())
+    return to_python
+
+
+def _truth(self) -> builtins.bool:
+    if self.numel() != 1:
+        raise RuntimeError("Boolean value of Tensor with more than one value is ambiguous")
+    return builtins.bool(self._host().reshape(()).item())
