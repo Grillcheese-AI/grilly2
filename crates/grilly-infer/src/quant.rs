@@ -19,6 +19,9 @@ use grilly_core::{require_float, Arg, DType, Error, Kernel, MemClass, Result, Te
 const QUANTIZE: Kernel = Kernel { shader: "g2-quantize-q8", bindings: 3, push_words: 4, local_size: [256, 1, 1] };
 /// Bindings: x, q, scale, bias, y. Push: m, k, n, vecs, x_off, b_off, has_bias, x_vec4.
 const LINEAR: Kernel = Kernel { shader: "g2-linear-q8", bindings: 5, push_words: 8, local_size: [256, 1, 1] };
+/// Bindings: x, q, scale, bias, y. Push: m, k, n, vecs, x_off, b_off, has_bias, pad.
+/// The same result as LINEAR, for many rows: a 64x64 output tile per workgroup.
+const LINEAR_TILED: Kernel = Kernel { shader: "g2-linear-q8-tiled", bindings: 5, push_words: 8, local_size: [256, 1, 1] };
 /// Bindings: q, scale, w. Push: rows, k, words.
 const DEQUANTIZE: Kernel = Kernel { shader: "g2-dequantize-q8", bindings: 3, push_words: 3, local_size: [256, 1, 1] };
 
@@ -27,7 +30,23 @@ const LINEAR_ROWS: usize = 8;
 /// Output features per workgroup of the linear kernel.
 const LINEAR_COLS: usize = 4;
 
-pub const KERNELS: &[Kernel] = &[QUANTIZE, LINEAR, DEQUANTIZE];
+pub const KERNELS: &[Kernel] = &[QUANTIZE, LINEAR, LINEAR_TILED, DEQUANTIZE];
+
+/// The output tile of g2-linear-q8-tiled (BM, BN there).
+const TILE: usize = 64;
+/// Rows from which tiling can win. Below it the decode kernel reads the
+/// weight once for up to LINEAR_ROWS rows anyway.
+const TILED_MIN_ROWS: usize = 16;
+/// Tiles a shape must make before tiling is worth it. One tile is one
+/// workgroup, so a narrow layer (k_proj at 128 rows is 4 tiles) would leave
+/// most of the card idle; the decode kernel's finer grid does not. Measured
+/// on an RX 6750 XT, 40 compute units (docs/inference.md).
+const TILED_MIN_TILES: usize = 16;
+
+/// Whether `linear` tiles a given shape.
+fn tiled_for(m: usize, n: usize) -> bool {
+    m >= TILED_MIN_ROWS && n.div_ceil(TILE) * m.div_ceil(TILE) >= TILED_MIN_TILES
+}
 
 fn u32_of(v: usize, what: &str) -> Result<u32> {
     u32::try_from(v).map_err(|_| Error::Shape(format!("{what} = {v} exceeds u32")))
@@ -157,9 +176,8 @@ impl Int8Weight {
         if m == 0 || n == 0 {
             return Ok(y);
         }
-        let [gx, gy] = grid(n.div_ceil(LINEAR_COLS), 256)?;
-        let gz = u32_of(m.div_ceil(LINEAR_ROWS), "rows")?;
-        let push = [
+        let tiled = tiled_for(m, n);
+        let mut push = [
             u32_of(m, "rows")?,
             u32_of(k, "in_features")?,
             u32_of(n, "out_features")?,
@@ -171,7 +189,16 @@ impl Int8Weight {
         ];
         // With no bias the kernel never reads binding 3; bind the scales there.
         let b = bias.map_or(Arg::Tensor(&self.scale), Arg::Storage);
-        LINEAR.launch(dev, &[Arg::Storage(input), Arg::Tensor(&self.q), Arg::Tensor(&self.scale), b, Arg::Tensor(&y)], [gx, gy, gz], &push)?;
+        let args = [Arg::Storage(input), Arg::Tensor(&self.q), Arg::Tensor(&self.scale), b, Arg::Tensor(&y)];
+        if tiled {
+            push[7] = 0;
+            let groups = [u32_of(n.div_ceil(TILE) * 256, "out_features")?, u32_of(m.div_ceil(TILE), "rows")?, 1];
+            LINEAR_TILED.launch(dev, &args, groups, &push)?;
+        } else {
+            let [gx, gy] = grid(n.div_ceil(LINEAR_COLS), 256)?;
+            let gz = u32_of(m.div_ceil(LINEAR_ROWS), "rows")?;
+            LINEAR.launch(dev, &args, [gx, gy, gz], &push)?;
+        }
         Ok(y)
     }
 }

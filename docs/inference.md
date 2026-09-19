@@ -208,21 +208,71 @@ bytes read.
 
 | layer (out × in) | rows | float32 µs | int8 µs | int8 GB/s | int8 vs float32 |
 |---|---:|---:|---:|---:|---:|
-| q/o_proj (896 × 896) | 1 | 24.5 | 6.0 | 135 | 4.1× faster |
-| k/v_proj (128 × 896) | 1 | 22.3 | 3.4 | 34 | 6.5× faster |
-| gate/up_proj (4864 × 896) | 1 | 73.9 | 20.6 | 213 | 3.6× faster |
-| down_proj (896 × 4864) | 1 | 122.4 | 11.7 | 372 | 10.4× faster |
-| lm_head (151936 × 896) | 1 | 2745 | 570 | 240 | 4.8× faster |
-| gate/up_proj | 8 | 74.8 | 67.2 | 65 | 1.1× faster |
-| down_proj | 8 | 124.9 | 49.0 | 89 | 2.5× faster |
-| gate/up_proj | 128 | 553 | 886 | 5 | **0.62×, slower** |
-| down_proj | 128 | 596 | 714 | 6 | **0.83×, slower** |
+| q/o_proj (896 × 896) | 1 | 24.8 | 5.8 | 139 | 4.3× faster |
+| k/v_proj (128 × 896) | 1 | 22.9 | 3.4 | 33 | 6.7× faster |
+| gate/up_proj (4864 × 896) | 1 | 76.0 | 21.1 | 208 | 3.6× faster |
+| down_proj (896 × 4864) | 1 | 125.7 | 12.2 | 358 | 10.3× faster |
+| lm_head (151936 × 896) | 1 | 2755 | 581 | 235 | 4.7× faster |
+| gate/up_proj | 8 | 76.8 | 69.4 | 63 | 1.1× faster |
+| down_proj | 8 | 128.2 | 50.3 | 87 | 2.6× faster |
+| q/o_proj | 128 | 107.4 | 106.8 | 8 | 1.01× |
+| k/v_proj | 128 | 28.5 | 31.1 | 4 | 0.92× |
+| gate/up_proj | 128 | 566 | 246 | 18 | **2.30× faster** |
+| down_proj | 128 | 607 | 622 | 7 | 0.98× |
+| lm_head | 128 | 22464 | 16427 | 8 | 1.37× faster |
 
-- **Decode (one row)** is where int8 pays: 3.6–10.4× faster.
-- **Prefill** of a 128-token prompt is slower in int8 (0.62–0.92×). The
-  kernel re-reads the weight for each 8-row chunk. A tiled kernel that
-  unpacks each int8 tile into shared memory once per 64 rows is the fix.
-  It is not built yet.
+- **Decode (one row)** is where int8 pays most: 3.6–10.3× faster.
+- **Prefill** used to be *slower* in int8 (0.62–0.83×) because the decode
+  kernel re-reads the whole weight for every 8 rows — at 128 rows, sixteen
+  times over, which is why it ran at about 1% of this card's bandwidth.
+  `g2-linear-q8-tiled` fixes that (below); no layer is meaningfully slower
+  than float32 now, and the MLP's larger half is 2.3× faster.
+
+### Tiling, and why not dp4a
+
+The obvious idea for a faster int8 matmul is the integer dot product
+(`v_dot4_i32_i8` on RDNA 2, four int8 multiply-adds in one instruction;
+v1's `moqe-fused-gemv-dp4a.glsl` is built on it). The measurements say it
+is the wrong lever here, twice over:
+
+- at **decode** the kernel is memory-bound and close to the roof —
+  `down_proj` reads its weight at 358–380 GB/s on a card with ~432 GB/s of
+  peak bandwidth. Integer dot does not make a weight byte smaller, so
+  there is nothing for it to win. The narrow layers (`k_proj` at 33 GB/s)
+  are launch-bound instead, which is why *fusing* q/k/v helped;
+- at **prefill** the old kernel ran at 5–8 GB/s, so it was not short of
+  arithmetic either — it was re-reading the weight.
+
+And dp4a needs *both* operands in int8, while weight-only quantization
+keeps activations in float32; it only becomes available with dynamic
+activation quantization (torchao's `Int8DynamicActivationInt8WeightConfig`),
+which changes the numerics. So the fix is data flow, not instructions.
+
+`g2-linear-q8-tiled` gives each workgroup a 64×64 tile of the output and
+walks k in steps of 32, staging x and the unpacked weight in shared memory;
+each thread keeps a 4×4 micro-tile in registers. Every value loaded is then
+used 64 times instead of once.
+
+**It is chosen by shape, not by hope.** One tile is one workgroup, so a
+narrow layer would leave the card idle: `k_proj` at 128 rows makes 4 tiles
+for 40 compute units, and measured 115 µs tiled against 31 µs with the
+decode kernel's finer grid. `linear` therefore tiles only above 16 rows
+*and* 16 tiles (`tiled_for`), and the thresholds come from that table.
+
+End to end on Qwen2.5-0.5B, prompt processing:
+
+| prompt | before | after |
+|---|---:|---:|
+| 3,030 tokens | 2,180 ms | **1,060 ms** |
+| 8,030 tokens | 8,206 ms | **5,231 ms** |
+
+The 8K case gains less because attention is quadratic and by then it, not
+the projections, is most of the time.
+
+The two kernels sum in different orders — the decode one splits k over 64
+lanes and adds them in a tree, the tiled one sums a row of k in one thread
+— so `tests/quant.rs` derives its bound from whichever kernel a shape
+uses, and both are measured against float64 (worst 0.043 of the bound).
 - **Loading `x` as `vec4`** made decode 1.4–2.4× faster than scalar loads.
   The kernel had been limited by load instructions, not by bandwidth.
 

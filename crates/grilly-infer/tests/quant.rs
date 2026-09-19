@@ -85,13 +85,23 @@ fn quantized_values_are_torchaos_exactly() {
 fn linear_matches_a_float64_reference_within_its_bound() {
     let dev = dev();
     let mut worst = 0.0f64;
-    for (m, n, k) in [(1, 1, 1), (1, 5, 17), (3, 4, 16), (8, 7, 33), (9, 6, 100), (20, 13, 896), (1, 64, 4864)] {
+    // shapes on both sides of the threshold where linear switches from the
+    // decode kernel to the tiled one, including its tile edges (64) and a k
+    // that is not a multiple of its 32-step
+    for (m, n, k) in [
+        (1, 1, 1), (1, 5, 17), (3, 4, 16), (8, 7, 33), (9, 6, 100), (20, 13, 896), (1, 64, 4864),
+        (16, 5, 33), (64, 64, 128), (65, 130, 100), (128, 64, 4864),
+    ] {
         let w = data(n * k, (m + n + k) as u64, -1.0, 1.0);
         let x = data(m * k, (m * n * k) as u64 + 7, -2.0, 2.0);
         let b = data(n, 99, -0.5, 0.5);
         let qw = Int8Weight::quantize(&Tensor::from_slice(&dev, &w, &[n, k]).unwrap()).unwrap();
         let (q, scale) = reference(&w, k);
-        let terms = 16 * k.div_ceil(16).div_ceil(64);
+        // the bound follows whichever kernel runs (quant.rs picks by rows):
+        // the decode kernel splits k over 64 lanes and adds them in a tree,
+        // so each accumulator chains about k/64 terms; the tiled kernel sums
+        // a whole row of k in one thread.
+        let terms = if m >= 16 { k } else { 16 * k.div_ceil(16).div_ceil(64) };
         let gamma = (terms + 8) as f64 * 2f64.powi(-24);
         let xt = Tensor::from_slice(&dev, &x, &[m, k]).unwrap();
         for bias in [None, Some(&b)] {
