@@ -27,6 +27,7 @@ applies to v1's modules.
 | `g2-sort-init`, `g2-sort-step`, `g2-sort-take` | bitonic sort of every row (padded to a power of two), float32 or int64 keys, ties by position | sort, argsort, topk |
 | `g2-scatter` | `dst[c with c[dim] := index[c]] = src[c]`, any dtype | scatter, scatter_, the input gradient of scatter |
 | `g2-scan` | inclusive scan along one axis, one thread per line, forward or reversed | cumsum (and its gradient), logcumsumexp (and its gradient) |
+| `g2-bmm` | batched `op(A) @ op(B)`, optional transposes, broadcast batch dims; 16x16 tiles through shared memory | matmul / bmm with batch dims, and both gradients (no transpose copies) |
 
 All are prefixed `g2-` so they cannot shadow a v1 kernel. Every tensor is
 passed as its whole storage buffer plus an element offset, so views never
@@ -57,3 +58,8 @@ logcumsumexp carries the running max `m` and a compensated
 `S = sum exp(x_j - m)`, giving `m + log S`: its absolute error stays within
 about eps * (|m| + log n + 1) at any length. Chaining `logaddexp` step by step
 was measured at 170 ULP after 8192 steps and was replaced.
+
+`g2-bmm` accumulates each output's K products in order with fma: within
+0.41 * sqrt(K) * eps * (|A| @ |B|) of float64 (measured), the bound the linear
+tests use. It runs 64 products of 512^3 in 15 ms (1.1 TFLOP/s) on the
+RX 6750 XT. 2-D @ 2-D still goes through v1's linear kernel.

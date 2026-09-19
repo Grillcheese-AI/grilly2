@@ -35,10 +35,15 @@ pub const SORT_TAKE: Kernel = Kernel { shader: "g2-sort-take", bindings: 2, push
 pub const SCATTER: Kernel = Kernel { shader: "g2-scatter", bindings: 3, push_words: 8 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 pub const SCAN: Kernel = Kernel { shader: "g2-scan", bindings: 2, push_words: 8, local_size: [256, 1, 1] };
 
+pub const BMM: Kernel = Kernel { shader: "g2-bmm", bindings: 3, push_words: 9 + 3 * MAX_BATCH_DIMS as u32, local_size: [16, 16, 1] };
+
 pub const ALL: &[Kernel] = &[
     UNARY, BINARY, REDUCE, COPY, CAST, BINARY_INT, WHERE, REDUCE_INT, INDEX, INDEX_ADD, INDEX_ADD_ATOMIC,
-    ARG_REDUCE, SORT_INIT, SORT_STEP, SORT_TAKE, SCATTER, SCAN,
+    ARG_REDUCE, SORT_INIT, SORT_STEP, SORT_TAKE, SCATTER, SCAN, BMM,
 ];
+
+/// Batch dimensions g2-bmm can broadcast over.
+pub const MAX_BATCH_DIMS: usize = 4;
 
 static DETERMINISTIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -708,5 +713,84 @@ pub fn scan(x: &Tensor, dim: usize, op: Scan, reverse: bool) -> Result<Tensor> {
         0,
     ];
     SCAN.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], outer * inner, &push)?;
+    Ok(out)
+}
+
+/// Batched matrix product of float32 tensors: `op(a) @ op(b)` over the
+/// last two dims, where `op` transposes when asked (`a` is then stored
+/// (..., K, M), `b` (..., N, K)). Batch dims broadcast as in torch, up to
+/// [`MAX_BATCH_DIMS`]; the result is (broadcast batch..., M, N).
+pub fn bmm(a: &Tensor, b: &Tensor, trans_a: bool, trans_b: bool) -> Result<Tensor> {
+    require_float("matmul", a.dtype())?;
+    require_float("matmul", b.dtype())?;
+    if a.dim() < 2 || b.dim() < 2 {
+        return Err(Error::Shape("bmm: both operands need at least 2 dims".into()));
+    }
+    let (ra, ca) = (a.shape()[a.dim() - 2], a.shape()[a.dim() - 1]);
+    let (rb, cb) = (b.shape()[b.dim() - 2], b.shape()[b.dim() - 1]);
+    let (m, ka) = if trans_a { (ca, ra) } else { (ra, ca) };
+    let (kb, n) = if trans_b { (cb, rb) } else { (rb, cb) };
+    if ka != kb {
+        return Err(Error::Shape(format!(
+            "Expected size for first two dimensions of batch2 tensor to be: [{ka}] but got: [{kb}] \
+             (matmul of {:?} and {:?})",
+            a.shape(),
+            b.shape()
+        )));
+    }
+    let (a_batch, b_batch) = (&a.shape()[..a.dim() - 2], &b.shape()[..b.dim() - 2]);
+    let batch_shape = broadcast_shape(a_batch, b_batch)?;
+    if batch_shape.len() > MAX_BATCH_DIMS {
+        return Err(Error::NotImplemented(format!("matmul with more than {MAX_BATCH_DIMS} batch dimensions")));
+    }
+    let batch: usize = batch_shape.iter().product();
+    let mut out_shape = batch_shape.clone();
+    out_shape.extend([m, n]);
+    let out = Tensor::empty(a.device(), &out_shape)?;
+    if batch == 0 || m == 0 || n == 0 {
+        return Ok(out);
+    }
+    if ka == 0 {
+        return Tensor::zeros(a.device(), &out_shape);
+    }
+    if batch > 65_535 {
+        return Err(Error::NotImplemented(format!("matmul over {batch} batch elements (the limit is 65535)")));
+    }
+    // element strides of each operand's batch dims, 0 where it broadcasts
+    let strides = |own: &[usize], matrix: usize| -> Vec<usize> {
+        let lead = batch_shape.len() - own.len();
+        let mut st = vec![0; batch_shape.len()];
+        let mut step = matrix;
+        for d in (0..batch_shape.len()).rev() {
+            if d >= lead {
+                let size = own[d - lead];
+                st[d] = if size == 1 { 0 } else { step };
+                step *= size;
+            }
+        }
+        st
+    };
+    let (sa, sb) = (strides(a_batch, ra * ca), strides(b_batch, rb * cb));
+    let pad = |v: &[usize], fill: usize| -> Result<Vec<u32>> {
+        let mut out = v.iter().map(|&x| u32_of(x, "matmul")).collect::<Result<Vec<_>>>()?;
+        out.resize(MAX_BATCH_DIMS, fill as u32);
+        Ok(out)
+    };
+    let mut push = vec![
+        u32_of(m, "M")?,
+        u32_of(n, "N")?,
+        u32_of(ka, "K")?,
+        trans_a as u32,
+        trans_b as u32,
+        u32_of(a.offset(), "offset")?,
+        u32_of(b.offset(), "offset")?,
+        0,
+        batch_shape.len() as u32,
+    ];
+    push.extend(pad(&batch_shape, 1)?);
+    push.extend(pad(&sa, 0)?);
+    push.extend(pad(&sb, 0)?);
+    let threads = [u32_of(n.next_multiple_of(16), "N")?, u32_of(m.next_multiple_of(16), "M")?, batch as u32];
+    BMM.launch(a.device(), &[Arg::Storage(a), Arg::Storage(b), Arg::Storage(&out)], threads, &push)?;
     Ok(out)
 }

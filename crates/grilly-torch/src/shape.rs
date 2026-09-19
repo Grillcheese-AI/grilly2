@@ -217,34 +217,35 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     use crate::math::{binary, sum};
     use grilly_core::generic::Binary;
     match (a.dim(), b.dim()) {
+        (0, _) | (_, 0) => Err(Error::Invalid("both arguments to matmul need to be at least 1D".into())),
         (1, 1) => sum(&binary(a, b, Binary::Mul)?, &[], false),
-        (1, 2) => {
+        (1, _) => {
+            // a row vector: (1, K) @ b, then drop that dim
             let r = matmul(&a.reshape(&[1, a.shape()[0]])?, b)?;
-            r.reshape(&[b.shape()[1]])
+            let mut shape = r.shape().to_vec();
+            shape.remove(shape.len() - 2);
+            r.reshape(&shape)
         }
         (_, 1) => {
             let r = matmul(a, &b.reshape(&[b.shape()[0], 1])?)?;
             r.reshape(&a.shape()[..a.dim() - 1])
         }
         (_, 2) => crate::linear(a, &transpose(b, 0, 1)?, None),
-        (ad, bd) if ad == bd && a.shape()[..ad - 2] == b.shape()[..bd - 2] => {
-            let batch: usize = a.shape()[..ad - 2].iter().product();
-            let (m, kk) = (a.shape()[ad - 2], a.shape()[ad - 1]);
-            let n = b.shape()[bd - 1];
-            let a3 = a.reshape(&[batch, m, kk])?;
-            let b3 = b.reshape(&[batch, b.shape()[bd - 2], n])?;
-            let parts = (0..batch).map(|i| matmul(&select(&a3, 0, i)?, &select(&b3, 0, i)?)).collect::<Result<Vec<_>>>()?;
-            let refs: Vec<&Tensor> = parts.iter().collect();
-            let mut shape = a.shape()[..ad - 2].to_vec();
-            shape.extend([m, n]);
-            stack(&refs, 0)?.reshape(&shape)
-        }
-        _ => Err(Error::NotImplemented(format!(
-            "matmul with broadcast batch dimensions ({:?} @ {:?})",
-            a.shape(),
-            b.shape()
-        ))),
+        _ => bmm(a, b),
     }
+}
+
+/// Batched (and batch-broadcast) matmul as one kernel and one autograd
+/// node: dA = g @ B^T and dB = A^T @ g, summed over broadcast batch dims.
+fn bmm(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    let mut out = k::bmm(a, b, false, false)?;
+    let (sa, sb) = (a.shape().to_vec(), b.shape().to_vec());
+    record("BmmBackward0", &[a, b], &mut out, &[a, b], false, move |g, s, needs| {
+        let grad_a = if needs[0] { Some(k::sum_to_shape(&k::bmm(g, &s[1], false, true)?, &sa)?) } else { None };
+        let grad_b = if needs[1] { Some(k::sum_to_shape(&k::bmm(&s[0], g, true, false)?, &sb)?) } else { None };
+        Ok(vec![grad_a, grad_b])
+    })?;
+    Ok(out)
 }
 
 // ── indexing with index tensors ─────────────────────────────────────────
