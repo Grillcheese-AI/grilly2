@@ -224,6 +224,34 @@ class Int4Tensor(QuantizedTensor):
         return t
 
     @classmethod
+    def from_parts(cls, levels, scales, zeros, group_size: int = 128) -> "Int4Tensor":
+        """An int4 weight from levels and parameters computed elsewhere:
+        ``levels`` is ``(out_features, in_features)`` of 0..15, ``scales``
+        and ``zeros`` are ``(out_features, groups)``. This is how a
+        quantizer that chooses its own levels — GPTQ — installs them."""
+        import numpy as np
+
+        from .. import from_numpy
+
+        levels = np.ascontiguousarray(levels, dtype=np.uint8)
+        out_features, in_features = levels.shape
+        words = -(-in_features // 32) * 4
+        padded = np.zeros((out_features, words * 8), dtype=np.uint32)
+        padded[:, :in_features] = levels
+        nibbles = padded.reshape(out_features, words, 8)
+        packed = np.zeros((out_features, words), dtype=np.uint32)
+        for j in range(8):
+            packed |= nibbles[:, :, j] << (4 * j)
+        t = object.__new__(cls)
+        t._q = _C.Int4Weight.from_parts(
+            from_numpy(packed.view(np.int32))._t,
+            from_numpy(np.ascontiguousarray(scales, dtype=np.float32))._t,
+            from_numpy(np.ascontiguousarray(zeros, dtype=np.float32))._t,
+            in_features, int(group_size))
+        t._grad = None
+        return t
+
+    @classmethod
     def _cat(cls, parts) -> "Int4Tensor":
         """One weight holding the parts' rows: a fused q/k/v or gate/up
         projection. Each row keeps its groups' scales, so it is exact."""

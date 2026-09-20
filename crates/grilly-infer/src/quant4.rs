@@ -133,6 +133,56 @@ impl Int4Weight {
         &self.zero
     }
 
+    /// An int4 weight from levels and parameters computed elsewhere — by
+    /// GPTQ, say, which chooses them to cancel a layer's output error
+    /// rather than each weight's own (`grilly.infer.gptq`).
+    ///
+    /// `q` holds the packed levels as this type stores them: `(out, words)`
+    /// 32-bit words, eight 4-bit levels each, low nibble first, rows padded
+    /// to whole 16-byte vectors. `scale` and `zero` are `(out, groups)`.
+    /// The three are copied into persistent memory, as `quantize` allocates.
+    pub fn from_parts(q: &Tensor, scale: &Tensor, zero: &Tensor, in_features: usize, group_size: usize) -> Result<Int4Weight> {
+        if !group_size.is_multiple_of(32) || group_size == 0 {
+            return Err(Error::Invalid(format!("int4 group_size must be a positive multiple of 32, got {group_size}")));
+        }
+        let &[out_features, words] = q.shape() else {
+            return Err(Error::Shape(format!("expected packed levels (out_features, words), got {:?}", q.shape())));
+        };
+        let groups = in_features.div_ceil(group_size);
+        if words != in_features.div_ceil(32) * 4 {
+            return Err(Error::Shape(format!(
+                "packed levels must be {} words per row for in_features {in_features}, got {words}",
+                in_features.div_ceil(32) * 4
+            )));
+        }
+        if scale.shape() != [out_features, groups] || zero.shape() != [out_features, groups] {
+            return Err(Error::Shape(format!(
+                "scale and zero must be ({out_features}, {groups}), got {:?} and {:?}",
+                scale.shape(),
+                zero.shape()
+            )));
+        }
+        if q.dtype() != DType::I32 {
+            return Err(Error::Invalid(format!("packed levels must be int32 words, got {:?}", q.dtype())));
+        }
+        require_float("int4 weight", scale.dtype())?;
+        require_float("int4 weight", zero.dtype())?;
+        let dev = q.device();
+        let held = |src: &Tensor, shape: &[usize], dtype| -> Result<Tensor> {
+            let out = Tensor::empty_in(dev, shape, dtype, MemClass::Persistent)?;
+            copy_strided(src, src.offset(), &[shape[1], 1], &out, 0, &[shape[1], 1], shape)?;
+            Ok(out)
+        };
+        Ok(Int4Weight {
+            q: held(q, &[out_features, words], DType::I32)?,
+            scale: held(scale, &[out_features, groups], DType::F32)?,
+            zero: held(zero, &[out_features, groups], DType::F32)?,
+            out_features,
+            in_features,
+            group_size,
+        })
+    }
+
     /// One weight holding `parts`' rows in order: a fused q/k/v or gate/up
     /// projection. Each row keeps its own groups' scales and zero points, so
     /// the rows compute exactly what they did apart.

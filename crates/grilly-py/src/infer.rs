@@ -171,6 +171,21 @@ impl PyInt4Weight {
         Ok(PyBytes::new(py, &q))
     }
 
+    /// An int4 weight from levels and parameters computed elsewhere (GPTQ).
+    #[staticmethod]
+    fn from_parts(
+        py: Python<'_>,
+        q: &PyTensor,
+        scale: &PyTensor,
+        zero: &PyTensor,
+        in_features: usize,
+        group_size: usize,
+    ) -> PyResult<PyInt4Weight> {
+        py.detach(|| Int4Weight::from_parts(&q.inner, &scale.inner, &zero.inner, in_features, group_size))
+            .map(|inner| PyInt4Weight { inner })
+            .map_err(err)
+    }
+
     /// One weight holding several weights' rows: a fused q/k/v or gate/up
     /// projection, computing each row exactly as the separate ones did.
     #[staticmethod]

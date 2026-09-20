@@ -323,6 +323,58 @@ weight on its own:
 A smaller group also helps a little and costs bytes: group 32 measured 7.8%
 against 10.0%, for 25% more parameter bytes.
 
+#### GPTQ, which is the way past the bound
+
+`grilly.infer.gptq` quantizes a weight's columns one at a time and, after
+each, **adjusts the columns it has not reached yet** so that the error just
+made is cancelled in the layer's output, measured in that layer's own
+inputs:
+
+    H = 2 X^T X                       the Hessian of ||X (W - W')^T||^2
+    e = (w_j - dequantize(q_j)) / [H^-1]_jj
+    W[:, j+1:] -= e (x) [H^-1]_{j, j+1:}
+
+The weights end up **further** from their originals than round-to-nearest
+put them — the test asserts that, because it is the mechanism — and the
+layer's output ends up closer. `X` comes from running the model on
+calibration text, so `grilly.infer.calibration` walks the model one decoder
+layer at a time: capture what reaches each of its seven linears, quantize
+them against those Hessians, then run the layer **again with the quantized
+weights** so the next layer is calibrated against what it will really
+receive.
+
+Measured on Qwen2.5-0.5B-Instruct, 32 sequences of 512 tokens of wikitext-2
+for calibration, perplexity on held-out wikitext (`python tools/gptq.py`):
+
+| scheme | perplexity | gap to float32 |
+|---|---:|---:|
+| float32 | 22.380 | — |
+| int8 per row | 22.438 | +0.06 |
+| int4 round-to-nearest | 30.789 | +8.41 |
+| int4 GPTQ | 27.245 | +4.87 |
+| **int4 GPTQ, activation order** | **26.662** | **+4.28** |
+
+So GPTQ removes about half of what four bits cost, where the whole scalar
+family above it was worth 1.18x. Calibration takes 263 s for 24 layers on
+this card, most of it the column loop in numpy.
+
+**Activation ordering, in the form our kernel can read.** Quantizing the
+columns the calibration data excited most *first* leaves their error to be
+absorbed by everything after them, and it is worth another 0.58 perplexity
+here. AutoGPTQ's `desc_act` groups the *permuted* columns, which makes a
+group a scattered set and forces a group index per column into both the
+file and the kernel. This uses its `static_groups` form instead: the scales
+and zero points are fixed in the original column order, only the *visiting*
+order changes, and a group stays the contiguous run of 128 that
+`g2-linear-q4` already reads. No kernel change, no format change.
+
+**What is left.** `lm_head` is still round-to-nearest: GPTQ walks columns
+one at a time and that weight has 152K rows, which is minutes for the layer
+least sensitive to rounding — AutoGPTQ and torchao leave it out too. And a
+0.5B model is the hardest case for four bits; the same recipe is expected
+to land much closer on a 1.7B, which needs Qwen3 support (`q_norm` and
+`k_norm`) that grilly does not have yet.
+
 Two footnotes for anyone re-running `tools/int4_accuracy.py`, both of which
 produced confidently wrong tables first:
 
