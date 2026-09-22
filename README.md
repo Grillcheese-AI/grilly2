@@ -64,9 +64,14 @@ ids = tokenizer.apply_chat_template([{"role": "user", "content": "Why is the sky
 print(tokenizer.decode(model.generate(ids, max_new_tokens=128)[0]))
 ```
 
-`python tools/generate.py` is that run: Qwen2.5-0.5B-Instruct from the local
-Hugging Face cache, int8, sampled, **166 tokens/s** on an RX 6750 XT, 1.24 GiB
-of VRAM while generating, and greedy output identical to transformers.
+`python tools/generate.py --max-new-tokens 64` is that run: Qwen2.5-0.5B-Instruct
+from the local Hugging Face cache, int8, sampled, **142–168 tokens/s** on an
+RX 6750 XT with the GPU otherwise idle, 1.24 GiB of VRAM while generating, and
+greedy output identical to transformers.
+
+The spread is run-to-run, not noise in the measurement: a 64-token decode is
+about 0.4 s, short enough that the card's clock state decides the number. Quote
+the range, not a best run.
 
 The machinery underneath takes no Hugging Face files, and works with
 `grilly.huggingface` uninstalled (see `docs/inference.md`):

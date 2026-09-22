@@ -802,6 +802,12 @@ a chat prompt sampled with the model's own `generation_config.json`
 | peak while loading and quantizing | 2.07 GiB |
 | weights + KV cache in persistent memory | 1.19 GiB |
 
+Every decode figure in this document is one run. Repeated on an idle card,
+`--max-new-tokens 64` gives **142–168 tokens/s**: 64 tokens is about 0.4 s,
+short enough that the card's clock state decides the number. Treat a single
+number here as the middle of that spread, and compare changes by re-running
+both sides rather than against a number written down earlier.
+
 **Where a token's 5.9 ms goes:** 273 dispatches, 3.7 ms of GPU wait, and the
 rest host-side recording. The loop is still host-bound, so the lever is
 still dispatches per token.
