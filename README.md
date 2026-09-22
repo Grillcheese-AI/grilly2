@@ -73,6 +73,18 @@ The spread is run-to-run, not noise in the measurement: a 64-token decode is
 about 0.4 s, short enough that the card's clock state decides the number. Quote
 the range, not a best run.
 
+A decode step spends much of its token in the host, deciding what to
+launch. `grilly.graphed` records a step's GPU commands once and replays
+them, which removes that cost without changing the commands or the
+arithmetic — measured at 1.6-2.2x on a recurrent decode step, bit-exact
+against running it eagerly (`docs/capture.md`):
+
+```python
+step = grilly.graphed(model.step)      # records on the second call with a shape
+for t in range(tokens):
+    y, state = step(x_t, state)        # every later one replays
+```
+
 The machinery underneath takes no Hugging Face files, and works with
 `grilly.huggingface` uninstalled (see `docs/inference.md`):
 

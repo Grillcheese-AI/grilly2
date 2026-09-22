@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use grilly_sys as sys;
 
 use crate::error::{Error, Result};
+use crate::graph::{Command, Recorder};
 
 /// Flush the open batch after this many launches, to bound the command
 /// buffer and descriptor usage of a long run with no host reads.
@@ -66,6 +67,9 @@ struct State {
 pub(crate) struct Inner {
     ctx: *mut sys::gc_ctx,
     state: Mutex<State>,
+    /// Set while `graph::capture` runs: every command is recorded here as
+    /// well as issued, so it can be replayed without Python.
+    capture: Mutex<Option<Recorder>>,
     caps: Caps,
     /// Generated kernels (crate::fusion), by GLSL source: compiled once.
     generated: Mutex<std::collections::HashMap<String, &'static str>>,
@@ -128,6 +132,7 @@ impl Device {
                 max_workgroup_count: raw.max_compute_workgroup_count,
             },
             generated: Mutex::new(std::collections::HashMap::new()),
+            capture: Mutex::new(None),
         };
         let device = Device { inner: Arc::new(inner) };
         check(caps_rc)?;
@@ -277,6 +282,60 @@ impl Device {
         Ok(())
     }
 
+    pub fn begin_capture(&self) -> Result<()> {
+        let mut capture = self.inner.capture.lock().unwrap_or_else(|e| e.into_inner());
+        if capture.is_some() {
+            return Err(Error::Invalid("a capture is already running on this device".into()));
+        }
+        *capture = Some(Recorder::default());
+        Ok(())
+    }
+
+    pub fn end_capture(&self) -> Result<Recorder> {
+        let mut capture = self.inner.capture.lock().unwrap_or_else(|e| e.into_inner());
+        capture.take().ok_or_else(|| Error::Invalid("no capture is running on this device".into()))
+    }
+
+    pub fn capturing(&self) -> bool {
+        self.inner.capture.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    /// Add a command to the open capture, if there is one.
+    fn note(&self, command: impl FnOnce() -> Command, retain: &[Arc<Buffer>]) {
+        let mut capture = self.inner.capture.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(recorder) = capture.as_mut() {
+            recorder.commands.push(command());
+            recorder.retained.extend(retain.iter().cloned());
+        }
+    }
+
+    /// Add a dispatch to the open capture.
+    pub(crate) fn note_dispatch(
+        &self,
+        shader: &CStr,
+        bindings: &[sys::gc_binding],
+        groups: [u32; 3],
+        push: &[u32],
+        retain: &[Arc<Buffer>],
+    ) {
+        let command = || Command::Dispatch {
+            shader: shader.to_owned(),
+            bindings: bindings.to_vec(),
+            groups,
+            push: push.to_vec(),
+        };
+        self.note(command, retain);
+    }
+
+    /// Re-issue a recorded copy, by handle: the buffers are the graph's.
+    pub(crate) fn record_copy_raw(&self, src: sys::gc_buf, src_offset: u64, dst: sys::gc_buf, dst_offset: u64, bytes: u64) -> Result<()> {
+        self.record_command(move |ctx| unsafe { sys::gc_copy(ctx, src, src_offset, dst, dst_offset, bytes) })
+    }
+
+    pub(crate) fn record_fill_raw(&self, dst: sys::gc_buf, offset: u64, bytes: u64, word: u32) -> Result<()> {
+        self.record_command(move |ctx| unsafe { sys::gc_fill(ctx, dst, offset, bytes, word) })
+    }
+
     /// Record one kernel launch. The only route from Rust to a dispatch.
     pub(crate) fn record(
         &self,
@@ -305,6 +364,8 @@ impl Device {
         if bytes == 0 {
             return Ok(());
         }
+        let (s, d) = (src.handle, dst.handle);
+        self.note(|| Command::Copy { src: s, src_offset, dst: d, dst_offset, bytes }, &[]);
         self.record_command(|ctx| unsafe {
             sys::gc_copy(ctx, src.handle, src_offset, dst.handle, dst_offset, bytes)
         })
@@ -315,6 +376,8 @@ impl Device {
         if bytes == 0 {
             return Ok(());
         }
+        let d = dst.handle;
+        self.note(|| Command::Fill { dst: d, offset, bytes, word }, &[]);
         self.record_command(|ctx| unsafe { sys::gc_fill(ctx, dst.handle, offset, bytes, word) })
     }
 }
@@ -371,6 +434,12 @@ impl Buffer {
     /// step that builds one small tensor per layer — a position, a counter —
     /// used to pay one of those per layer (docs/submission.md).
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+        if self.device.capturing() {
+            return Err(Error::Invalid(
+                "a capture wrote host data into a tensor. A replay re-issues the recorded commands, so                  it would write those same bytes every time: put the value in a tensor and update it                  between replays instead, which is what a captured step's inputs are for."
+                    .into(),
+            ));
+        }
         if data.len() as u64 <= STAGED_UPLOAD_MAX {
             let handle = self.handle;
             let src = data.as_ptr() as *const c_void;
@@ -394,6 +463,14 @@ impl Buffer {
 
     /// Copy bytes starting at `offset` into `out`. Waits for recorded work.
     pub fn read(&self, offset: u64, out: &mut [u8]) -> Result<()> {
+        if self.device.capturing() {
+            return Err(Error::Invalid(
+                "a capture read data back to the host. A replay re-issues commands without running the \
+                 code again, so anything the host decides from a value cannot be reproduced: keep the \
+                 value on the device, or leave that step out of the capture."
+                    .into(),
+            ));
+        }
         let mut state = self.device.lock();
         self.device.flush(&mut state)?;
         check(unsafe {

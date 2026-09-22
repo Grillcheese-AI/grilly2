@@ -16,7 +16,7 @@ from . import _C
 
 __all__ = [
     "Generator", "Size", "Tensor", "add", "arange", "compile", "default_generator", "device",
-    "dtype", "empty", "enable_grad", "float32", "from_numpy", "full", "initial_seed",
+    "dtype", "empty", "enable_grad", "float32", "from_numpy", "full", "graphed", "initial_seed",
     "is_grad_enabled", "is_tensor", "manual_seed", "no_grad", "ones", "rand",
     "rand_like", "randint", "randn", "randn_like", "relu", "seed",
     "set_grad_enabled", "tensor", "zeros",
@@ -930,3 +930,7 @@ from ._einsum import einsum  # noqa: E402
 
 from . import compiler  # noqa: E402  (needs nn defined)
 from ._compile import OptimizedModule, compile  # noqa: E402,A001,F401
+
+# ── capture and replay ───────────────────────────────────────────────────
+
+from ._graph import graphed  # noqa: E402,F401

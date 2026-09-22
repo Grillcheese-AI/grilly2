@@ -420,6 +420,49 @@ fn submit_stats(py: Python<'_>) -> PyResult<Bound<'_, pyo3::types::PyDict>> {
     Ok(d)
 }
 
+/// A captured sequence of GPU commands, replayable without running the
+/// Python that produced it (grilly_core::graph).
+#[pyclass(name = "CommandGraph", module = "grilly._C", frozen)]
+struct PyCommandGraph {
+    inner: grilly_core::graph::CommandGraph,
+}
+
+#[pymethods]
+impl PyCommandGraph {
+    /// Commands recorded.
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Re-issue them, in order.
+    fn replay(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.inner.replay()).map_err(err)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("CommandGraph({} commands)", self.inner.len())
+    }
+}
+
+/// Start recording the device's commands. Every command is still issued;
+/// `end_capture` returns what was recorded.
+#[pyfunction]
+fn begin_capture(py: Python<'_>) -> PyResult<()> {
+    py.detach(|| grilly_core::Device::default_device().and_then(|d| d.begin_capture())).map_err(err)
+}
+
+/// Stop recording and return the graph.
+#[pyfunction]
+fn end_capture(py: Python<'_>) -> PyResult<PyCommandGraph> {
+    py.detach(|| {
+        let device = grilly_core::Device::default_device()?;
+        let recorder = device.end_capture()?;
+        Ok(grilly_core::graph::CommandGraph::new(device, recorder))
+    })
+    .map(|inner| PyCommandGraph { inner })
+    .map_err(err)
+}
+
 /// Run everything recorded on the default device and wait (no kernel of its
 /// own), as torch.cuda.synchronize.
 #[pyfunction]
@@ -501,6 +544,9 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flex_attention, m)?)?;
     m.add_function(wrap_pyfunction!(flash_tiles, m)?)?;
     m.add_function(wrap_pyfunction!(submit_stats, m)?)?;
+    m.add_class::<PyCommandGraph>()?;
+    m.add_function(wrap_pyfunction!(begin_capture, m)?)?;
+    m.add_function(wrap_pyfunction!(end_capture, m)?)?;
     m.add_function(wrap_pyfunction!(reset_persistent_peak, m)?)?;
     m.add_function(wrap_pyfunction!(synchronize, m)?)?;
     m.add_function(wrap_pyfunction!(scatter, m)?)?;

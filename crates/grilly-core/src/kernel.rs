@@ -82,7 +82,25 @@ impl Kernel {
             )));
         }
         let mut bindings = Vec::with_capacity(args.len());
+        // A capture must outlive the tensors it was recorded from, so it
+        // keeps a reference to every buffer it names. Only a tensor argument
+        // carries one; a bare Buffer cannot be retained, so capturing a
+        // launch that takes one is refused rather than left dangling.
+        let capturing = device.capturing();
+        let mut retain: Vec<std::sync::Arc<crate::device::Buffer>> = Vec::new();
         for arg in args {
+            if capturing {
+                match arg {
+                    Arg::Tensor(t) | Arg::Storage(t) => retain.push(t.storage_arc()),
+                    Arg::Buffer(_) => {
+                        return Err(Error::Invalid(format!(
+                            "kernel {}: capturing a launch that binds a raw buffer is not supported \
+                             (the graph could not keep it alive)",
+                            self.shader
+                        )))
+                    }
+                }
+            }
             let (buffer, offset, range) = match arg {
                 Arg::Tensor(t) => (t.storage(), t.byte_offset(), t.byte_len()),
                 Arg::Storage(t) => (t.storage(), 0, t.storage().len_bytes()),
@@ -99,6 +117,10 @@ impl Kernel {
         }
         let name = CString::new(self.shader)
             .map_err(|_| Error::Invalid(format!("bad kernel name {:?}", self.shader)))?;
-        device.record(&name, &bindings, self.groups_for(threads), push)
+        let groups = self.groups_for(threads);
+        if capturing {
+            device.note_dispatch(&name, &bindings, groups, push, &retain);
+        }
+        device.record(&name, &bindings, groups, push)
     }
 }

@@ -425,6 +425,12 @@ impl Tensor {
         &self.storage
     }
 
+    /// The storage, shared: a capture holds one of these so the buffers its
+    /// commands name outlive the tensors they came from (crate::graph).
+    pub(crate) fn storage_arc(&self) -> std::sync::Arc<Buffer> {
+        self.storage.clone()
+    }
+
     pub(crate) fn byte_offset(&self) -> u64 {
         (self.offset * self.dtype.size()) as u64
     }

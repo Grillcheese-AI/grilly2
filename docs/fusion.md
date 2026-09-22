@@ -134,7 +134,9 @@ chain is long, and the per-op Python cost is paid either way while the
 saved launches are few.
 
 The lever for that shape is not fusing harder — it is not running the
-Python again at all, which is capture-and-replay of a whole step.
+Python again at all, which is capture-and-replay of a whole step:
+`grilly.graphed`, measured at 1.6-2.2x on the same decode step
+(`docs/capture.md`).
 
 **In-place writes.** A lazy node records the version counter of each real
 tensor it reads. If one of them is written in place before the node runs

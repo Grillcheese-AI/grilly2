@@ -13,6 +13,7 @@ mod dtype;
 mod error;
 pub mod fusion;
 pub mod generic;
+pub mod graph;
 mod kernel;
 pub mod ops;
 pub mod rng;
