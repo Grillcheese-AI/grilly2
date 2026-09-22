@@ -1,6 +1,8 @@
 //! A small host write records a copy into the open batch instead of closing
-//! it. In its own binary: it reads the device-wide submit counters, which
-//! another test running in parallel would move.
+//! it. Every test here reads the device-wide submit counters, so they take a
+//! lock and run one at a time: cargo runs a binary's tests in parallel
+//! threads by default, and two of these overlapping read each other's
+//! submits (it failed exactly that way first).
 //!
 //! What matters, and what is asserted:
 //! - **the values are right**, including a write that lands *between* two
@@ -20,8 +22,15 @@ use grilly_core::{Arg, DType, Device, Kernel, MemClass, Tensor};
 /// `y = max(x, 0)`, a v1 kernel: enough to observe what a dispatch read.
 const PROBE: Kernel = Kernel { shader: "activation-relu", bindings: 2, push_words: 1, local_size: [256, 1, 1] };
 
+/// Serializes these tests: the counters they read belong to the device.
+static COUNTERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn dev() -> Device {
     Device::default_device().expect("open GPU")
+}
+
+fn alone() -> std::sync::MutexGuard<'static, ()> {
+    COUNTERS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Write `value` into every element from the host, in place. `uniform_(v, v)`
@@ -32,12 +41,18 @@ fn fill_from_host(t: &Tensor, value: f32) {
     t.uniform_(value, value, &mut generator).unwrap();
 }
 
+fn bytemuck_cast(values: &[f32]) -> &[u8] {
+    // SAFETY: f32 has no padding and any bit pattern is a valid u8.
+    unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, std::mem::size_of_val(values)) }
+}
+
 fn relu_into(dev: &Device, x: &Tensor, y: &Tensor, n: usize) {
     PROBE.launch(dev, &[Arg::Tensor(x), Arg::Tensor(y)], [n as u32, 1, 1], &[n as u32]).unwrap();
 }
 
 #[test]
 fn a_small_write_is_recorded_in_order_and_costs_no_submit() {
+    let _alone = alone();
     let dev = dev();
     let n = 1024;
     let x = Tensor::from_slice(&dev, &vec![1.0f32; n], &[n]).unwrap();
@@ -62,6 +77,7 @@ fn a_small_write_is_recorded_in_order_and_costs_no_submit() {
 
 #[test]
 fn many_small_writes_in_one_batch_all_land() {
+    let _alone = alone();
     let dev = dev();
     let n = 256;
     let x = Tensor::from_slice(&dev, &vec![0.0f32; n], &[n]).unwrap();
@@ -84,13 +100,16 @@ fn many_small_writes_in_one_batch_all_land() {
 
 #[test]
 fn a_large_write_still_flushes_rather_than_staging_it() {
+    let _alone = alone();
     let dev = dev();
-    // over grilly-core's STAGED_UPLOAD_MAX (1 MiB): a weight-sized upload
+    // over grilly-core's STAGED_UPLOAD_MAX (1 MiB): a weight-sized upload.
+    // Straight from a slice, not through uniform_, so the generator's own
+    // small uploads are not in the count.
     let n = 512 * 1024;
-    let x = Tensor::empty_in(&dev, &[n], DType::F32, MemClass::Persistent).unwrap();
+    let data = vec![3.5f32; n];
     dev.synchronize().unwrap();
     let start = dev.submit_stats().unwrap();
-    fill_from_host(&x, 3.5);
+    let x = Tensor::from_bytes_in(&dev, bytemuck_cast(&data), &[n], DType::F32, MemClass::Persistent).unwrap();
     let after = dev.submit_stats().unwrap();
     assert_eq!(after.staged_uploads, start.staged_uploads, "a weight-sized upload was staged");
     assert_eq!(x.to_vec().unwrap()[..4], [3.5f32; 4]);
@@ -98,6 +117,7 @@ fn a_large_write_still_flushes_rather_than_staging_it() {
 
 #[test]
 fn a_staged_write_survives_a_batch_boundary() {
+    let _alone = alone();
     let dev = dev();
     let n = 64;
     let x = Tensor::from_slice(&dev, &vec![0.0f32; n], &[n]).unwrap();

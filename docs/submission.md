@@ -66,6 +66,53 @@ dispatches per batch, microseconds per dispatch.
   the Rust tensor layer. A 400-dispatch decode step would spend ~2.3 ms
   per token on host recording, against ~0.36 ms of GPU fixed cost.
 
+## A small host write costs a command, not a submit
+
+`Buffer::write` used to call `device.flush()` first, so **every** host->device
+upload closed the open batch and waited on its fence — the same cost as a
+readback, for data going the other way. Nothing needs that: the host is
+writing, not reading, so there is nothing to wait for.
+
+A write of up to 1 MiB is now recorded into the open batch instead. The shim
+stages the bytes into a host-visible block and records a `vkCmdCopyBuffer`,
+which lands in program order behind the same full barrier every other
+recorded command gets. Larger writes still flush and go through the bounded
+staging path: staging a whole weight would hold it twice, and a load is not
+in anyone's inner loop.
+
+The staging blocks are per batch and reused, not freed — they are reset in
+`gc_submit` after the wait, beside the descriptor pools and the deferred
+buffer releases, for the same reason (v1's `49a1a89`: never reclaim
+something an in-flight command buffer may still read).
+
+**Why it matters.** A model that builds one small tensor per layer in its
+decode step — a position, a counter, a mask — paid a fence wait per layer.
+That is ordinary torch code, and on a recurrent model measured here
+(CubbyLLM's HybridBackbone, d512/L8, 624 steps) it was most of the cost:
+
+| | before | after |
+|---|---:|---:|
+| submits per token | 9.8 | **3.0** |
+| decode | 128.4 tokens/s | **174.4 tokens/s** |
+| d1024/L16, submits | 18.8 | **6.0** |
+| d1024/L16, decode | 48.3 tokens/s | **55.4 tokens/s** |
+
+The arithmetic is exact rather than approximate: that model's attention step
+did three host round trips per layer — one `int(pos_t)` readback and two
+`torch.tensor(...)` uploads. The uploads are now free, and what remains is
+one submit per attention layer, which is the readback. Removing that is the
+model's to do (keep the position on the host), and doing both gives 212.5
+tokens/s.
+
+**The risk this takes, and the test for it.** Not flushing means a write and
+the dispatches around it are ordered by the *recorded* barrier rather than
+by a host wait. `crates/grilly-core/tests/staged_upload.rs` puts a write
+between two dispatches and requires the earlier one to see the old data and
+the later one the new, plus 32 writes and 32 dispatches in a single batch
+all landing at their own dispatch. Those tests take a lock: the counters
+they read are the device's, and cargo runs a binary's tests in parallel
+threads, which is how the first version of them failed.
+
 ## What this says for §11
 
 The premise holds: batching tiny submits is the win, and the GPU side of it
