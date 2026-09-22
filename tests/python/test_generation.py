@@ -131,3 +131,68 @@ def test_what_generate_refuses():
     with pytest.raises(ValueError, match="int64"):
         model.generate(grilly.ones(2, 7))
     assert model.generate(ids, attention_mask=grilly.ones(2, 7, dtype=grilly.int64), max_new_tokens=2).shape[1] == 9
+
+
+def qwen3_pair(tie=True, seed=0, init=0.2):
+    """transformers' Qwen3 and grilly's model with the same random weights.
+    Qwen3 adds an RMSNorm on each head of q and k before the rotary
+    embedding, and carries no q/k/v bias."""
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    torch.manual_seed(seed)
+    hc = Qwen3Config(vocab_size=128, hidden_size=64, intermediate_size=96, num_hidden_layers=2,
+                     num_attention_heads=4, num_key_value_heads=2, head_dim=16, max_position_embeddings=256,
+                     rope_theta=1e6, rms_norm_eps=1e-6, tie_word_embeddings=tie, initializer_range=init,
+                     attn_implementation="eager")
+    ref = Qwen3ForCausalLM(hc).eval()
+    cfg = LlamaConfig(vocab_size=128, hidden_size=64, intermediate_size=96, num_hidden_layers=2,
+                      num_attention_heads=4, num_key_value_heads=2, head_dim=16, rope_theta=1e6,
+                      rms_norm_eps=1e-6, qkv_bias=False, qk_norm=True, tie_word_embeddings=tie)
+    model = LlamaForCausalLM(cfg)
+    state = {k: grilly.from_numpy(v.detach().numpy().copy()) for k, v in ref.state_dict().items()}
+    result = model.load_state_dict(state, assign=True)
+    assert (result.missing_keys, result.unexpected_keys) == ([], []), result
+    model.tie_weights()
+    return ref, model
+
+
+def test_qwen3_logits_match_transformers():
+    """The q/k head norms are the only difference from Qwen2, and they are
+    easy to place wrong: after the rotation instead of before, or over the
+    projection instead of over one head. Either mistake changes the logits,
+    so this compares against transformers' own Qwen3 at the same tolerance
+    as the Qwen2 case."""
+    ref, model = qwen3_pair()
+    ids = torch.tensor(PROMPTS)
+    with torch.no_grad():
+        want = ref(ids).logits.numpy()
+    with grilly.no_grad():
+        got = model(grilly.tensor(PROMPTS)).logits.numpy()
+    worst = float(np.abs(got - want).max() / np.abs(want).max())
+    print(f"qwen3 logits: worst {worst:.2e} of the 1e-5 bound")
+    assert worst <= 1e-5
+
+
+def test_qwen3_generates_what_transformers_generates():
+    ref, model = qwen3_pair(tie=False, seed=3)
+    ids = torch.tensor(PROMPTS)
+    with torch.no_grad():
+        want = ref.generate(ids, attention_mask=torch.ones_like(ids), max_new_tokens=12,
+                            do_sample=False, top_k=None, top_p=None, temperature=None).tolist()
+    got = model.generate(grilly.tensor(PROMPTS), max_new_tokens=12, do_sample=False).tolist()
+    assert got == want
+
+
+def test_qwen3_fused_and_composed_agree():
+    """The fused decode path normalizes each head with the rms_norm kernel
+    on the projection; the composed path uses F.rms_norm over the last
+    dimension after reshaping. They must agree."""
+    _, model = qwen3_pair(seed=5)
+    ids = grilly.tensor(PROMPTS)
+    composed = model(ids).logits.detach().numpy()
+    with grilly.no_grad():
+        fused = model(ids).logits.numpy()
+    worst = float(np.abs(fused - composed).max() / np.abs(composed).max())
+    print(f"qwen3 fused vs composed: {worst:.2e}")
+    assert worst <= 1e-5
+    assert (fused.argmax(-1) == composed.argmax(-1)).all()

@@ -370,10 +370,7 @@ order changes, and a group stays the contiguous run of 128 that
 
 **What is left.** `lm_head` is still round-to-nearest: GPTQ walks columns
 one at a time and that weight has 152K rows, which is minutes for the layer
-least sensitive to rounding — AutoGPTQ and torchao leave it out too. And a
-0.5B model is the hardest case for four bits; the same recipe is expected
-to land much closer on a 1.7B, which needs Qwen3 support (`q_norm` and
-`k_norm`) that grilly does not have yet.
+least sensitive to rounding — AutoGPTQ and torchao leave it out too.
 
 Two footnotes for anyone re-running `tools/int4_accuracy.py`, both of which
 produced confidently wrong tables first:

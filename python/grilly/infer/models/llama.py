@@ -9,7 +9,12 @@ The parameter names are Hugging Face's (``model.layers.0.self_attn.q_proj``
 Reading a checkpoint's ``config.json`` into a :class:`LlamaConfig` is the
 adapter's job.
 
-The computation follows transformers' Qwen2 and Llama code, op for op:
+Qwen3 is the same decoder with two more norms: `q_norm` and `k_norm`
+normalize **each head** of q and k before the rotary embedding, and it
+carries no q/k/v bias. `LlamaConfig(qk_norm=True)` turns them on.
+
+The computation follows transformers' Qwen2, Qwen3 and Llama code, op for
+op:
 - ``weight * (x * rsqrt(mean(x^2) + eps))``;
 - rotary tables from ``1 / theta^(2i/d)``, with ``rotate_half``;
 - ``down(silu(gate(x)) * up(x))``.
@@ -56,6 +61,7 @@ class LlamaConfig:
     rope_theta: float = 10000.0
     qkv_bias: bool = False  # Qwen2: True
     o_bias: bool = False
+    qk_norm: bool = False  # Qwen3: an RMSNorm per head on q and k
     tie_word_embeddings: bool = False
     hidden_act: str = "silu"
 
@@ -128,7 +134,18 @@ class LlamaAttention(nn.Module):
         self.k_proj = nn.Linear(c.hidden_size, c.num_key_value_heads * c.head_dim, bias=c.qkv_bias)
         self.v_proj = nn.Linear(c.hidden_size, c.num_key_value_heads * c.head_dim, bias=c.qkv_bias)
         self.o_proj = nn.Linear(c.num_attention_heads * c.head_dim, c.hidden_size, bias=c.o_bias)
+        if c.qk_norm:  # Qwen3: over one head, not over the whole projection
+            self.q_norm = nn.RMSNorm(c.head_dim, eps=c.rms_norm_eps)
+            self.k_norm = nn.RMSNorm(c.head_dim, eps=c.rms_norm_eps)
+        self.qk_norm = c.qk_norm
+        self.eps = c.rms_norm_eps
         self._qkv: dict = {}  # a plain dict: not a registered parameter
+
+    def _head_norm(self, projection: Tensor, norm) -> Tensor:
+        """`norm` applied to every head of a (batch, T, heads * head_dim)
+        projection. The kernel normalizes contiguous rows of `head_dim`,
+        and a head is exactly such a row."""
+        return Tensor._wrap(_C.rms_norm(projection._t, self.head_dim, norm.weight._t, self.eps))
 
     def forward(self, x: Tensor, cos: Tensor, sin: Tensor, cache: KVCache | None, pos0: int, fused: bool) -> Tensor:
         b, t, _ = x.shape
@@ -139,7 +156,11 @@ class LlamaAttention(nn.Module):
         if not fused:
             return self._composed(x, cos, sin, cache, pos0, filled)
 
-        weight, bias = _fused_weight(self._qkv, (self.q_proj, self.k_proj, self.v_proj))
+        # Qwen3 normalizes each head of q and k before the rotary embedding,
+        # and the norm wants those columns on their own, so the projections
+        # are not fused there
+        weight, bias = (None, None) if self.qk_norm else _fused_weight(
+            self._qkv, (self.q_proj, self.k_proj, self.v_proj))
         if weight is not None:
             qkv = F.linear(x, weight, bias)
             q_src, q_col = qkv, 0
@@ -148,6 +169,8 @@ class LlamaAttention(nn.Module):
         else:
             q_src, k_src, v_src = self.q_proj(x), self.k_proj(x), self.v_proj(x)
             q_col = k_col = v_col = 0
+            if self.qk_norm:
+                q_src, k_src = self._head_norm(q_src, self.q_norm), self._head_norm(k_src, self.k_norm)
         q = Tensor._wrap(_C.rope(q_src._t, q_col, heads, dim, cos._t, sin._t, pos0))
         if filled:  # a decode step: rotate the keys into the cache, copy the values
             cache.append_rotary(self.layer_idx, k_src, k_col, v_src, v_col, cos, sin, pos0)
@@ -165,8 +188,11 @@ class LlamaAttention(nn.Module):
         b, t, _ = x.shape
         heads, kv_heads, dim = self.heads, self.kv_heads, self.head_dim
         cos, sin = cos.narrow(0, pos0, t), sin.narrow(0, pos0, t)
-        q = self.q_proj(x).reshape(b, t, heads, dim).transpose(1, 2)
-        k = self.k_proj(x).reshape(b, t, kv_heads, dim).transpose(1, 2)
+        q = self.q_proj(x).reshape(b, t, heads, dim)
+        k = self.k_proj(x).reshape(b, t, kv_heads, dim)
+        if self.qk_norm:  # over the head dimension, before the rotation
+            q, k = self.q_norm(q), self.k_norm(k)
+        q, k = q.transpose(1, 2), k.transpose(1, 2)
         v = self.v_proj(x).reshape(b, t, kv_heads, dim).transpose(1, 2)
         q, k = _apply_rotary(q, cos, sin), _apply_rotary(k, cos, sin)
         if filled:

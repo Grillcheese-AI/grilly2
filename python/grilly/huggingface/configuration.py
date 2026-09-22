@@ -18,7 +18,7 @@ __all__ = ["AutoConfig", "config_from_dict", "model_class_for"]
 
 # model_type -> the grilly model that runs it. Both families are the same
 # decoder; Qwen2 differs only in having q/k/v biases.
-_FAMILIES = {"llama": LlamaForCausalLM, "qwen2": LlamaForCausalLM}
+_FAMILIES = {"llama": LlamaForCausalLM, "qwen2": LlamaForCausalLM, "qwen3": LlamaForCausalLM}
 
 # fields grilly's decoder does not implement, and what they would change
 _UNSUPPORTED = {
@@ -58,7 +58,7 @@ def config_from_dict(c: dict) -> LlamaConfig:
     if model_type not in _FAMILIES:
         raise _not_yet(f"model_type={model_type!r} (grilly has {', '.join(sorted(_FAMILIES))})")
     _refuse_unsupported(c)
-    qwen = model_type == "qwen2"
+    qwen2 = model_type == "qwen2"
     bias = c.get("attention_bias", False)
     return LlamaConfig(
         vocab_size=c["vocab_size"],
@@ -71,9 +71,10 @@ def config_from_dict(c: dict) -> LlamaConfig:
         rms_norm_eps=c.get("rms_norm_eps", 1e-6),
         rope_theta=_rope_theta(c),
         # Qwen2 biases q, k and v and never the output projection; Llama's
-        # attention_bias covers all four
-        qkv_bias=qwen or bias,
-        o_bias=bias and not qwen,
+        # attention_bias covers all four; Qwen3 biases nothing by default
+        qkv_bias=qwen2 or bias,
+        o_bias=bias and not qwen2,
+        qk_norm=model_type == "qwen3",  # an RMSNorm per head on q and k
         tie_word_embeddings=c.get("tie_word_embeddings", False),
         hidden_act=c.get("hidden_act", "silu"),
     )
@@ -83,7 +84,7 @@ def model_class_for(c: dict):
     """The grilly class that runs this config (``architectures`` decides when
     it names something grilly knows; otherwise ``model_type``)."""
     for name in c.get("architectures") or []:
-        if name in ("LlamaForCausalLM", "Qwen2ForCausalLM"):
+        if name in ("LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM"):
             return LlamaForCausalLM
         if name.endswith(("ForSequenceClassification", "ForTokenClassification", "ForQuestionAnswering")):
             raise _not_yet(f"architecture {name} (grilly.huggingface loads causal language models)")

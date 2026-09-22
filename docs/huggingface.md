@@ -40,12 +40,24 @@ someone routes a mechanism through the adapter, that test fails.
 ## Configs
 
 `configuration.py` is the only file that knows Hugging Face's field names.
-Llama and Qwen2 are one decoder in grilly; they differ in where biases go,
-and that is the one subtlety worth stating: **Qwen2 biases q, k and v and
-never the output projection, while Llama's `attention_bias` covers all
-four.** `tests/python/test_huggingface.py` checks every other field against
-`transformers.AutoConfig` on the same file, so the mapping is not taken on
-trust.
+Llama, Qwen2 and Qwen3 are one decoder in grilly, and the differences are
+small enough to be config fields:
+
+| | biases | per-head q/k norm |
+|---|---|---|
+| Llama | `attention_bias` covers all four projections | no |
+| Qwen2 | q, k and v always; never the output projection | no |
+| Qwen3 | none by default | **yes** (`q_norm`, `k_norm`) |
+
+Qwen3's `q_norm` and `k_norm` are RMSNorms over **one head**, applied
+before the rotary embedding. Both halves of that sentence are easy to get
+wrong — over the whole projection instead of one head, or after the
+rotation instead of before — and either mistake still runs and still
+produces fluent text. `tests/python/test_generation.py` therefore compares
+against `transformers.Qwen3ForCausalLM` with the same weights (measured
+7.3e-07 of a 1e-5 bound), and every other config field is checked against
+`transformers.AutoConfig` on the same file, so none of the mapping is taken
+on trust.
 
 Two versions of the same field exist in the wild: transformers 5 moved
 `rope_theta` into `rope_parameters` beside a `rope_type`. Both are read,
