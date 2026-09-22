@@ -85,7 +85,8 @@ def _inverse_cholesky(hessian: np.ndarray, percdamp: float):
 
 
 def gptq_quantize(weight: np.ndarray, hessian: np.ndarray, group_size: int = 128,
-                  blocksize: int = 128, percdamp: float = 0.01, act_order: bool = False):
+                  blocksize: int = 128, percdamp: float = 0.01, act_order: bool = False,
+                  static_groups: bool | None = None):
     """Quantize `weight` (out, in) to int4 against the calibration Hessian
     `hessian` (in, in), returning (levels, scales, zeros) in the layout
     `Int4Tensor` uses.
@@ -95,12 +96,21 @@ def gptq_quantize(weight: np.ndarray, hessian: np.ndarray, group_size: int = 128
     propagated anywhere. `tests/python/test_gptq.py` asserts that.
 
     `act_order` quantizes the columns the calibration data excited most
-    first, so their error is compensated by everything that follows. This
-    is AutoGPTQ's `desc_act` with `static_groups`: a group's scale and zero
-    come from the original column order, so the groups stay the contiguous
-    runs of 128 that `g2-linear-q4` reads. Plain `desc_act` instead groups
-    the *permuted* columns, which needs a group index per column in the
-    file and in the kernel.
+    first, so their error is compensated by everything that follows. It
+    requires `static_groups`, and defaults it on.
+
+    `static_groups` fixes every group's scale and zero point from the
+    original weights, before any compensation. Without it, a group's
+    parameters are computed when the loop reaches it, from weights earlier
+    columns have already pushed their error into — which is more accurate,
+    and is why plain GPTQ leaves it off. With `act_order` it is not
+    optional: the groups must stay the contiguous runs of 128 that
+    `g2-linear-q4` reads, and the visiting order no longer matches them.
+    AutoGPTQ spells these `desc_act` and `static_groups` too.
+
+    The two are worth separating, because they do not always pull the same
+    way (docs/inference.md: ordering helped Qwen2.5-0.5B and hurt
+    Qwen3-1.7B).
     """
     rows, k = weight.shape
     if hessian.shape != (k, k):
@@ -109,6 +119,11 @@ def gptq_quantize(weight: np.ndarray, hessian: np.ndarray, group_size: int = 128
     if group_size <= 0 or k % group_size:
         raise ValueError(f"in_features {k} must be a whole number of groups of {group_size}")
 
+    if static_groups is None:
+        static_groups = act_order
+    if act_order and not static_groups:
+        raise ValueError("act_order needs static_groups: reordering the columns leaves the "
+                         "groups scattered, which the int4 kernel cannot read")
     work = np.array(weight, dtype=np.float32, copy=True)
     groups = k // group_size
     scales = np.zeros((rows, groups), dtype=np.float32)
@@ -116,13 +131,13 @@ def gptq_quantize(weight: np.ndarray, hessian: np.ndarray, group_size: int = 128
     static = None
     order = permutation = None
 
-    if act_order:
-        # the group parameters are fixed in the original order first, so the
-        # groups stay contiguous there; then the columns are visited in
-        # order of how much the calibration data excited them
+    if static_groups:
+        # every group's parameters, from the weights before any compensation
         static = [_group_parameters(work[:, g * group_size:(g + 1) * group_size]) for g in range(groups)]
         for g, (scale, lo) in enumerate(static):
             scales[:, g], zeros[:, g] = scale, lo + 8.0 * scale
+    if act_order:
+        # visit the columns the calibration data excited most, first
         order = np.argsort(-np.diag(hessian))
         permutation = np.argsort(order)
         work = work[:, order]
@@ -138,8 +153,9 @@ def gptq_quantize(weight: np.ndarray, hessian: np.ndarray, group_size: int = 128
         now: its original group when reordered, else recomputed from the
         weights as they stand, after earlier columns pushed error here."""
         nonlocal scale, lo
-        if act_order:
-            scale, lo = static[order[column_index] // group_size]
+        if static_groups:
+            original = order[column_index] if act_order else column_index
+            scale, lo = static[original // group_size]
         elif column_index % group_size == 0:
             g = column_index // group_size
             scale, lo = _group_parameters(work[:, column_index:column_index + group_size])

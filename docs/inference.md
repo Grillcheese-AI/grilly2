@@ -368,6 +368,35 @@ and zero points are fixed in the original column order, only the *visiting*
 order changes, and a group stays the contiguous run of 128 that
 `g2-linear-q4` already reads. No kernel change, no format change.
 
+**Qwen3-1.7B**, the same recipe, 16 sequences of 512 tokens:
+
+| scheme | perplexity | gap to float32 |
+|---|---:|---:|
+| float32 | 23.526 | — |
+| int8 per row | 23.377 | −0.15 |
+| int4 round-to-nearest | 44.529 | +21.00 |
+| **int4 GPTQ** | **30.731** | **+7.21** |
+| int4 GPTQ, activation order | 31.849 | +8.32 |
+
+Two things differ from the 0.5B run, and both are worth keeping in view:
+
+- **GPTQ recovers more on the larger model** — 66% of the damage against
+  49% — while round-to-nearest is *relatively worse* on Qwen3 (+89% of
+  perplexity against +37%). A model trained on more tokens carries more in
+  each weight, so naive rounding costs more and compensation is worth more;
+- **activation ordering hurt here** (31.85 against 30.73) where it helped
+  Qwen2.5-0.5B (26.66 against 27.25). That inversion is **not explained
+  yet**. `act_order` forces `static_groups`, so the whole-model run moved
+  two things at once: the visiting order, and whether a group's scale comes
+  from the original weights or from weights earlier columns have already
+  pushed error into. The two are separate arguments now (AutoGPTQ spells
+  them the same way), so the next run can attribute it: quantize the same
+  layers four ways — round-to-nearest, GPTQ, GPTQ with `static_groups`
+  alone, GPTQ with both — and compare on GPTQ's own objective, which the
+  Hessian gives exactly as `0.5 * trace(dW H dW^T)`. Until that is
+  measured, **the default is plain GPTQ**, which is the better of the two
+  on the larger model.
+
 **What is left.** `lm_head` is still round-to-nearest: GPTQ walks columns
 one at a time and that weight has 152K rows, which is minutes for the layer
 least sensitive to rounding — AutoGPTQ and torchao leave it out too.
