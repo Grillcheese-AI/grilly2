@@ -99,6 +99,7 @@ refactor to argue about; they are already drawn, in C++.** Follow them.
 | `grilly-vsa` | `bindings_vsa_lm`, `vsa_explore_bindings.inc`, `block_ops_bindings.inc` |
 | `grilly-snn` | `bindings_snn`, `bindings_eggroll`, `bindings_bandit` |
 | `grilly-huggingface` | `bindings_siglip`, `bindings_distillation`, `bindings_perceiver` |
+| `grilly-infer` | v1's `kv_cache_*` family, plus new work — safetensors loading, quantization, GPU sampling, the decode loop (§11) |
 
 **The one thing that decides whether the split is real:** `grilly-core` must stay
 thin. In v1, 42% of the Python layer was shared across all domains — four packages
@@ -208,8 +209,44 @@ and which interpreter you are in, before drawing a conclusion.
   attached; do not reproduce that.
 - Clean working tree: no `build/`, no vendored sources, no generated artifacts
   committed.
-- Every op needs a test comparing it against torch on CPU within tolerance, and
-  the tolerance recorded.
+- Every op needs a test comparing it against a reference, and the tolerance
+  recorded in the test's header comment. **Which reference decides the number,
+  and the numbers are the owner's:**
+
+  **(a) grilly against grilly** — a fused region against the same ops recorded
+  eagerly, a compiled graph against the interpreter, a GPU path against its own
+  fallback. Same kernels, same framework; only the *order* of operations
+  differs. This is the case F2.3 tests.
+  - one derivative rule, or one forward op, no reuse and no broadcasting:
+    **bit-exact**. `x.to_bits() == y.to_bits()`. There is no float32 excuse for
+    a difference here — the same formula runs on the same inputs.
+  - a composed chain, where reuse or broadcasting makes the two sides sum
+    contributions in a different order: **`rtol = 1e-7`**. Float32
+    reassociation is the *only* thing that bound is there to absorb, and
+    `1e-7` is about one ULP of relative error. Anything wider is a real
+    disagreement wearing a tolerance as a disguise.
+
+  **(b) grilly against torch** — a different implementation, different
+  summation order, a different libm. `1e-7` is not reachable and demanding it
+  is a bug in the test, not in the op. Keep the existing per-test numbers
+  (`1e-5`/`1e-6` for single ops, `1e-4` after several optimizer steps because
+  the error compounds through the updates) and keep the *reason* recorded next
+  to the number, as `tests/python/test_ops.py` and `test_nn.py` already do.
+  Better still, do what `ops_vs_torch.rs` and `ops_autograd.rs` do: assert
+  against a float64 reference under an error bound derived from the op, and
+  print the worst measured ratio to that bound. A ratio, not a hand-picked
+  epsilon, is what tells you an op regressed.
+
+  **Never widen a tolerance to make a test pass.** In case (a) that hides a
+  wrong derivative; in case (b) it hides a regression the bound would have
+  caught. Fix the rule, or write down in the test what makes the wider bound
+  correct for that op specifically.
+
+  Known gap, to close: `crates/grilly-torch/tests/fused_autograd.rs` asserts
+  `close(..., 1e-5, ...)` on its one composed-chain case, and its header says
+  `rtol 1e-5`. That is case (a) and the house number is `1e-7`. Tighten both,
+  run it, and **if it fails, report the measured worst ratio — do not put
+  `1e-5` back.**
 - Commit messages: what changed and why; name the measurement if one drove it.
 
 ## 10. Working agreement
@@ -223,7 +260,175 @@ and which interpreter you are in, before drawing a conclusion.
   awkward to call, that is a bug of the same severity as a wrong number — it is
   the failure mode that killed v1.
 
-## 11. First task — size the boundary, then confirm the language
+## 11. The inference layer — a first-class goal, not a by-product
+
+Owner: *"it was severely lacking in grilly 1 or underperforming / unusable."*
+Measured against v1's 230 exported symbols, that is exactly right, and the shape
+of the gap is specific:
+
+| | v1 |
+|---|---|
+| KV cache | **9 ops** — append, compact, decode, H2O eviction, speculative eviction, a *trainable* eviction head |
+| Sampling | `argmax` only. No temperature, top-k, top-p, multinomial |
+| Quantization | **zero symbols.** No int8, int4, GGUF, dequant |
+| Weight loading | per-architecture uploads only (`moe_upload`, `perceiver_upload_weights`, `siglip_upload_weights`, `vsa_lm_upload`). No safetensors, no general checkpoint path |
+| Tokenizer | 110 lines |
+
+**v1 built the research-grade parts of inference and skipped the mandatory boring
+ones.** It can evict KV entries with a learned policy and cannot load a model file
+or sample a token. On a 12 GB card, no quantization means nothing useful fits at
+all. That is why it reads as unusable rather than slow: there is no path from a
+checkpoint to a token stream.
+
+Note also that inference does **not** fall out of training for free. A correct
+backward pass gives you a forward pass; it does not give you weight loading,
+quantized matmul, a sampler, or a decode loop. Treat this as its own milestone
+with its own acceptance test.
+
+### What to build, in order
+
+1. **Weight loading — `safetensors`.** The universal format; mmap the file and
+   upload. This unblocks everything else and is the single highest-value item.
+2. **Quantization — int8 weight-only at minimum, int4 if it can be done well.**
+   Non-negotiable on consumer VRAM. Dequantize-in-shader on the matmul path
+   rather than materialising fp16 weights.
+3. **Sampling on the GPU** — temperature, top-k, top-p, repetition penalty. Never
+   round-trip logits to the host to sample; that alone can dominate per-token
+   latency.
+4. **A decode loop** matching Hugging Face's `model.generate()` signature. A
+   torch-API framework's natural consumer is HF code, so match the call people
+   already write.
+5. **Wire v1's KV cache — do not rebuild it.** The nine ops are the most advanced
+   part of v1's inference story and they are already written. Port the interface,
+   keep the eviction policies.
+
+**Do not write a tokenizer.** Depend on Hugging Face `tokenizers` — it is Rust,
+pip-installable, and correct. v1's 110-line `fast_tokenizer.py` is the kind of
+thing that looks cheap and then quietly costs a month in edge cases.
+
+### Keep the adapter separate from the machinery
+
+When planning `grilly-huggingface`, hold this line:
+
+- **the machinery** — quantized matmul, GPU samplers, KV cache wiring, the decode
+  loop — belongs in `grilly-infer` / core. It has nothing to do with Hugging Face
+  and must be usable without it.
+- **the adapter** — `from_pretrained`, config parsing, `AutoModel`-shaped entry
+  points, weight-name remapping — is a thin shim over that, and should be
+  deletable without breaking inference.
+
+If the two merge, the result is v1's pattern again: a general capability only
+reachable through one consumer's API. The test is whether someone can load a
+safetensors file and generate tokens with `grilly-huggingface` uninstalled. They
+should be able to.
+
+### The fence timeout is an inference bug, diagnose it as one
+
+The 2 s fence timeout is open at the time of writing. It matters more than it
+looks, because **the fix that satisfies training can fail under inference**, and
+the difference will not show up in any training test.
+
+The two workloads put opposite pressure on the same mechanism:
+
+| | training | decode |
+|---|---|---|
+| submits | few, large | **thousands, tiny** |
+| per-submit work | seconds of GPU time | microseconds |
+| what a 2 s wait means | one dispatch is genuinely slow | something is stalled or starved |
+
+So separate the causes before choosing a fix:
+
+1. **One long dispatch** — a single kernel genuinely exceeds the wait. Raising the
+   timeout is legitimate here, and it will not help inference at all.
+2. **Queue or submit-rate pressure** — too many in flight, a command pool or
+   descriptor pool exhausted, fences allocated per submit and never recycled, or
+   the host waiting on each submit before issuing the next. This is the one that
+   bites a decode loop, and a raised timeout hides it until the inference
+   milestone, where it returns as terrible tokens/sec rather than as a crash.
+3. **A lost signal** — a submit that never signals its fence. Raising the timeout
+   only makes the eventual hang slower to notice.
+4. **Batch footprint** — the batch holds more memory than any single instant of
+   it needs, the working set passes VRAM, and the driver evicts the excess to
+   system memory. Every dispatch then runs at PCIe speed. It presents as "the
+   GPU got slow"; it is actually "the GPU is reading across a bus ~15x
+   narrower than its own memory". Suspect this whenever batching the same work
+   is *slower* than submitting it one dispatch at a time — batching cannot add
+   GPU work, so a batched slowdown is always about memory or synchronisation,
+   never about the kernels.
+
+**This is what it turned out to be** (measured 2026-09-19, RX 6750 XT / 12 GB):
+
+| | batched, before | launch-blocking | batched, after the fix |
+|---|---|---|---|
+| GPU wait, S=4096 dense attention (36 dispatches) | **4.07 s** | 0.34 s | **0.34 s** |
+| peak dedicated VRAM | 10.0 GB | 6.6 GB | 6.6 GB |
+| peak shared (system RAM over PCIe) | **10.1 GB** | 0.1 GB | 0.1 GB |
+| fresh buffer allocations | 40 | 14 | 14 |
+
+Root cause: the shim's `gc_buffer_release` held every buffer freed during
+recording until after the submit, to protect buffers an unsubmitted command
+buffer still referenced (v1's `49a1a89` bug class). The side effect is that a
+batch's footprint became the *sum* of every tensor created in it rather than
+the set alive at any one moment. At S=4096 each score tensor is 1 GiB, ~20 GB
+across the batch, so Windows paged the excess out. The 12x is very close to
+this card's VRAM-to-PCIe bandwidth ratio, which is the corroboration that the
+slow dispatches really were reading across the bus.
+
+Fix: device-local buffers freed during recording go on a **batch-local** free
+list and are reused by later commands in the same batch; they stay out of v1's
+pool until the batch closes, because that pool's `release()` can destroy a
+buffer when a bucket is full. The recycling rests on three invariants — **every
+one of them is a test, not a comment:**
+
+- every recorded command sits behind a full barrier, so a later command cannot
+  touch a recycled buffer before earlier commands are done with it;
+- the shim refuses uploads and downloads while a batch is open, so the host
+  cannot write into a recycled buffer that pending commands still read;
+- descriptor sets are allocated fresh per dispatch.
+
+And the invariant the barriers do **not** cover, which is where the real bug
+would live: *a buffer on the batch-local list must be unreachable from any live
+tensor.* Barriers order access to a buffer; they say nothing about a host-side
+handle that still believes it owns one. The test for this asserts on results
+**and** on the reuse counter — a correctness test that never actually recycled
+a buffer passes vacuously and guards nothing.
+
+Two things this result does not yet establish, so do not build on them:
+**whether the reuse generalises** — 36 identically-sized tensors are the
+friendliest possible input to a free list, and decode allocates many small
+buffers of mixed sizes; and **the end-of-batch policy** — if the batch-local
+buffers are destroyed rather than returned to the pool when the batch closes,
+every batch pays fresh allocations, which is precisely the cost that hurts a
+decode loop of thousands of tiny submits.
+
+**Do not close this on a raised timeout alone.** State the root cause in the
+commit message. If the answer is "the dispatch is genuinely long", say so and say
+which one.
+
+**Add a decode-shaped stress case now, while the repro is in hand:** a few
+thousand small submits back to back, measuring submits/sec and whether fence wait
+time grows over the run. Growth means pooling or recycling is wrong. That test is
+cheap today and becomes the regression guard for §11's decode loop later — it is
+the same shape as generating a few thousand tokens.
+
+### Why this is strategically the bigger half
+
+Most people with a consumer AMD or Intel GPU want to **run** models, not train
+them. `llama.cpp` and `ollama` own that audience and neither is torch-API;
+`candle` and `burn` are not drop-ins. A torch-API path that loads a Hugging Face
+checkpoint and generates tokens on a gaming card under Windows has a larger
+addressable audience than the training path, and it is reachable sooner —
+the missing pieces are plumbing, not research.
+
+### Acceptance test
+
+End to end, with no hand-built model: **load a small open-weights model from a
+safetensors checkpoint, quantize it, and generate coherent sampled text on the
+RX 6750 XT.** Report tokens/sec and peak VRAM. That one run proves loading,
+quantization, the KV cache, the sampler and the decode loop together, and it is
+the demo that makes the project legible to anyone else.
+
+## 12. First task — size the boundary, then confirm the language
 
 Before writing any core code, answer one question with a measurement:
 

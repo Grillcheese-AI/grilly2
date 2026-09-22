@@ -117,6 +117,34 @@ struct gc_ctx {
     // released while a batch was recording: destroyed once it has run
     std::vector<grilly::GrillyBuffer> deferredDestroy;
 
+    // Host-visible staging for uploads recorded INTO an open batch. The
+    // shared upStage cannot serve these: a recorded copy reads its source
+    // when the batch runs, by which time the host would have overwritten
+    // upStage for the next upload. These blocks are reset (not freed) once
+    // the batch has completed, so a steady decode loop reuses the same one.
+    std::vector<grilly::GrillyBuffer> stagedBlocks;
+    size_t stagedBlock = 0;
+    uint64_t stagedUsed = 0;
+    uint64_t stagedUploads = 0;
+    static constexpr uint64_t kStagedBlockBytes = 1u << 20;
+
+    /// Host-visible space for `bytes` that stays valid until the open batch
+    /// has run: (block, offset within it).
+    std::pair<grilly::GrillyBuffer*, uint64_t> reserveStaged(uint64_t bytes) {
+        const uint64_t aligned = (bytes + 15) & ~uint64_t(15);
+        if (stagedBlock < stagedBlocks.size() && stagedUsed + aligned <= stagedBlocks[stagedBlock].size) {
+            const uint64_t at = stagedUsed;
+            stagedUsed += aligned;
+            return {&stagedBlocks[stagedBlock], at};
+        }
+        if (!stagedBlocks.empty())
+            stagedBlock += 1;  // this block is full; take the next one
+        while (stagedBlock >= stagedBlocks.size())
+            stagedBlocks.push_back(pool.acquire(std::max(aligned, kStagedBlockBytes)));
+        stagedUsed = aligned;
+        return {&stagedBlocks[stagedBlock], 0};
+    }
+
     grilly::GrillyBuffer allocatePersistent(size_t bytes) {
         // as v1's BufferPool::acquireDeviceLocal, at the exact size
         VkBufferCreateInfo info{};
@@ -530,6 +558,30 @@ int32_t gc_upload(gc_ctx* ctx, gc_buf dst, uint64_t offset, const void* src,
     });
 }
 
+int32_t gc_upload_staged(gc_ctx* ctx, gc_buf dst, uint64_t offset, const void* src,
+                         uint64_t bytes) {
+    return guarded([&] {
+        requireCtx(ctx);
+        require(src != nullptr || bytes == 0, "null source pointer");
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        require(ctx->recording, "gc_upload_staged called without gc_begin");
+        grilly::GrillyBuffer& d = ctx->lookup(dst);
+        require(offset <= d.size && bytes <= d.size - offset, "upload out of bounds");
+        if (bytes == 0) return;
+        // The caller records a full barrier before this command and before
+        // the next one (grilly-core's record_command), so the copy is
+        // ordered against every dispatch on either side of it. The host
+        // write is made visible to the device by the submit itself, as it
+        // is for copyNow's staging.
+        auto [block, at] = ctx->reserveStaged(bytes);
+        std::memcpy(static_cast<char*>(block->mappedPtr) + at, src, bytes);
+        vmaFlushAllocation(ctx->pool.allocator(), block->allocation, at, bytes);
+        VkBufferCopy region{at, offset, bytes};
+        vkCmdCopyBuffer(ctx->batch.cmdBuffer(), block->handle, d.handle, 1, &region);
+        ctx->stagedUploads += 1;
+    });
+}
+
 int32_t gc_download(gc_ctx* ctx, gc_buf srcBuf, uint64_t offset, void* dst,
                     uint64_t bytes) {
     return guarded([&] {
@@ -684,7 +736,7 @@ int32_t gc_submit_stats_get(gc_ctx* ctx, gc_submit_stats* out) {
                                ctx->waitNsLast, static_cast<uint64_t>(ctx->descPools.size()),
                                pool.allocations, pool.totalAcquired - pool.totalReleased, ctx->batchReuses,
                                static_cast<uint64_t>(ctx->persistent.size()), ctx->persistentBytes,
-                               ctx->persistentPeak};
+                               ctx->persistentPeak, ctx->stagedUploads};
     });
 }
 
@@ -737,6 +789,9 @@ int32_t gc_submit(gc_ctx* ctx) {
         // commit 49a1a89). Keep the reset and releases after the wait above.
         ctx->resetDescPools();
         ctx->releaseAfterBatch();
+        // the staged copies have run, so their blocks can be filled again
+        ctx->stagedBlock = 0;
+        ctx->stagedUsed = 0;
     });
 }
 

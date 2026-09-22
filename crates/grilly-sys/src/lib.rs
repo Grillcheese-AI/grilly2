@@ -57,6 +57,7 @@ pub struct gc_submit_stats {
     pub persistent_buffers: u64,
     pub persistent_bytes: u64,
     pub persistent_peak: u64,
+    pub staged_uploads: u64,
 }
 
 extern "C" {
@@ -77,6 +78,13 @@ extern "C" {
     pub fn gc_buffer_release(ctx: *mut gc_ctx, buf: gc_buf) -> i32;
     pub fn gc_buffer_size(ctx: *mut gc_ctx, buf: gc_buf, out: *mut u64) -> i32;
 
+    pub fn gc_upload_staged(
+        ctx: *mut gc_ctx,
+        dst: gc_buf,
+        offset: u64,
+        src: *const std::ffi::c_void,
+        bytes: u64,
+    ) -> i32;
     pub fn gc_upload(ctx: *mut gc_ctx, dst: gc_buf, offset: u64, src: *const c_void, bytes: u64) -> i32;
     pub fn gc_download(ctx: *mut gc_ctx, src: gc_buf, offset: u64, dst: *mut c_void, bytes: u64) -> i32;
 

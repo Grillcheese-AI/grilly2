@@ -52,6 +52,12 @@ pub struct Caps {
     pub max_workgroup_count: [u32; 3],
 }
 
+/// Writes up to this size record a copy into the open batch instead of
+/// closing it. Above it, the batch is flushed and the shim's bounded
+/// staging does the upload: a weight would otherwise be held twice, and a
+/// load is not in an inner loop.
+const STAGED_UPLOAD_MAX: u64 = 1 << 20;
+
 struct State {
     open: bool,
     launches: u32,
@@ -353,8 +359,26 @@ impl Buffer {
         self.version.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Copy `data` into the buffer at byte `offset`. Waits for recorded work.
+    /// Copy `data` into the buffer at byte `offset`.
+    ///
+    /// A small write is **recorded into the open batch** as a copy from
+    /// staging, in program order behind a barrier, so it costs a command
+    /// rather than a submit. A large one closes the batch first and uploads
+    /// through the shim's bounded staging, as before: staging a whole weight
+    /// would hold it twice, and a load is not in anyone's inner loop.
+    ///
+    /// The distinction matters because a submit is a fence wait. A decode
+    /// step that builds one small tensor per layer — a position, a counter —
+    /// used to pay one of those per layer (docs/submission.md).
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+        if data.len() as u64 <= STAGED_UPLOAD_MAX {
+            let handle = self.handle;
+            let src = data.as_ptr() as *const c_void;
+            let bytes = data.len() as u64;
+            return self.device.record_command(move |ctx| unsafe {
+                sys::gc_upload_staged(ctx, handle, offset, src, bytes)
+            });
+        }
         let mut state = self.device.lock();
         self.device.flush(&mut state)?;
         check(unsafe {

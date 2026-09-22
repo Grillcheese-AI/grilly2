@@ -72,6 +72,7 @@ typedef struct gc_submit_stats {
     uint64_t persistent_buffers;   /* GC_MEM_DEVICE_PERSISTENT buffers alive */
     uint64_t persistent_bytes;     /* and their total size */
     uint64_t persistent_peak;      /* the most persistent bytes alive at once */
+    uint64_t staged_uploads;       /* uploads recorded into a batch, not flushed */
 } gc_submit_stats;
 
 const char* gc_last_error(void);
@@ -95,6 +96,10 @@ int32_t gc_buffer_size(gc_ctx* ctx, gc_buf buf, uint64_t* out);
 /* Device-memory uploads currently require offset == 0. */
 int32_t gc_upload(gc_ctx* ctx, gc_buf dst, uint64_t offset, const void* src,
                   uint64_t bytes);
+/* Upload by recording a copy into the OPEN batch, rather than closing it.
+   The data is staged immediately, so `src` need not outlive the call. */
+int32_t gc_upload_staged(gc_ctx* ctx, gc_buf dst, uint64_t offset, const void* src,
+                         uint64_t bytes);
 int32_t gc_download(gc_ctx* ctx, gc_buf src, uint64_t offset, void* dst,
                     uint64_t bytes);
 
