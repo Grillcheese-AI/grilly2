@@ -100,6 +100,42 @@ At a compiled callable's exit, every `LazyTensor` still lazy in the return
 value (walking tuples, lists and dicts) is materialized, so callers only
 ever see real tensors.
 
+**Wide expressions split.** A fused launch binds one buffer per input plus
+the metadata and the output, and the shim allows 32 (`kMaxBindings`). An
+expression reading more tensors than that used to fail outright — which is
+what a whole model step does, so `grilly.compile` could not be applied to
+one at all. It now materializes the widest sub-expression first, so it
+becomes a single input, and repeats until the rest fits: capture degrades
+into more kernels instead of refusing. Bit-exact either way, since the
+split changes which kernel computes what and not the arithmetic.
+
+## Where capture pays, and where it does not
+
+Fusion removes **kernel launches**. It does not remove the Python that
+builds each node, and at small tensor sizes that is the larger cost.
+Measured on this card, a 31-op chain over 512-element tensors:
+
+| | per chain |
+|---|---:|
+| building the lazy tree (Python only) | 469 µs (~15 µs an op) |
+| materializing it (walk, marshal, launch) | 21 µs |
+| the same chain eagerly, 31 kernels | 656 µs (~21 µs an op) |
+
+So capture trades a 21 µs eager op for a 15 µs lazy one, and only wins
+where a long chain runs to the end uninterrupted. That is the GELU case
+above: one graph over 16M elements, 28.0 ms to 3.1 ms, because there the
+kernels are the cost.
+
+A recurrent decode step is the opposite shape. Measured on CubbyLLM's
+HybridBackbone (d512/L8) through `torch_alias`, `grilly.compile` on the
+step cut dispatches from 325 to 211 per token and still ran **0.60x** as
+fast: matmuls and reductions force 72 materializations per step, so no
+chain is long, and the per-op Python cost is paid either way while the
+saved launches are few.
+
+The lever for that shape is not fusing harder — it is not running the
+Python again at all, which is capture-and-replay of a whole step.
+
 **In-place writes.** A lazy node records the version counter of each real
 tensor it reads. If one of them is written in place before the node runs
 (`y = x * 2; x.add_(1); return y`), materializing raises instead of reading

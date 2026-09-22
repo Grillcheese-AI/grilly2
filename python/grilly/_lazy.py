@@ -31,6 +31,13 @@ _local = threading.local()
 # doubling each step.
 MAX_NODES = 64
 
+# Distinct real tensors one fused kernel can read. A fused launch binds one
+# buffer per input plus the metadata and the output, and the shim allows 32
+# bindings (`kMaxBindings`, gc_shim.cpp). A wide expression — a decode step
+# whose chains touch every weight of a layer — passes that easily, so it is
+# split into several kernels rather than refused.
+MAX_INPUTS = 30
+
 
 class _Stats:
     __slots__ = ("materializations", "node_counts")
@@ -207,13 +214,64 @@ def _operand(t):
     return t._t.version, 0
 
 
+class _TooManyInputs(Exception):
+    """One fused kernel cannot bind this expression's inputs (MAX_INPUTS)."""
+
+
+def _pending_subtrees(root: LazyTensor):
+    """Every unmaterialized node under ``root``, root excluded, with how many
+    distinct real tensors each reads."""
+    found: dict = {}
+
+    def walk(node, top: bool):
+        if not isinstance(node, LazyTensor) or node._handle is not None:
+            return {id(node)}
+        reads: set = set()
+        for operand in (node._x, node._y):
+            if operand is not None:
+                reads |= walk(operand, False)
+        if not top:
+            found[id(node)] = (node, len(reads))
+        return reads
+
+    walk(root, True)
+    return found
+
+
+def _split_once(root: LazyTensor) -> None:
+    """Materialize the sub-expression that reads the most real tensors, so
+    the rest of the graph sees it as one input. Chosen by input count rather
+    than by depth: it removes the most bindings per kernel spent, and the
+    remainder stays fused."""
+    subtrees = _pending_subtrees(root)
+    if not subtrees:  # root alone already needs too many: nothing to split
+        raise RuntimeError(
+            f"a fused expression needs more than {MAX_INPUTS} inputs in a single op, which no "
+            "split can reduce")
+    node, _ = max(subtrees.values(), key=lambda pair: pair[1])
+    node._t  # noqa: B018 - materializes that subtree, recursively if it also splits
+
+
 def materialize(root: LazyTensor) -> Tensor:
     """Walk ``root``'s expression into one fusion graph and run it as a
     single kernel, caching the result on ``root``. An operand that was
     already materialized independently — something else forced it, e.g. a
     matmul mid-chain — is used as a real input instead of being recomputed;
     an operand still lazy is inlined into this same graph, so a chain that
-    was never forced early becomes one kernel end to end."""
+    was never forced early becomes one kernel end to end.
+
+    An expression too wide to bind in one kernel is split: the widest
+    sub-expression is materialized first and becomes a single input, which
+    repeats until the rest fits. So capture degrades into more kernels
+    rather than failing."""
+    while True:
+        try:
+            return _materialize_once(root)
+        except _TooManyInputs:
+            _split_once(root)
+
+
+def _materialize_once(root: LazyTensor) -> Tensor:
     if root._handle is not None:
         return root._handle
     nodes: list = []
@@ -248,6 +306,8 @@ def materialize(root: LazyTensor) -> Tensor:
                 idx = len(nodes)
                 nodes.append(("unary", operand._op, x_idx, a_idx, b_idx))
         else:
+            if len(real_inputs) >= MAX_INPUTS:
+                raise _TooManyInputs
             idx = len(nodes)
             nodes.append(("input", len(real_inputs)))
             real_inputs.append(operand._t)

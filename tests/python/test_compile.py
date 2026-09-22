@@ -487,3 +487,43 @@ def test_long_chains_are_split_and_stay_exact():
     # MAX_NODES counts ops; a unary op is 3 graph nodes (itself and its two params)
     assert max(stats["node_counts"]) <= 3 * _lazy.MAX_NODES + 2
     bitwise(out, chain(x))
+
+
+def test_wide_expressions_are_split_across_kernels_and_stay_exact():
+    """One fused launch binds a buffer per input, and the shim allows 32
+    (``kMaxBindings``). An expression reading more tensors than that — a
+    decode step whose chains touch every weight of a layer — is split into
+    several kernels, the widest sub-expression first, rather than refused:
+    before this it raised "too many bindings" and a whole model's step could
+    not be compiled at all.
+
+    Bit-exact against the same expression run eagerly: splitting changes
+    which kernel computes what, never the arithmetic or its order."""
+    rng = np.random.default_rng(5)
+    parts = [grilly.from_numpy(rng.standard_normal(256).astype(np.float32)) for _ in range(64)]
+
+    def wide(*ts):
+        acc = ts[0] * 1.5
+        for t in ts[1:]:
+            acc = acc + t * 0.5
+        return acc.tanh()
+
+    want = wide(*parts).numpy()
+    got = grilly.compile(wide)(*parts).numpy()
+    np.testing.assert_array_equal(got.view(np.uint32), want.view(np.uint32))
+
+
+def test_a_split_expression_runs_as_more_than_one_kernel():
+    """The split is real: a 64-input expression cannot be one launch."""
+    rng = np.random.default_rng(6)
+    parts = [grilly.from_numpy(rng.standard_normal(128).astype(np.float32)) for _ in range(40)]
+
+    def wide(*ts):
+        total = ts[0]
+        for t in ts[1:]:
+            total = total + t
+        return total
+
+    grilly._lazy.reset_stats()
+    grilly.compile(wide)(*parts)
+    assert grilly._lazy.stats()["materializations"] >= 2, "40 inputs should not fit one kernel"
