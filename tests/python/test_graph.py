@@ -104,3 +104,25 @@ def test_enabled_false_is_the_undecorated_callable():
     x = rand(2, 8)
     with grilly.no_grad():
         assert (g(x, w).numpy() == chain(x, w).numpy()).all()
+
+
+def test_a_kv_cache_cannot_be_captured():
+    """The one way a replay could go quietly wrong: a cache's fill level is a
+    host value the recorded commands carry, and the shapes do not change with
+    it, so nothing downstream would notice a stale length. It must refuse
+    (crates/grilly-infer/src/kv_cache.rs, module header)."""
+    from grilly.infer.cache import KVCache
+
+    cache = KVCache(1, 1, 2, 8, 64)
+    k, v = rand(1, 2, 1, 8, seed=13), rand(1, 2, 1, 8, seed=14)
+    cache.append(0, k, v)
+
+    def decode(q):
+        return cache.attend(0, q)
+
+    g = grilly.graphed(decode)
+    with grilly.no_grad():
+        g(rand(1, 2, 1, 8, seed=15))                      # first sighting: eager
+        with pytest.raises(RuntimeError, match="cannot be captured"):
+            g(rand(1, 2, 1, 8, seed=16))
+    assert cache.get_seq_length(0) == 1

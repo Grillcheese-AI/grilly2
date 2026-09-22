@@ -63,6 +63,21 @@ exact to 2²⁴ and avoids it.
 The outputs are the **same tensor objects** every replay, overwritten in
 place. Read or clone them before the next call.
 
+## The state a capture cannot see
+
+Refusing host reads and writes catches the caller's mistakes. It does not
+catch a value that grilly itself put into a recorded command — and there
+is one that matters: `grilly.infer.KVCache` keeps its fill level on the
+host. `append` writes at a host-computed offset and `attend` passes the
+length to the shader as a push constant. Capture both and the shapes never
+change with the length, so nothing downstream notices; every replay would
+attend over exactly the positions the capture saw.
+
+So a cache operation refuses while a capture is open, the same way a host
+read does. Keep the cache outside the captured region, or leave that step
+ungraphed. Making it capturable means moving the length to a device-side
+counter the decode shaders read, which is not done.
+
 ## Keying, and the growing cache
 
 A graph is valid for one set of shapes, so calls are keyed by a **shape

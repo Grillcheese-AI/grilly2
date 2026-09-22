@@ -17,6 +17,16 @@
 //!   slice, `g2-attn-decode-split` + `g2-attn-decode-merge` for several.
 //!
 //! No autograd: this is the inference path.
+//!
+//! **Not capturable.** The fill level lives on the host: `append` writes at
+//! a host-computed offset and `attend` passes the length as a push
+//! constant. A capture would record both as they stood, and since the
+//! tensor shapes never change nothing downstream would notice — every
+//! replay would attend over the positions the capture saw. So a cache
+//! operation refuses while a capture is open (`grilly_core::graph`) rather
+//! than let a replay return a quietly stale answer. Making the cache
+//! capturable means moving the length to a device-side counter the shaders
+//! read, which is not done here.
 
 use grilly_core::generic::write_strided;
 use grilly_core::{require_float, Arg, DType, Device, Error, Kernel, MemClass, Result, Tensor};
@@ -124,6 +134,17 @@ impl KvCache {
         self.lens.iter_mut().for_each(|n| *n = 0);
     }
 
+    /// A cache operation cannot be recorded into a command graph; see the
+    /// module header for why refusing is the only safe answer.
+    fn not_during_capture(device: &Device, what: &str) -> Result<()> {
+        if device.capturing() {
+            return Err(Error::Invalid(format!(
+                "KV cache {what}: a KV cache cannot be captured. Its fill level is a host value that                  the recorded commands carry — the write offset, and the length the decode shader                  reads — so every replay would use the length the capture saw, while the shapes stay                  the same and hide it. Keep the cache outside the captured region."
+            )));
+        }
+        Ok(())
+    }
+
     fn layer(&self, layer: usize) -> Result<()> {
         if layer >= self.layers() {
             return Err(Error::Index(format!("KV cache: layer {layer} out of range for {} layers", self.layers())));
@@ -135,6 +156,7 @@ impl KvCache {
     /// next `T` positions.
     pub fn append(&mut self, layer: usize, keys: &Tensor, values: &Tensor) -> Result<()> {
         self.layer(layer)?;
+        KvCache::not_during_capture(keys.device(), "append")?;
         let (b, h, d) = (self.batch, self.kv_heads, self.head_dim);
         for (what, t) in [("keys", keys), ("values", values)] {
             require_float("KV cache", t.dtype())?;
@@ -174,6 +196,7 @@ impl KvCache {
     /// values copied, with no transpose or slice in between. Two dispatches.
     pub fn append_rotary(&mut self, layer: usize, keys: &Heads<'_>, values: &Heads<'_>, rot: &Rotary<'_>) -> Result<()> {
         self.layer(layer)?;
+        KvCache::not_during_capture(rot.cos.device(), "append_rotary")?;
         let (b, t, v_row) = values.layout()?;
         let (kb, kt, _) = keys.layout()?;
         let (h, d, m) = (self.kv_heads, self.head_dim, self.max_len);
@@ -219,6 +242,7 @@ impl KvCache {
 
     fn attend_in(&self, layer: usize, q: &Tensor, scale: Option<f32>, splits: Option<usize>) -> Result<Tensor> {
         self.layer(layer)?;
+        KvCache::not_during_capture(q.device(), "attend")?;
         require_float("KV cache attention", q.dtype())?;
         let (b, d) = (self.batch, self.head_dim);
         let heads = match *q.shape() {
