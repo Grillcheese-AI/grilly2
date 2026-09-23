@@ -1,0 +1,9 @@
+[package]
+name = "grilly-vsa"
+version = "0.1.0"
+description = "Vector-symbolic architectures on the GPU: sparse block codes, and packed binary hypervectors (CLAUDE.md §4)"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+grilly-core = { path = "../grilly-core" }

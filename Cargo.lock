@@ -81,6 +81,7 @@ dependencies = [
  "grilly-core",
  "grilly-infer",
  "grilly-torch",
+ "grilly-vsa",
  "pyo3",
 ]
 
@@ -94,6 +95,13 @@ dependencies = [
 
 [[package]]
 name = "grilly-torch"
+version = "0.1.0"
+dependencies = [
+ "grilly-core",
+]
+
+[[package]]
+name = "grilly-vsa"
 version = "0.1.0"
 dependencies = [
  "grilly-core",

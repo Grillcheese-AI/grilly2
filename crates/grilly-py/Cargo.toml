@@ -13,4 +13,5 @@ crate-type = ["cdylib"]
 grilly-core = { path = "../grilly-core" }
 grilly-infer = { path = "../grilly-infer" }
 grilly-torch = { path = "../grilly-torch" }
+grilly-vsa = { path = "../grilly-vsa" }
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }

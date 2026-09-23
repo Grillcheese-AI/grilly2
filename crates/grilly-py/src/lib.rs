@@ -8,6 +8,7 @@
 
 mod infer;
 mod ops;
+mod vsa;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -350,5 +351,6 @@ fn _C(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(generated_kernel_count, m)?)?;
     ops::register(m)?;
     infer::register(m)?;
+    vsa::register(m)?;
     Ok(())
 }
