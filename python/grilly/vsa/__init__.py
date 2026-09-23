@@ -32,10 +32,12 @@ import builtins as _builtins
 import grilly as _g
 from .. import Tensor, _C, _require_tensor
 
+from . import packed  # noqa: F401  -- the other algebra, deliberately its own namespace
+
 __all__ = [
     "bind", "bundle", "codebook", "cyclic_shift", "discretize", "from_flat",
-    "random_continuous", "random_discrete", "similarity", "similarity_batch",
-    "to_flat", "unbind", "zero",
+    "packed", "random_continuous", "random_discrete", "similarity",
+    "similarity_batch", "to_flat", "unbind", "zero",
 ]
 
 

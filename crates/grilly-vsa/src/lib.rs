@@ -14,5 +14,6 @@
 //! is where the confusion started; nothing here couples them.
 
 pub mod block_code;
+pub mod packed;
 
 pub use block_code::{bind, unbind};
