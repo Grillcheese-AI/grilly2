@@ -30,6 +30,7 @@ from grilly.vsa import packed as _packed
 
 __all__ = [
     "blake3_role", "blockcode_bind", "blockcode_similarity", "blockcode_unbind",
+    "continuous_to_spikes", "place_cell", "spikes_to_continuous", "time_cell",
     "hamming_topk", "hdc_bind_packed", "hdc_bundle_packed", "hdc_permute_packed",
     "hdc_similarity_packed", "is_available", "vsa_bind", "vsa_bitpack",
     "vsa_bundle", "vsa_unbind",
@@ -213,6 +214,48 @@ def blake3_role(seed_string, dim):
     """
     moved("_bridge.blake3_role", "grilly.vsa.bipolar.from_key")
     return _bipolar.from_key(str(seed_string), int(dim), domain="grilly.cubemind").numpy().astype(np.int8)
+
+
+# ── hippocampal cells, and the spike bridge ──────────────────────────────
+#
+# v1's functional layer called these and fell through to numpy when the
+# bridge declined, which it always did: the compiled extension has no
+# place_cell or time_cell. They run on the GPU here.
+
+
+def place_cell(agent_position, field_centers, field_width=1.0, max_rate=20.0, baseline_rate=0.1):
+    """Place-cell firing rates, ``(n_neurons,)`` or ``(batch, n_neurons)``."""
+    from grilly.functional import cells as _cells
+
+    return _cells.place_cell(agent_position, field_centers, field_width, max_rate, baseline_rate)
+
+
+def time_cell(current_time, preferred_times, time_constant=1.0, max_rate=15.0,
+              baseline_rate=0.1, membrane_state=None):
+    """``(firing_rates, membrane_state)``. v1 spelled the width
+    ``time_constant`` here and ``temporal_width`` one layer up."""
+    from grilly.functional import cells as _cells
+
+    return _cells.time_cell(current_time, preferred_times, time_constant, max_rate,
+                            baseline_rate, membrane_state)
+
+
+def continuous_to_spikes(continuous, num_timesteps=10, encoding_type=0,
+                         projection_weights=None, projection_bias=None):
+    """Rate-code values into spike trains."""
+    from grilly.functional import bridge as _bridge_fn
+
+    return _bridge_fn.continuous_to_spikes(continuous, num_timesteps, encoding_type,
+                                           projection_weights, projection_bias)
+
+
+def spikes_to_continuous(spikes, encoding_type=0, time_window=5, temporal_weights=None,
+                         projection_weights=None, projection_bias=None):
+    """Decode spike trains back to values."""
+    from grilly.functional import bridge as _bridge_fn
+
+    return _bridge_fn.spikes_to_continuous(spikes, encoding_type, time_window, temporal_weights,
+                                           projection_weights, projection_bias)
 
 
 # ── everything v1 had that the torch API already names ───────────────────

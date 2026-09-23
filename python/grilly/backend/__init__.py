@@ -9,7 +9,7 @@ algebras. See docs/v1-migration.md.
 
 from __future__ import annotations
 
-from . import _bridge  # noqa: F401
+from . import _bridge, cvl  # noqa: F401
 from .._v1 import v1_module_getattr
 
 _REPLACED = {
@@ -32,6 +32,7 @@ _REPLACED = {
     "jit": "grilly.compile",
     "buffer_pool": "grilly's allocator — there is nothing to drive by hand",
     "shader_registry": "grilly's dispatch spine — no op names a .spv file",
+    "experimental": "grilly.vsa.packed — v1's backend.experimental held VulkanVSA",
 }
 
 __getattr__ = v1_module_getattr(__name__, _REPLACED)

@@ -934,3 +934,7 @@ from ._compile import OptimizedModule, compile  # noqa: E402,A001,F401
 # ── capture and replay ───────────────────────────────────────────────────
 
 from ._graph import graphed  # noqa: E402,F401
+
+# ── modules, where domain vocabulary is allowed to live (CLAUDE.md §1) ───
+
+from . import cvl, snn, vsa  # noqa: E402,F401

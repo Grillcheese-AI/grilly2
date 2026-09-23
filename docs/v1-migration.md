@@ -58,10 +58,12 @@ tier and get the right numbers. It does.
 | `experimental.vsa.resonator.ResonatorNetwork` | `grilly.vsa.resonator` | **done**, faithfully, which means it inherits v1's weakness: 2/20 at 32 items a factor. The restart count v1 hard-coded is now a parameter (8/20 at 100 restarts). The published dynamics would fix it and are not implemented |
 | `nn.snn*` (10 modules: neurons, surrogates, synapses, containers, normalization, attention, ann2snn, monitor), `_bridge.lif_step` / `gif_neuron_step` / `snn_node_*` | `grilly.snn` | to do |
 | `_bridge.stdp_learning` / `hebbian_learning` / `oja_learning`, `nn.snn.HebbianLayer` / `STDPLayer` | `grilly.snn` (plasticity) | to do |
-| `functional.cells`, `nn.cells` (`PlaceCell`, `TimeCell`, `ThetaGammaEncoder`) | `grilly.snn` or its own module | to do |
-| `nn.capsule`, `nn.capsule_embedding`, `backend.capsule_transformer` | undecided (see below) | to do |
-| `backend.cvl` (`CVLValue`, `RandomFourierFeatures`) | undecided | to do |
-| `functional.learning` (EWC, Fisher, natural gradient, NLMS, whitening) | undecided | to do |
+| `functional.cells` (`place_cell`, `time_cell`, `theta_gamma_encoding`) | `grilly.snn.cells` | **done.** No kernels: a squared distance, an exponential and an outer product |
+| `functional.bridge` (`continuous_to_spikes`, `spikes_to_continuous`) | `grilly.snn.encoding` | **done.** v1 accepted an `encoding_type` of temporal or phase and rate-coded anyway; those now raise |
+| `nn.cells` (`PlaceCell`, `TimeCell`, `ThetaGammaEncoder` as modules) | `grilly.snn.cells` | to do — the functions are there, the `nn.Module` wrappers are not, and nothing live imports them |
+| `nn.capsule`, `nn.capsule_embedding`, `backend.capsule_transformer` | to port into grilly2 | to do |
+| `backend.cvl` (`CVLValue`, `RandomFourierFeatures`) | `grilly.cvl` | **done.** The feature map is the only expensive part and it is now a matmul |
+| `functional.learning` (EWC, Fisher, natural gradient, NLMS, whitening) | to port into grilly2 | to do |
 | `_bridge.moqe_*`, `_bridge.ternary_gemm`, `_bridge.pack_ternary` | `grilly.infer` quantization | to do |
 | `nn.vsa_lm`, `_bridge.vsa_lm_*` | `grilly.vsa` | to do |
 | `backend.faiss`, `backend.hilbert`, `functional.faiss` | undecided | to do |

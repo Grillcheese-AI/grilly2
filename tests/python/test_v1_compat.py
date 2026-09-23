@@ -336,3 +336,91 @@ def test_the_resonator_alias_keeps_v1s_return_order():
     assert set(estimates) == {"a", "b"} and all(isinstance(v, int) for v in indices.values())
     assert isinstance(iterations, int)
     assert (recovered == cbs["b"][2]).all(), "unbinding a known factor is exact"
+
+
+# ── cells, the spike bridge, CVL ─────────────────────────────────────────
+
+
+def test_the_cell_aliases_keep_v1s_numpy_signatures():
+    from grilly.backend import _bridge
+    from grilly.functional import cells as fcells
+    from grilly.snn import cells as scells
+
+    rng = np.random.default_rng(20)
+    position = rng.standard_normal(2).astype(np.float32)
+    centres = rng.standard_normal((12, 2)).astype(np.float32)
+    with quiet():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        rates = fcells.place_cell(position, centres)
+        assert isinstance(rates, np.ndarray) and rates.shape == (12,)
+        assert (rates == scells.place_cell(grilly.from_numpy(position),
+                                           grilly.from_numpy(centres)).numpy()).all()
+        # v1 returned a (rates, membrane) pair, and the bridge spelled the
+        # width `time_constant` where the layer above said `temporal_width`
+        pair = fcells.time_cell(1.0, np.arange(6, dtype=np.float32))
+        assert isinstance(pair, tuple) and len(pair) == 2
+        assert (_bridge.time_cell(1.0, np.arange(6, dtype=np.float32), time_constant=1.0)[0]
+                == pair[0]).all()
+        assert fcells.theta_gamma_encoding(0.1, n_theta=4, n_gamma=5).shape == (20,)
+
+
+def test_the_spike_bridge_alias_round_trips():
+    from grilly.functional import bridge
+
+    x = np.random.default_rng(21).random((3, 8)).astype(np.float32)
+    with quiet():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        spikes = bridge.continuous_to_spikes(x, num_timesteps=64)
+        assert spikes.shape == (3, 64, 8) and spikes.dtype == np.float32
+        back = bridge.spikes_to_continuous(spikes, time_window=64)
+    assert back.shape == x.shape
+    assert np.abs(back - x).max() < 0.3, "a 64-step rate code is coarse but not wrong"
+
+
+def test_an_encoding_v1_never_implemented_raises_instead_of_rate_coding():
+    """v1 took encoding_type 1 and 2 and rate-coded anyway. Silently giving
+    the wrong code is the failure mode this project exists to remove."""
+    from grilly.functional import bridge
+
+    x = np.zeros((1, 4), dtype=np.float32)
+    with quiet():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        for kind in (1, 2):
+            with pytest.raises(NotImplementedError, match="never"):
+                bridge.continuous_to_spikes(x, encoding_type=kind)
+        with pytest.raises(NotImplementedError, match="never"):
+            bridge.spikes_to_continuous(np.zeros((1, 2, 4), np.float32), encoding_type=1)
+        with pytest.raises(NotImplementedError, match="Simplified"):
+            bridge.bridge_temporal_weights(np.ones((2, 2), np.float32))
+
+
+def test_the_cvl_alias_matches_v1s_maths():
+    """v1's CVL was numpy end to end, so this is a like-for-like check of
+    the formulas, not of a kernel."""
+    from grilly.backend.cvl import CVLValue, RandomFourierFeatures
+
+    with quiet():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        features = RandomFourierFeatures(in_dim=8, n_features=256, seed=5)
+        x = np.random.default_rng(22).standard_normal(8).astype(np.float32)
+        got = features(x)
+        want = np.sqrt(2 * np.e / 256) * np.cos(x @ features.W + features.b)
+        assert got.shape == (256,)
+        assert np.abs(got - want).max() < 1e-5
+
+        value = CVLValue(gamma=0.9, beta=0.5)
+        assert value.xi is None and value.value(got) == 0.0
+        value.observe(got, 2.0)
+        xi = 0.5 * np.zeros_like(got) + 0.5 * (got * 2.0)
+        assert np.abs(value.xi - xi).max() < 1e-5
+        assert value.value(got) == pytest.approx(float(got @ xi) / 0.1, rel=1e-4)
+
+
+def test_the_v1_functional_namespace_is_not_torchs_F():
+    """``grilly.functional`` is v1's; ``grilly.nn.functional`` is torch's.
+    Asking v1's for a torch op says which one you want."""
+    import grilly.functional as v1f
+
+    with pytest.raises(NotImplementedError, match=r"grilly\.nn\.functional\.gelu"):
+        v1f.gelu
+    assert callable(v1f.place_cell)
