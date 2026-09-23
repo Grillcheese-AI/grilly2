@@ -101,6 +101,33 @@ allocating the weights a checkpoint is about to replace. Anything torch supports
 that grilly does not yet raises `NotImplementedError` or fails to resolve;
 nothing silently behaves differently.
 
+## Beyond torch
+
+The torch API is the core. Anything torch has no name for lives in its own
+module, which is where domain vocabulary is allowed — `grilly.vsa` is the
+first:
+
+```python
+from grilly import vsa
+
+role, filler = vsa.random_discrete(80, 128), vsa.random_discrete(80, 128)
+bound = vsa.bind(role, filler)                 # per-block circular convolution
+assert vsa.similarity(vsa.unbind(bound, role), filler) == 1.0
+```
+
+Sparse block codes (IBM NVSA) and, in `grilly.vsa.packed`, binary
+hypervectors 32 bits to a word. They are different algebras over different
+dtypes and do not accept each other's vectors.
+
+## Coming from grilly v1
+
+grilly2 replaces v1 in place: same distribution, same import name. v1's
+import paths still work, through aliases that keep v1's signatures and name
+where each thing moved to. v1's *parallel framework* — its own autograd,
+`nn` and optimizers — is not reimplemented, because the torch API is the
+replacement; those names raise and say what to use. `docs/v1-migration.md`
+is the table.
+
 To see which torch symbols a codebase uses and how many grilly provides:
 
 ```
