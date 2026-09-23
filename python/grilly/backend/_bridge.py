@@ -306,9 +306,41 @@ def whitening_transform(data, mean=None, std=None):
     return _learning.whitening_transform(data, mean, std)
 
 
+# ── MoQE, and why it is not here ─────────────────────────────────────────
+#
+# v1's moqe_* were a numpy sketch of a kernel it never built: quantize the
+# activations block-wise too, so the dot product runs in integers. The
+# docstrings name shaders (moqe-fused-gemv-dp4a.glsl) the Python never
+# calls.
+#
+# It was measured before being ported, and the measurement says not to
+# (tools/int8_linear.py, docs/inference.md). At one row -- decode -- the
+# existing int8 weight-only linear reads Qwen2.5-0.5B's down_proj at 377
+# GB/s against this card's 432 GB/s of spec bandwidth. It is memory-bound
+# at 87% of peak. Quantizing the activations as well reads exactly the same
+# int8 weight bytes and only changes the arithmetic, which is not the
+# bottleneck, so W8A8 cannot make a decode matmul faster here.
+#
+# Adding it anyway would put a second route to the GPU beside a path that
+# is already near the hardware limit (CLAUDE.md 5).
+
+_MOQE = (
+    "grilly.infer.quantization.Int8WeightOnlyConfig, through grilly.nn.Linear. v1's "
+    "moqe_* were numpy sketches of a fused W8A8 GEMV that was never built, and the "
+    "measurement says it would not pay: at decode the int8 linear already runs at 377 "
+    "GB/s of this card's 432 GB/s, so it is memory-bound and quantizing activations "
+    "reads the same weight bytes (tools/int8_linear.py, docs/inference.md)"
+)
+
+
 # ── everything v1 had that the torch API already names ───────────────────
 
 _REPLACED = {
+    "moqe_dynamic_quantize": _MOQE,
+    "moqe_fused_gemv": _MOQE,
+    "moqe_route_and_gemv": _MOQE,
+    "ternary_gemm": _MOQE,
+    "pack_ternary": _MOQE,
     "linear": "grilly.nn.Linear, or grilly.nn.functional.linear",
     "linear_backward": "autograd — call .backward() on the loss",
     "gelu": "grilly.nn.functional.gelu",

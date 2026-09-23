@@ -67,7 +67,7 @@ tier and get the right numbers. It does.
 | `nn.capsule_embedding`, `backend.capsule_transformer`, the rest of `experimental.cognitive` | model code | not ported — build it in the repo that uses it |
 | `backend.cvl` (`CVLValue`, `RandomFourierFeatures`) | `grilly.cvl` | **done.** The feature map is the only expensive part and it is now a matmul |
 | `functional.learning` (EWC, Fisher, natural gradient, NLMS, whitening) | `grilly.learning` | **done.** Element-wise arithmetic and a dot product; no kernels, and v1's epsilons kept so a saved Fisher or NLMS weight behaves the same |
-| `_bridge.moqe_*`, `_bridge.ternary_gemm`, `_bridge.pack_ternary` | `grilly.infer` quantization | to do |
+| `_bridge.moqe_*`, `_bridge.ternary_gemm`, `_bridge.pack_ternary` | `grilly.infer.quantization.Int8WeightOnlyConfig` | **B, not A** — measured: the decode matmul is already at 87% of this card's memory bandwidth, so quantizing activations too reads the same bytes and cannot pay (docs/inference.md) |
 | `nn.vsa_lm`, `_bridge.vsa_lm_*` | `grilly.vsa` | to do |
 | `backend.faiss`, `backend.hilbert`, `functional.faiss` | undecided | to do |
 

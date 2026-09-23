@@ -514,6 +514,47 @@ Real activations need the decode loop (step 4).
 
 `quantize_` takes 0.12 s for the whole model.
 
+### Why there is no W8A8, and no MoQE
+
+v1 carried a numpy sketch of a fused W8A8 GEMV — quantize the activations
+block-wise too, so the dot product runs in integers — under the name
+`moqe_*`, with docstrings naming shaders (`moqe-fused-gemv-dp4a.glsl`) that
+its Python never called. It is not ported, and the reason is a measurement
+rather than a preference.
+
+At one row, which is decode, `tools/int8_linear.py` gives:
+
+| Qwen2.5-0.5B linear, 1 row | int8 µs | GB/s | % of 432 GB/s |
+|---|---:|---:|---:|
+| `down_proj` | 11.6 | 377 | 87% |
+| `lm_head` | 571 | 239 | 55% |
+| `gate_proj` / `up_proj` | 20.8 | 211 | 49% |
+| `q_proj` / `o_proj` | 5.6 | 143 | 33% |
+| `k_proj` / `v_proj` | 3.4 | 34 | 8% |
+
+The big ones are **memory-bound**: the weight read is the whole cost, and
+the kernel is already at 87% of what this card's memory can deliver.
+Quantizing the activations as well reads *exactly the same int8 weight
+bytes* and only changes the arithmetic, which is not the bottleneck. The
+integer dot product would be free and would save nothing.
+
+The small ones are launch-bound, not compute-bound either: `k_proj` at 8%
+of bandwidth is a 1.6 MB weight behind a dispatch, and what helps there is
+`grilly.graphed` (docs/capture.md), which removes the host cost rather than
+the arithmetic.
+
+Where W8A8 would pay is **prefill**, where the same table at 128 rows shows
+int8 falling to 8–18 GB/s and losing to float32 outright on two shapes.
+That is a real weakness, and it is a tiling problem, not a precision one.
+
+The idea behind the name is still open, though, and is not this: *mixture
+of quantization experts* properly means picking a precision per tensor from
+its measured sensitivity. The error table below already shows the spread —
+int4 costs `v_proj` 1.76e-01 where it costs `embed_tokens` 1.10e-01 — so a
+config that puts int4 on the tolerant tensors and int8 on the rest would
+save real VRAM. That is unbuilt, and it is a design decision rather than a
+port.
+
 ## 3. Sampling on the GPU
 
 ```python

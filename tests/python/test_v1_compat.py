@@ -500,3 +500,17 @@ def test_the_cosine_helpers_point_at_the_torch_name():
     q, m = query.numpy().astype(np.float64), matrix.numpy().astype(np.float64)
     want = (m @ q) / (np.linalg.norm(m, axis=1) * np.linalg.norm(q))
     assert np.abs(got - want).max() < 1e-6
+
+
+def test_the_moqe_names_point_at_int8_weight_only_with_the_reason():
+    """Not ported, and the message carries the measurement: at decode the
+    int8 linear is already at 87% of this card's memory bandwidth, so a
+    W8A8 kernel reads the same weight bytes and saves nothing."""
+    from grilly.backend import _bridge
+
+    for name in ("moqe_dynamic_quantize", "moqe_fused_gemv", "moqe_route_and_gemv",
+                 "ternary_gemm", "pack_ternary"):
+        with pytest.raises(NotImplementedError, match="Int8WeightOnlyConfig"):
+            getattr(_bridge, name)
+    with pytest.raises(NotImplementedError, match="memory-bound"):
+        _bridge.moqe_fused_gemv
