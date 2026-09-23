@@ -937,4 +937,4 @@ from ._graph import graphed  # noqa: E402,F401
 
 # ── modules, where domain vocabulary is allowed to live (CLAUDE.md §1) ───
 
-from . import cvl, snn, vsa  # noqa: E402,F401
+from . import cvl, learning, snn, vsa  # noqa: E402,F401

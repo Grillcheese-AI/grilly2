@@ -30,7 +30,9 @@ from grilly.vsa import packed as _packed
 
 __all__ = [
     "blake3_role", "blockcode_bind", "blockcode_similarity", "blockcode_unbind",
-    "continuous_to_spikes", "place_cell", "spikes_to_continuous", "time_cell",
+    "continuous_to_spikes", "ewc_penalty", "fisher_info_update", "natural_gradient",
+    "nlms_predict", "nlms_update", "place_cell", "spikes_to_continuous", "time_cell",
+    "whitening_transform",
     "hamming_topk", "hdc_bind_packed", "hdc_bundle_packed", "hdc_permute_packed",
     "hdc_similarity_packed", "is_available", "vsa_bind", "vsa_bitpack",
     "vsa_bundle", "vsa_unbind",
@@ -256,6 +258,52 @@ def spikes_to_continuous(spikes, encoding_type=0, time_window=5, temporal_weight
 
     return _bridge_fn.spikes_to_continuous(spikes, encoding_type, time_window, temporal_weights,
                                            projection_weights, projection_bias)
+
+
+# ── learning rules that are not gradient descent ─────────────────────────
+
+
+def fisher_info_update(gradients, fisher, momentum=0.9, use_ema=True, reset=False):
+    """Update a running diagonal Fisher estimate. v1 spelled it
+    ``fisher_info_update`` here and ``fisher_info`` one layer up."""
+    from grilly.functional import learning as _learning
+
+    return _learning.fisher_info(gradients, fisher, momentum, use_ema, reset)
+
+
+def ewc_penalty(current_params, important_params, fisher, lambda_ewc=1.0):
+    """``0.5 * lambda * sum(F * (theta - theta_old) ** 2)``."""
+    from grilly.functional import learning as _learning
+
+    return _learning.ewc_penalty(current_params, important_params, fisher, lambda_ewc)
+
+
+def natural_gradient(gradients, fisher, eps=1e-8):
+    """``gradients / (fisher + eps)``."""
+    from grilly.functional import learning as _learning
+
+    return _learning.natural_gradient(gradients, fisher, eps)
+
+
+def nlms_predict(x, w, bias=0.0):
+    """``x . w + bias``."""
+    from grilly.functional import learning as _learning
+
+    return _learning.nlms_predict(x, w, bias)
+
+
+def nlms_update(x, y_true, w, bias, mu=0.5, eps=1e-6):
+    """One NLMS step: ``(weights, bias)``."""
+    from grilly.functional import learning as _learning
+
+    return _learning.nlms_update(x, y_true, w, bias, mu, eps)
+
+
+def whitening_transform(data, mean=None, std=None):
+    """``(whitened, mean, std)``."""
+    from grilly.functional import learning as _learning
+
+    return _learning.whitening_transform(data, mean, std)
 
 
 # ── everything v1 had that the torch API already names ───────────────────

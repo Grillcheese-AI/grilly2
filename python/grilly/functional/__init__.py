@@ -10,21 +10,30 @@ belongs; the rest is torch's job:
 | ``functional.bridge`` | ``grilly.snn.encoding`` |
 | ``functional.activations``, ``.linear``, ``.loss``, ``.dropout``, ``.normalization``, ``.attention``, ``.embedding`` | ``grilly.nn.functional`` — the torch names |
 | ``functional.snn`` | not ported yet (``grilly.snn``) |
-| ``functional.learning``, ``.faiss``, ``.memory``, ``.fft``, ``.mf_activations`` | not ported yet |
+| ``functional.learning`` | ``grilly.learning`` |
+| ``functional.faiss``, ``.memory``, ``.fft``, ``.mf_activations`` | not ported yet |
 
 See ``docs/v1-migration.md``.
 """
 
 from __future__ import annotations
 
-from . import bridge, cells  # noqa: F401
+from . import bridge, cells, learning  # noqa: F401
 from .._v1 import v1_module_getattr
 from .bridge import continuous_to_spikes, spikes_to_continuous  # noqa: F401
 from .cells import place_cell, theta_gamma_encoding, time_cell  # noqa: F401
+from .learning import (  # noqa: F401
+    ewc_penalty, fisher_info, fisher_normalize, natural_gradient, nlms_ensemble,
+    nlms_metrics, nlms_predict, nlms_update, whitening_apply, whitening_batch_stats,
+    whitening_transform,
+)
 
 __all__ = [
-    "bridge", "cells", "continuous_to_spikes", "place_cell",
+    "bridge", "cells", "continuous_to_spikes", "ewc_penalty", "fisher_info",
+    "fisher_normalize", "learning", "natural_gradient", "nlms_ensemble",
+    "nlms_metrics", "nlms_predict", "nlms_update", "place_cell",
     "spikes_to_continuous", "theta_gamma_encoding", "time_cell",
+    "whitening_apply", "whitening_batch_stats", "whitening_transform",
 ]
 
 _REPLACED = {

@@ -424,3 +424,35 @@ def test_the_v1_functional_namespace_is_not_torchs_F():
     with pytest.raises(NotImplementedError, match=r"grilly\.nn\.functional\.gelu"):
         v1f.gelu
     assert callable(v1f.place_cell)
+
+
+def test_the_learning_aliases_keep_v1s_numpy_signatures():
+    from grilly import learning as new
+    from grilly.backend import _bridge
+    from grilly.functional import learning as old
+
+    rng = np.random.default_rng(30)
+    grads = rng.standard_normal(12).astype(np.float32)
+    fisher = np.abs(rng.standard_normal(12)).astype(np.float32)
+    with quiet():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        updated = old.fisher_info(grads, fisher)
+        assert isinstance(updated, np.ndarray) and updated.dtype == np.float32
+        assert (updated == new.fisher_info(grilly.from_numpy(grads),
+                                           grilly.from_numpy(fisher)).numpy()).all()
+        # v1 called it fisher_info_update at the bridge and fisher_info above it
+        assert (_bridge.fisher_info_update(grads, fisher) == updated).all()
+
+        assert isinstance(old.ewc_penalty(grads, grads * 0.5, fisher), float)
+        assert isinstance(old.natural_gradient(grads, fisher), np.ndarray)
+
+        # nlms_update returned a (weights, bias) pair of numpy and float
+        weights, bias = old.nlms_update(grads, 1.0, np.zeros(12, np.float32), 0.0)
+        assert isinstance(weights, np.ndarray) and isinstance(bias, float)
+
+        white, mean, std = old.whitening_transform(rng.standard_normal((20, 4)).astype(np.float32))
+        assert all(isinstance(a, np.ndarray) for a in (white, mean, std))
+        assert white.shape == (20, 4) and mean.shape == (4,)
+        assert (old.whitening_apply(white * 0 + 1.0, mean, std)
+                == new.whitening_apply(grilly.full((20, 4), 1.0), grilly.from_numpy(mean),
+                                       grilly.from_numpy(std)).numpy()).all()

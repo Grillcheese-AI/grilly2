@@ -63,7 +63,7 @@ tier and get the right numbers. It does.
 | `nn.cells` (`PlaceCell`, `TimeCell`, `ThetaGammaEncoder` as modules) | `grilly.snn.cells` | to do — the functions are there, the `nn.Module` wrappers are not, and nothing live imports them |
 | `nn.capsule`, `nn.capsule_embedding`, `backend.capsule_transformer` | to port into grilly2 | to do |
 | `backend.cvl` (`CVLValue`, `RandomFourierFeatures`) | `grilly.cvl` | **done.** The feature map is the only expensive part and it is now a matmul |
-| `functional.learning` (EWC, Fisher, natural gradient, NLMS, whitening) | to port into grilly2 | to do |
+| `functional.learning` (EWC, Fisher, natural gradient, NLMS, whitening) | `grilly.learning` | **done.** Element-wise arithmetic and a dot product; no kernels, and v1's epsilons kept so a saved Fisher or NLMS weight behaves the same |
 | `_bridge.moqe_*`, `_bridge.ternary_gemm`, `_bridge.pack_ternary` | `grilly.infer` quantization | to do |
 | `nn.vsa_lm`, `_bridge.vsa_lm_*` | `grilly.vsa` | to do |
 | `backend.faiss`, `backend.hilbert`, `functional.faiss` | undecided | to do |
