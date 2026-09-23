@@ -30,7 +30,8 @@ from grilly.vsa import packed as _packed
 
 __all__ = [
     "blake3_role", "blockcode_bind", "blockcode_similarity", "blockcode_unbind",
-    "continuous_to_spikes", "ewc_penalty", "fisher_info_update", "natural_gradient",
+    "continuous_to_spikes", "ewc_penalty", "fisher_info_update", "hebbian_learning",
+    "natural_gradient", "oja_learning",
     "nlms_predict", "nlms_update", "place_cell", "spikes_to_continuous", "time_cell",
     "whitening_transform",
     "hamming_topk", "hdc_bind_packed", "hdc_bundle_packed", "hdc_permute_packed",
@@ -306,6 +307,55 @@ def whitening_transform(data, mean=None, std=None):
     return _learning.whitening_transform(data, mean, std)
 
 
+# ── plasticity ───────────────────────────────────────────────────────────
+
+
+def hebbian_learning(pre, post, weights, batch_size=1, time_steps=1,
+                     learning_rate=0.01, weight_decay=0.0):
+    """``W + lr * <post outer pre> - decay * W``, numpy in and numpy out.
+
+    v1's rule, unchanged: its shader's arithmetic was right.
+    """
+    moved("_bridge.hebbian_learning", "grilly.snn.plasticity.hebbian_update")
+    from grilly.snn import plasticity as _p
+
+    shape = (int(batch_size), int(time_steps), -1)
+    return _p.hebbian_update(
+        grilly.from_numpy(np.ascontiguousarray(pre, dtype=np.float32).reshape(shape)),
+        grilly.from_numpy(np.ascontiguousarray(post, dtype=np.float32).reshape(shape)),
+        grilly.from_numpy(np.ascontiguousarray(weights, dtype=np.float32)),
+        learning_rate, weight_decay,
+    ).numpy()
+
+
+def oja_learning(memories, inputs, num_vectors, dim, eta=0.01):
+    """``m + eta * y * (x - y * m)`` with ``y = <m, x>``, per vector.
+
+    This **never ran** in v1: `oja_learning` is not in its compiled
+    extension at all, so the wrapper's call raised and the function
+    returned None every time. It works here, which cannot break a caller
+    that was handling None.
+    """
+    moved("_bridge.oja_learning", "grilly.snn.plasticity.oja_update")
+    from grilly.snn import plasticity as _p
+
+    shape = (int(num_vectors), int(dim))
+    return _p.oja_update(
+        grilly.from_numpy(np.ascontiguousarray(memories, dtype=np.float32).reshape(shape)),
+        grilly.from_numpy(np.ascontiguousarray(inputs, dtype=np.float32).reshape(shape)),
+        eta,
+    ).numpy().reshape(np.shape(memories))
+
+
+_STDP = (
+    "grilly.snn.plasticity.STDPLearner, which is real STDP. v1's rule was not: its "
+    "shader computed `ltp += pre_t * post_t` and `ltd += post_t * pre_t`, the same "
+    "product twice, so the update reduced to (lr_pot - lr_dep) * pre_t * post_t and "
+    "reversing the spike order could not change its sign. If the Hebbian behaviour is "
+    "what you actually wanted, it is grilly.snn.plasticity.hebbian_update"
+)
+
+
 # ── MoQE, and why it is not here ─────────────────────────────────────────
 #
 # v1's moqe_* were a numpy sketch of a kernel it never built: quantize the
@@ -336,6 +386,7 @@ _MOQE = (
 # ── everything v1 had that the torch API already names ───────────────────
 
 _REPLACED = {
+    "stdp_learning": _STDP,
     "moqe_dynamic_quantize": _MOQE,
     "moqe_fused_gemv": _MOQE,
     "moqe_route_and_gemv": _MOQE,

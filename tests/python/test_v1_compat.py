@@ -538,3 +538,40 @@ def test_the_snn_aliases_keep_v1s_names_and_warn():
     for name in ("if_step", "lif_step"):
         with pytest.raises(NotImplementedError, match="membrane"):
             getattr(v1_snn, name)
+
+
+def test_the_plasticity_aliases_work_and_stdp_refuses():
+    from grilly.backend import _bridge
+    from grilly.snn import plasticity
+
+    with quiet():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        pre = np.ones((1, 2, 4), np.float32)
+        post = np.ones((1, 2, 3), np.float32)
+        got = _bridge.hebbian_learning(pre, post, np.zeros((3, 4), np.float32), 1, 2, 0.5)
+        assert isinstance(got, np.ndarray) and got.shape == (3, 4)
+        assert (got == 0.5).all()
+
+        # oja_learning never ran in v1 -- absent from its extension -- so
+        # working here cannot break a caller that handled the None
+        memory = np.array([[0.6, 0.8]], np.float32)
+        out = _bridge.oja_learning(memory, np.array([[1.0, 0.0]], np.float32), 1, 2, 0.1)
+        assert out.shape == memory.shape
+        want = plasticity.oja_update(grilly.from_numpy(memory),
+                                     grilly.from_numpy(np.array([[1.0, 0.0]], np.float32)),
+                                     0.1).numpy()
+        assert np.abs(out - want).max() < 1e-6
+
+    with pytest.raises(NotImplementedError, match="same product twice"):
+        _bridge.stdp_learning
+
+
+def test_the_v1_snn_layers_point_at_the_rule_rather_than_the_layer():
+    import grilly.nn.snn as v1_snn
+
+    with pytest.raises(NotImplementedError, match="hebbian_update"):
+        v1_snn.HebbianLayer
+    with pytest.raises(NotImplementedError, match="timing asymmetry"):
+        v1_snn.STDPLayer
+    with pytest.raises(NotImplementedError, match=r"grilly\.snn\.LIFNode"):
+        v1_snn.LIFNeuron
