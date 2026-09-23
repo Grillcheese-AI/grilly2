@@ -4,7 +4,9 @@ What is here so far is the part of v1's SNN work that is self-contained
 and needed no rewrite:
 
 - :mod:`grilly.snn.cells` — place cells, time cells, theta-gamma coupling;
-- :mod:`grilly.snn.encoding` — continuous values to spike trains and back.
+- :mod:`grilly.snn.encoding` — continuous values to spike trains and back;
+- :mod:`grilly.snn.hippocampus` — ``DentateGyrus``, sparse expansion with
+  k-winners-take-all.
 
 The neuron models themselves (LIF, IF, parametric LIF, the surrogate
 gradients, the synapse and container types) are **not** here yet. v1 built
@@ -16,11 +18,12 @@ raise and say so rather than half-working.
 
 from __future__ import annotations
 
-from . import cells, encoding  # noqa: F401
+from . import cells, encoding, hippocampus  # noqa: F401
 from .cells import place_cell, theta_gamma_encoding, time_cell  # noqa: F401
 from .encoding import continuous_to_spikes, spikes_to_continuous  # noqa: F401
+from .hippocampus import DentateGyrus  # noqa: F401
 
 __all__ = [
-    "cells", "continuous_to_spikes", "encoding", "place_cell",
-    "spikes_to_continuous", "theta_gamma_encoding", "time_cell",
+    "DentateGyrus", "cells", "continuous_to_spikes", "encoding", "hippocampus",
+    "place_cell", "spikes_to_continuous", "theta_gamma_encoding", "time_cell",
 ]

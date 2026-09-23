@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from .._v1 import v1_module_getattr
 
+from . import cognitive  # noqa: F401  -- present so its names can raise by name
+
 #: v1 names this package held that grilly2 does not reimplement.
 _REPLACED = {
-    "cognitive": "the torch API — build these as grilly.nn modules",
     "language": "the torch API — build these as grilly.nn modules",
     "moe": "the torch API — build these as grilly.nn modules",
     "temporal": "the torch API — build these as grilly.nn modules",

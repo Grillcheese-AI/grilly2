@@ -61,7 +61,10 @@ tier and get the right numbers. It does.
 | `functional.cells` (`place_cell`, `time_cell`, `theta_gamma_encoding`) | `grilly.snn.cells` | **done.** No kernels: a squared distance, an exponential and an outer product |
 | `functional.bridge` (`continuous_to_spikes`, `spikes_to_continuous`) | `grilly.snn.encoding` | **done.** v1 accepted an `encoding_type` of temporal or phase and rate-coded anyway; those now raise |
 | `nn.cells` (`PlaceCell`, `TimeCell`, `ThetaGammaEncoder` as modules) | `grilly.snn.cells` | to do — the functions are there, the `nn.Module` wrappers are not, and nothing live imports them |
-| `nn.capsule`, `nn.capsule_embedding`, `backend.capsule_transformer` | to port into grilly2 | to do |
+| `nn.capsule.DentateGyrus` | `grilly.snn.DentateGyrus` | **done.** The one layer in the capsule group that was not a Linear: a sparse projection then k-winners-take-all |
+| `nn.capsule.CapsuleProject`, `.SemanticEncoder` | `grilly.nn.Linear` | **B, not A** — see below |
+| `experimental.cognitive.capsule.cosine_similarity`, `.batch_cosine_similarity` | `grilly.nn.functional.cosine_similarity` | **B, not A** |
+| `nn.capsule_embedding`, `backend.capsule_transformer`, the rest of `experimental.cognitive` | model code | not ported — build it in the repo that uses it |
 | `backend.cvl` (`CVLValue`, `RandomFourierFeatures`) | `grilly.cvl` | **done.** The feature map is the only expensive part and it is now a matmul |
 | `functional.learning` (EWC, Fisher, natural gradient, NLMS, whitening) | `grilly.learning` | **done.** Element-wise arithmetic and a dot product; no kernels, and v1's epsilons kept so a saved Fisher or NLMS weight behaves the same |
 | `_bridge.moqe_*`, `_bridge.ternary_gemm`, `_bridge.pack_ternary` | `grilly.infer` quantization | to do |
@@ -122,13 +125,22 @@ What is left:
    only `grilly-experimental` and `cubemind` do — so it is not urgent, and
    the question is whether it ships at all or waits for a user.
 
-2. **Capsules, CVL, and the learning rules** (EWC / Fisher / natural
-   gradient / NLMS / whitening) — each has exactly one consumer, and two of
-   those consumers are repos that are not being touched. **Decided: port
-   them into grilly2**, as libraries with an API and tests, rather than
-   pushing them into the one repo that happens to use each. The risk
-   accepted is surface; the risk avoided is v1's other failure — a general
-   capability reachable only through one consumer's code (CLAUDE.md §11).
+2. **Capsules** turned out to be the case the classification exists to
+   catch, and the answer was not "port it". `CapsuleProject` and
+   `SemanticEncoder` have identical `__init__` bodies once their default
+   dimensions are normalised, and both return exactly
+   `x @ self.weight.T + self.bias` — their own source says "Use linear
+   backend for now (capsule-project is similar to linear)". They are
+   `nn.Linear` under two names that are not about capsules.
+   `cosine_similarity` and `batch_cosine_similarity` are
+   `F.cosine_similarity`. Only `DentateGyrus` — a sparse projection then
+   k-winners-take-all — was a layer torch has no name for, and that one is
+   ported.
+
+   Worth stating as a rule, because it is the trap in both directions: a
+   domain *name* does not make a domain *library*. Porting those two layers
+   would have put a second spelling of `nn.Linear` in the framework, which
+   is v1's original mistake with the labels swapped.
 
 The immediate next piece, if the answer is "keep going in consumer order",
 is **cubemind**: 60 imports across 44 files, and the only live consumer

@@ -456,3 +456,47 @@ def test_the_learning_aliases_keep_v1s_numpy_signatures():
         assert (old.whitening_apply(white * 0 + 1.0, mean, std)
                 == new.whitening_apply(grilly.full((20, 4), 1.0), grilly.from_numpy(mean),
                                        grilly.from_numpy(std)).numpy()).all()
+
+
+def test_the_capsule_layers_point_at_linear_because_that_is_what_they_were():
+    """Reading this group is what decided its migration: ``CapsuleProject``
+    and ``SemanticEncoder`` have the same __init__ once their defaults are
+    normalised and both return ``x @ weight.T + bias``. Porting them would
+    have been adding a second name for nn.Linear."""
+    import grilly.nn.capsule as capsule
+
+    for name in ("CapsuleProject", "SemanticEncoder"):
+        with pytest.raises(NotImplementedError, match=r"grilly\.nn\.Linear"):
+            getattr(capsule, name)
+    with pytest.raises(NotImplementedError, match=r"grilly\.snn\.DentateGyrus"):
+        capsule.DentateGyrus
+
+
+def test_a_capsule_checkpoint_loads_straight_into_a_linear():
+    """The claim the error message makes, checked: same parameter names,
+    same shapes, same arithmetic."""
+    import grilly.nn as nn
+
+    layer = nn.Linear(6, 3)
+    v1_state = {"weight": grilly.randn(3, 6), "bias": grilly.randn(3)}
+    layer.load_state_dict(v1_state)
+    x = grilly.randn(2, 6)
+    want = (x @ v1_state["weight"].t() + v1_state["bias"]).numpy()
+    assert np.abs(layer(x).detach().numpy() - want).max() < 1e-6
+
+
+def test_the_cosine_helpers_point_at_the_torch_name():
+    import grilly.nn.functional as F
+    from grilly.experimental.cognitive import capsule
+
+    for name in ("cosine_similarity", "batch_cosine_similarity"):
+        with pytest.raises(NotImplementedError, match="cosine_similarity"):
+            getattr(capsule, name)
+
+    # and the replacement the message gives actually produces v1's answer
+    query = grilly.from_numpy(np.random.default_rng(40).standard_normal(8).astype(np.float32))
+    matrix = grilly.from_numpy(np.random.default_rng(41).standard_normal((5, 8)).astype(np.float32))
+    got = F.cosine_similarity(matrix, query.unsqueeze(0), dim=1).numpy()
+    q, m = query.numpy().astype(np.float64), matrix.numpy().astype(np.float64)
+    want = (m @ q) / (np.linalg.norm(m, axis=1) * np.linalg.norm(q))
+    assert np.abs(got - want).max() < 1e-6
