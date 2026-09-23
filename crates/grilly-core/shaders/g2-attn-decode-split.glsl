@@ -15,6 +15,11 @@
 //
 // The score scratch is the same (rows, max_len) buffer: a workgroup writes
 // only its own slice of its own row.
+//
+// `len` is read from the cache's cursor buffer, so a recorded dispatch stays
+// correct as the cache fills: `splits` is fixed, and each slice simply grows.
+// A slice past the end contributes nothing, which is what covers the early
+// steps where the fixed split count is more than the length needs.
 
 layout(local_size_x = 256) in;
 #include "g2-common.glsl"
@@ -25,8 +30,9 @@ layout(std430, binding = 2) readonly buffer V { float vc[]; };
 layout(std430, binding = 3) coherent buffer S { float sc[]; };    // (rows, max_len) scratch
 layout(std430, binding = 4) writeonly buffer M { float ml[]; };   // (rows, splits, 2): m, l
 layout(std430, binding = 5) writeonly buffer O { float po[]; };   // (rows, splits, dim)
+layout(std430, binding = 6) readonly buffer L { uint lens[]; };  // filled positions, per layer
 layout(push_constant) uniform P {
-    uint heads; uint kv_heads; uint max_len; uint len;
+    uint heads; uint kv_heads; uint max_len; uint layer;
     uint dim; float scale; uint q_off; uint splits;
 } p;
 
@@ -69,9 +75,10 @@ void main() {
     uint sbase = row * p.max_len;
     uint obase = (row * p.splits + split) * p.dim;
 
-    uint chunk = (p.len + p.splits - 1u) / p.splits;
+    uint len = min(lens[p.layer], p.max_len);
+    uint chunk = (len + p.splits - 1u) / p.splits;
     uint start = split * chunk;
-    uint end = min(p.len, start + chunk);
+    uint end = min(len, start + chunk);
     if (start >= end) {  // uniform per workgroup: an empty slice contributes nothing
         if (tid == 0u) {
             ml[(row * p.splits + split) * 2u] = uintBitsToFloat(0xff800000u);

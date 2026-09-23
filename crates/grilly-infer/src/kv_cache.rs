@@ -18,30 +18,39 @@
 //!
 //! No autograd: this is the inference path.
 //!
-//! **Not capturable.** The fill level lives on the host: `append` writes at
-//! a host-computed offset and `attend` passes the length as a push
-//! constant. A capture would record both as they stood, and since the
-//! tensor shapes never change nothing downstream would notice — every
-//! replay would attend over the positions the capture saw. So a cache
-//! operation refuses while a capture is open (`grilly_core::graph`) rather
-//! than let a replay return a quietly stale answer. Making the cache
-//! capturable means moving the length to a device-side counter the shaders
-//! read, which is not done here.
+//! **The fill level is a device value.** A `(layers,)` cursor buffer holds
+//! how many positions each layer has: `g2-kv-write` writes at it,
+//! `g2-kv-advance` moves it on, and the decode shaders read their length
+//! from it. Nothing about a step's position reaches the GPU as a push
+//! constant, which is what lets a decode step be recorded once and replayed
+//! (`grilly_core::graph`) — a pushed length would be baked into the
+//! recorded command and, since the cache's shapes never change with it,
+//! every replay would quietly attend over the positions the capture saw.
+//!
+//! `lens` mirrors the cursor on the host, for `len()` and for refusing an
+//! overrun before it is recorded. It is exact whenever the caller drives the
+//! cache itself, and goes stale under replay, which has no host: see
+//! [`KvCache::len`].
 
-use grilly_core::generic::write_strided;
 use grilly_core::{require_float, Arg, DType, Device, Error, Kernel, MemClass, Result, Tensor};
 
-use crate::ops::{rope_into, Heads, Rotary};
+use crate::ops::{Heads, Rotary};
 
 /// Bindings: q, k cache, v cache, scratch, out. Push: heads, kv_heads,
 /// max_len, len, dim, scale, q_off, rows.
-const ATTN_DECODE: Kernel = Kernel { shader: "g2-attn-decode", bindings: 5, push_words: 8, local_size: [256, 1, 1] };
+const ATTN_DECODE: Kernel = Kernel { shader: "g2-attn-decode", bindings: 6, push_words: 8, local_size: [256, 1, 1] };
 /// Bindings: q, k cache, v cache, scratch, (m, l), partial out. Push: heads,
 /// kv_heads, max_len, len, dim, scale, q_off, splits.
-const ATTN_DECODE_SPLIT: Kernel = Kernel { shader: "g2-attn-decode-split", bindings: 6, push_words: 8, local_size: [256, 1, 1] };
+const ATTN_DECODE_SPLIT: Kernel = Kernel { shader: "g2-attn-decode-split", bindings: 7, push_words: 8, local_size: [256, 1, 1] };
 /// Bindings: (m, l), partial out, out. Push: rows, splits, dim.
 const ATTN_DECODE_MERGE: Kernel = Kernel { shader: "g2-attn-decode-merge", bindings: 3, push_words: 3, local_size: [256, 1, 1] };
-pub const KERNELS: &[Kernel] = &[ATTN_DECODE, ATTN_DECODE_SPLIT, ATTN_DECODE_MERGE];
+/// Bindings: source, cos, sin, cache, cursor. Push: n, T, heads, dim, layer,
+/// max_len, src_off, rope, the source's and the cache's three strides, and
+/// the absolute position of the cache's slot 0.
+const KV_WRITE: Kernel = Kernel { shader: "g2-kv-write", bindings: 5, push_words: 15, local_size: [256, 1, 1] };
+/// Bindings: cursor. Push: layer, T, max_len.
+const KV_ADVANCE: Kernel = Kernel { shader: "g2-kv-advance", bindings: 1, push_words: 3, local_size: [1, 1, 1] };
+pub const KERNELS: &[Kernel] = &[ATTN_DECODE, ATTN_DECODE_SPLIT, ATTN_DECODE_MERGE, KV_WRITE, KV_ADVANCE];
 
 /// Cache positions per slice, at least: with fewer, a workgroup's 256
 /// threads run dry and the split costs more than it wins. Measured: at 256
@@ -71,6 +80,9 @@ fn u32_of(v: usize, what: &str) -> Result<u32> {
 pub struct KvCache {
     k: Vec<Tensor>,
     v: Vec<Tensor>,
+    /// `(layers,)` filled positions, on the device. The shaders' source of
+    /// truth; `lens` is the host's mirror of it.
+    cursor: Tensor,
     lens: Vec<usize>,
     batch: usize,
     kv_heads: usize,
@@ -95,7 +107,8 @@ impl KvCache {
             k.push(alloc()?);
             v.push(alloc()?);
         }
-        Ok(KvCache { k, v, lens: vec![0; layers], batch, kv_heads, head_dim, max_len })
+        let cursor = Tensor::full_typed(device, &[layers], 0.0, DType::I32)?;
+        Ok(KvCache { k, v, cursor, lens: vec![0; layers], batch, kv_heads, head_dim, max_len })
     }
 
     pub fn layers(&self) -> usize {
@@ -114,9 +127,32 @@ impl KvCache {
         self.head_dim
     }
 
-    /// Positions filled in `layer` (Hugging Face's `get_seq_length`).
+    /// Positions filled in `layer` (Hugging Face's `get_seq_length`), as the
+    /// host last saw it.
+    ///
+    /// This is the host's mirror of the device cursor, advanced by `append`.
+    /// Replaying a captured step advances the cursor without running any
+    /// host code, so after replays this lags: it says what the cache held
+    /// when the host last drove it. The device path never consults it. Use
+    /// [`KvCache::device_len`] for the number the shaders are using.
     pub fn len(&self, layer: usize) -> usize {
         self.lens.get(layer).copied().unwrap_or(0)
+    }
+
+    /// Positions filled in `layer`, read back from the device cursor — the
+    /// number the shaders act on, including after replays. A device read, so
+    /// it costs a submit; `len` is the cheap answer when the host is driving.
+    pub fn device_len(&self, layer: usize) -> Result<usize> {
+        self.layer(layer)?;
+        let bytes = self.cursor.to_bytes()?;
+        let at = layer * 4;
+        Ok(u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize)
+    }
+
+    /// The cursor buffer, for a caller that has to rotate a query at the
+    /// cache's own position without reading it back (`grilly_infer::ops`).
+    pub fn cursor(&self) -> &Tensor {
+        &self.cursor
     }
 
     /// Whether no position of any layer is filled.
@@ -130,19 +166,82 @@ impl KvCache {
     }
 
     /// Forget every position (the buffers stay allocated).
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self) -> Result<()> {
         self.lens.iter_mut().for_each(|n| *n = 0);
+        self.cursor.fill_(0.0).map(|_| ())
     }
 
-    /// A cache operation cannot be recorded into a command graph; see the
-    /// module header for why refusing is the only safe answer.
-    fn not_during_capture(device: &Device, what: &str) -> Result<()> {
-        if device.capturing() {
+    /// Write `T` positions into `dst` at the layer's cursor, rotating them
+    /// first when `rot` is given, and advance the cursor. `src_strides` and
+    /// `dst_strides` are (batch, head, position) in elements.
+    fn write_at_cursor(
+        &self,
+        layer: usize,
+        src: &Tensor,
+        src_off: usize,
+        src_strides: [usize; 3],
+        rot: Option<(&Tensor, &Tensor, u32)>,
+        dst: &Tensor,
+        dst_strides: [usize; 3],
+        t: usize,
+    ) -> Result<()> {
+        let (b, h, d) = (self.batch, self.kv_heads, self.head_dim);
+        let n = b * h * t * d;
+        if n == 0 {
+            return Ok(());
+        }
+        let dev = src.device();
+        // A descriptor set has to be complete, so the unused cos/sin slots
+        // take the source; `rope = 0` means the shader never reads them.
+        let (cos, sin, pos_base) = rot.unwrap_or((src, src, 0));
+        KV_WRITE.launch_flat(
+            dev,
+            &[Arg::Storage(src), Arg::Storage(cos), Arg::Storage(sin), Arg::Storage(dst), Arg::Storage(&self.cursor)],
+            n,
+            &[
+                u32_of(n, "elements")?,
+                u32_of(t, "T")?,
+                u32_of(h, "heads")?,
+                u32_of(d, "head_dim")?,
+                u32_of(layer, "layer")?,
+                u32_of(self.max_len, "max_len")?,
+                u32_of(src_off, "offset")?,
+                u32::from(rot.is_some()),
+                u32_of(src_strides[0], "stride")?,
+                u32_of(src_strides[1], "stride")?,
+                u32_of(src_strides[2], "stride")?,
+                u32_of(dst_strides[0], "stride")?,
+                u32_of(dst_strides[1], "stride")?,
+                u32_of(dst_strides[2], "stride")?,
+                pos_base,
+            ],
+        )
+    }
+
+    /// Move the layer's cursor on by `t`, on the device. A separate dispatch
+    /// so it lands after the writes that used the old value: every recorded
+    /// command sits behind a full barrier.
+    fn advance(&self, device: &Device, layer: usize, t: usize) -> Result<()> {
+        KV_ADVANCE.launch(
+            device,
+            &[Arg::Storage(&self.cursor)],
+            [1, 1, 1],
+            &[u32_of(layer, "layer")?, u32_of(t, "T")?, u32_of(self.max_len, "max_len")?],
+        )
+    }
+
+    /// Refuse an overrun before it is recorded. The host mirror is exact
+    /// whenever the host is driving; a replay saturates in the shader
+    /// instead, which is the most a graph can do without a host.
+    fn room_for(&self, layer: usize, t: usize) -> Result<usize> {
+        let pos = self.lens[layer];
+        if pos + t > self.max_len {
             return Err(Error::Invalid(format!(
-                "KV cache {what}: a KV cache cannot be captured. Its fill level is a host value that                  the recorded commands carry — the write offset, and the length the decode shader                  reads — so every replay would use the length the capture saw, while the shapes stay                  the same and hide it. Keep the cache outside the captured region."
+                "KV cache full: layer {layer} holds {pos} of {} positions, {t} more asked",
+                self.max_len
             )));
         }
-        Ok(())
+        Ok(pos)
     }
 
     fn layer(&self, layer: usize) -> Result<()> {
@@ -156,7 +255,6 @@ impl KvCache {
     /// next `T` positions.
     pub fn append(&mut self, layer: usize, keys: &Tensor, values: &Tensor) -> Result<()> {
         self.layer(layer)?;
-        KvCache::not_during_capture(keys.device(), "append")?;
         let (b, h, d) = (self.batch, self.kv_heads, self.head_dim);
         for (what, t) in [("keys", keys), ("values", values)] {
             require_float("KV cache", t.dtype())?;
@@ -174,18 +272,13 @@ impl KvCache {
         if values.shape()[2] != t {
             return Err(Error::Shape(format!("KV cache append: {t} keys but {} values", values.shape()[2])));
         }
-        let pos = self.lens[layer];
-        if pos + t > self.max_len {
-            return Err(Error::Invalid(format!(
-                "KV cache full: layer {layer} holds {pos} of {} positions, {t} more asked",
-                self.max_len
-            )));
-        }
+        let pos = self.room_for(layer, t)?;
         let m = self.max_len;
-        let src = [h * t * d, t * d, d, 1];
-        let dst = [h * m * d, m * d, d, 1];
-        write_strided(keys, keys.offset(), &src, &self.k[layer], pos * d, &dst, &[b, h, t, d])?;
-        write_strided(values, values.offset(), &src, &self.v[layer], pos * d, &dst, &[b, h, t, d])?;
+        let src = [h * t * d, t * d, d];
+        let dst = [h * m * d, m * d, d];
+        self.write_at_cursor(layer, keys, keys.offset(), src, None, &self.k[layer], dst, t)?;
+        self.write_at_cursor(layer, values, values.offset(), src, None, &self.v[layer], dst, t)?;
+        self.advance(keys.device(), layer, t)?;
         self.lens[layer] = pos + t;
         Ok(())
     }
@@ -196,7 +289,6 @@ impl KvCache {
     /// values copied, with no transpose or slice in between. Two dispatches.
     pub fn append_rotary(&mut self, layer: usize, keys: &Heads<'_>, values: &Heads<'_>, rot: &Rotary<'_>) -> Result<()> {
         self.layer(layer)?;
-        KvCache::not_during_capture(rot.cos.device(), "append_rotary")?;
         let (b, t, v_row) = values.layout()?;
         let (kb, kt, _) = keys.layout()?;
         let (h, d, m) = (self.kv_heads, self.head_dim, self.max_len);
@@ -206,22 +298,37 @@ impl KvCache {
                 self.batch, keys.heads, keys.dim, values.heads, values.dim
             )));
         }
-        let pos = self.lens[layer];
-        if pos + t > m {
-            return Err(Error::Invalid(format!(
-                "KV cache full: layer {layer} holds {pos} of {m} positions, {t} more asked"
-            )));
-        }
-        rope_into(keys, rot, &self.k[layer], pos * d, [h * m * d, m * d, d])?;
-        write_strided(
+        let pos = self.room_for(layer, t)?;
+        rot.check(t, d)?;
+        let (_, _, k_row) = keys.layout()?;
+        let dst = [h * m * d, m * d, d];
+        // a projection's (batch, T, row) layout, `heads` columns at `col`,
+        // read in place: batch stride T*row, head stride dim, position row
+        self.write_at_cursor(
+            layer,
+            keys.src,
+            keys.src.offset() + keys.col,
+            [t * k_row, d, k_row],
+            // slot 0 of this cache holds absolute position `pos0 - pos`, and
+            // that stays true as the cursor moves: the caller advances pos0
+            // with the cache. Fixed for the cache's lifetime, so a push
+            // constant is safe where the slot itself would not be.
+            Some((rot.cos, rot.sin, (rot.pos0 as u32).wrapping_sub(pos as u32))),
+            &self.k[layer],
+            dst,
+            t,
+        )?;
+        self.write_at_cursor(
+            layer,
             values.src,
             values.src.offset() + values.col,
-            &[t * v_row, d, v_row, 1],
+            [t * v_row, d, v_row],
+            None,
             &self.v[layer],
-            pos * d,
-            &[h * m * d, m * d, d, 1],
-            &[b, h, t, d],
+            dst,
+            t,
         )?;
+        self.advance(rot.cos.device(), layer, t)?;
         self.lens[layer] = pos + t;
         Ok(())
     }
@@ -242,7 +349,6 @@ impl KvCache {
 
     fn attend_in(&self, layer: usize, q: &Tensor, scale: Option<f32>, splits: Option<usize>) -> Result<Tensor> {
         self.layer(layer)?;
-        KvCache::not_during_capture(q.device(), "attend")?;
         require_float("KV cache attention", q.dtype())?;
         let (b, d) = (self.batch, self.head_dim);
         let heads = match *q.shape() {
@@ -264,20 +370,25 @@ impl KvCache {
         let out = Tensor::empty(dev, &[b, heads, 1, d])?;
         let scratch = Tensor::empty(dev, &[rows, self.max_len])?;
         let scale = scale.unwrap_or(1.0 / (d as f32).sqrt());
+        // The split count is a push constant, so a captured dispatch keeps
+        // it; the slices are cut from the *device* length, so they always
+        // cover the cache however full it is. Choosing it from max_len rather
+        // than the current length is what makes that stable — an early step
+        // simply leaves the later slices empty, and they return at once.
         let splits = match splits {
             Some(0) => return Err(Error::Invalid("KV cache attention: splits must be at least 1".into())),
             Some(n) if n > MAX_SPLITS => {
                 return Err(Error::Invalid(format!("KV cache attention: at most {MAX_SPLITS} splits, got {n}")))
             }
-            Some(n) => n.min(len),
-            None => splits_for(rows, len),
+            Some(n) => n,
+            None => splits_for(rows, self.max_len),
         };
         let gx = rows.min(65_535);
         let mut push = [
             u32_of(heads, "heads")?,
             u32_of(self.kv_heads, "kv_heads")?,
             u32_of(self.max_len, "max_len")?,
-            u32_of(len, "len")?,
+            u32_of(layer, "layer")?,
             u32_of(d, "head_dim")?,
             scale.to_bits(),
             u32_of(q.offset(), "offset")?,
@@ -286,7 +397,14 @@ impl KvCache {
         if splits == 1 || rows > 65_535 {
             ATTN_DECODE.launch(
                 dev,
-                &[Arg::Storage(q), Arg::Tensor(&self.k[layer]), Arg::Tensor(&self.v[layer]), Arg::Tensor(&scratch), Arg::Tensor(&out)],
+                &[
+                    Arg::Storage(q),
+                    Arg::Tensor(&self.k[layer]),
+                    Arg::Tensor(&self.v[layer]),
+                    Arg::Tensor(&scratch),
+                    Arg::Tensor(&out),
+                    Arg::Storage(&self.cursor),
+                ],
                 [u32_of(gx * 256, "rows")?, u32_of(rows.div_ceil(gx), "rows")?, 1],
                 &push,
             )?;
@@ -305,6 +423,7 @@ impl KvCache {
                 Arg::Tensor(&scratch),
                 Arg::Tensor(&ml),
                 Arg::Tensor(&partial),
+                Arg::Storage(&self.cursor),
             ],
             [u32_of(rows * 256, "rows")?, u32_of(splits, "splits")?, 1],
             &push,

@@ -115,7 +115,7 @@ fn refusals() {
     assert!(cache.append(1, &kv(1), &kv(1)).is_err(), "no such layer");
     assert!(cache.attend(0, &Tensor::zeros(&dev, &[1, 3, 1, 8]).unwrap(), None).is_err(), "heads not a multiple");
     assert!(KvCache::new(&dev, 1, 1, 1, 257, 4).is_err(), "head_dim over the kernel's limit");
-    cache.reset();
+    cache.reset().unwrap();
     assert!(cache.is_empty());
     cache.append(0, &kv(4), &kv(4)).unwrap();
     assert_eq!(cache.len(0), 4);

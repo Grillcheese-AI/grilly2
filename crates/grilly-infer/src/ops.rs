@@ -71,7 +71,7 @@ impl Rotary<'_> {
 
 /// Record the rotary kernel writing `x` to `dst` at element offset
 /// `dst_off` with strides `(batch, head, T)` (dim is contiguous).
-pub(crate) fn rope_into(x: &Heads, rot: &Rotary, dst: &Tensor, dst_off: usize, strides: [usize; 3]) -> Result<()> {
+fn rope_into(x: &Heads, rot: &Rotary, dst: &Tensor, dst_off: usize, strides: [usize; 3]) -> Result<()> {
     let (b, t, row) = x.layout()?;
     rot.check(t, x.dim)?;
     let n = b * t * x.heads * x.dim;

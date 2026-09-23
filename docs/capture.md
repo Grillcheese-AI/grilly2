@@ -66,17 +66,34 @@ place. Read or clone them before the next call.
 ## The state a capture cannot see
 
 Refusing host reads and writes catches the caller's mistakes. It does not
-catch a value that grilly itself put into a recorded command — and there
-is one that matters: `grilly.infer.KVCache` keeps its fill level on the
-host. `append` writes at a host-computed offset and `attend` passes the
-length to the shader as a push constant. Capture both and the shapes never
-change with the length, so nothing downstream notices; every replay would
-attend over exactly the positions the capture saw.
+catch a value that grilly itself put into a recorded command, and there was
+one that mattered: `grilly.infer.KVCache` used to keep its fill level on
+the host — `append` wrote at a host-computed offset, `attend` pushed the
+length to the shader. Capture that and the shapes never change with the
+length, so nothing downstream notices; every replay would attend over
+exactly the positions the capture saw.
 
-So a cache operation refuses while a capture is open, the same way a host
-read does. Keep the cache outside the captured region, or leave that step
-ungraphed. Making it capturable means moving the length to a device-side
-counter the decode shaders read, which is not done.
+The cache now keeps the level in a **device cursor**: a `(layers,)` buffer
+that `g2-kv-write` writes at, `g2-kv-advance` moves on, and the decode
+shaders read their length from. A recorded step therefore writes the next
+slot and attends over everything held, and a decode loop over the cache is
+graphable.
+
+Two consequences worth knowing:
+
+- `get_seq_length` is the **host's mirror**, advanced when the host calls
+  `append`. A replay runs no host code, so after replays it lags.
+  `device_len` reads the cursor back (one submit) and is the number the
+  shaders are acting on.
+- a full cache **saturates** under replay rather than writing past its end.
+  The host refuses an overrun before it records; a replay has no host to
+  refuse, so `g2-kv-write` declines and the cursor stops at `max_len`.
+
+The split count is still a push constant, so it is fixed at capture. The
+slices are cut from the device length, so they always cover the cache
+however full it is; the count is chosen from `max_len` rather than the
+current length, which is what makes it stable — an early step just leaves
+the later slices empty and they return at once.
 
 ## Keying, and the growing cache
 

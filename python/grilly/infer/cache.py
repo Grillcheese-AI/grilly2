@@ -12,6 +12,13 @@ is never copied or read back to the host. A prompt's own attention (prefill)
 is ordinary causal ``scaled_dot_product_attention`` on its keys and values;
 append them after it.
 
+The fill level is a **device** value — a cursor the append and decode
+shaders read — so a decode step over the cache can be recorded once and
+replayed (``grilly.graphed``, docs/capture.md). Were it pushed to the
+shaders as a constant, a replay would write the same slot and attend over
+the same positions, and since the cache's shapes never change with the
+length, nothing downstream would notice.
+
 Not v1's cache: that one moves keys and values through host arrays on every
 call and stores them lossily (docs/inference.md).
 """
@@ -47,8 +54,17 @@ class KVCache:
         return Tensor._wrap(self._c.attend(int(layer), _require_tensor("query", query)._t, scale))
 
     def get_seq_length(self, layer: int = 0) -> int:
-        """Positions filled in ``layer`` (Hugging Face's name)."""
+        """Positions filled in ``layer`` (Hugging Face's name), as the host
+        last saw it. Replaying a captured step advances the device cursor
+        without running any host code, so after replays this lags; use
+        ``device_len`` for the number the shaders are acting on."""
         return self._c.len(int(layer))
+
+    def device_len(self, layer: int = 0) -> int:
+        """Positions filled in ``layer``, read back from the device cursor.
+        Costs a submit; ``get_seq_length`` is the cheap answer whenever the
+        host is the one driving the cache."""
+        return self._c.device_len(int(layer))
 
     def reset(self) -> None:
         """Forget every position; the memory stays allocated."""

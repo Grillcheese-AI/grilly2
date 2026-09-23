@@ -320,8 +320,12 @@ impl PyKvCache {
         self.inner.len(layer)
     }
 
-    fn reset(&mut self) {
-        self.inner.reset();
+    fn device_len(&self, py: Python<'_>, layer: usize) -> PyResult<usize> {
+        py.detach(|| self.inner.device_len(layer)).map_err(err)
+    }
+
+    fn reset(&mut self) -> PyResult<()> {
+        self.inner.reset().map_err(err)
     }
 
     #[getter]

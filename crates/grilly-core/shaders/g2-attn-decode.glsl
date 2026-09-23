@@ -14,6 +14,10 @@
 //    groups' partial sums are then added in a fixed order.
 // Every loop is bounded by len, dim or the workgroup; every sum runs in a
 // fixed order.
+//
+// `len` is read from the cache's cursor buffer, not pushed: it changes every
+// decode step, and a pushed value would be baked into a recorded command and
+// replayed stale (grilly_core::graph).
 
 layout(local_size_x = 256) in;
 #include "g2-common.glsl"
@@ -23,8 +27,9 @@ layout(std430, binding = 1) readonly buffer K { float kc[]; };
 layout(std430, binding = 2) readonly buffer V { float vc[]; };
 layout(std430, binding = 3) coherent buffer S { float sc[]; };   // (batch * heads, max_len) scratch
 layout(std430, binding = 4) writeonly buffer O { float o[]; };   // (batch, heads, dim)
+layout(std430, binding = 5) readonly buffer L { uint lens[]; };  // filled positions, per layer
 layout(push_constant) uniform P {
-    uint heads; uint kv_heads; uint max_len; uint len;
+    uint heads; uint kv_heads; uint max_len; uint layer;
     uint dim; float scale; uint q_off; uint rows;  // rows = batch * heads
 } p;
 
@@ -66,13 +71,15 @@ void main() {
     uint g = h / (p.heads / p.kv_heads);
     uint kbase = (b * p.kv_heads + g) * p.max_len * p.dim;
     uint sbase = row * p.max_len;
+    uint len = min(lens[p.layer], p.max_len);
+    if (len == 0u) return;  // uniform per workgroup
 
     if (tid < p.dim) qs[tid] = q[p.q_off + row * p.dim + tid];
     barrier();
 
     // 1. scores
     float m = uintBitsToFloat(0xff800000u);
-    for (uint j = tid; j < p.len; j += 256u) {
+    for (uint j = tid; j < len; j += 256u) {
         uint kr = kbase + j * p.dim;
         float s = 0.0;
         for (uint d = 0u; d < p.dim; ++d) s = fma(qs[d], kc[kr + d], s);
@@ -84,7 +91,7 @@ void main() {
 
     // 2. exp and the normalizer
     float z = 0.0, zc = 0.0;
-    for (uint j = tid; j < p.len; j += 256u) {
+    for (uint j = tid; j < len; j += 256u) {
         float e = exp_acc(sc[sbase + j] - m);
         sc[sbase + j] = e;
         kahan_add(z, zc, e);
@@ -98,7 +105,7 @@ void main() {
     uint lane = tid % p.dim, grp = tid / p.dim;
     float acc = 0.0, ac = 0.0;
     if (grp < groups) {
-        for (uint j = grp; j < p.len; j += groups) kahan_add(acc, ac, sc[sbase + j] * vc[kbase + j * p.dim + lane]);
+        for (uint j = grp; j < len; j += groups) kahan_add(acc, ac, sc[sbase + j] * vc[kbase + j * p.dim + lane]);
     }
     part[tid] = acc + ac;
     barrier();

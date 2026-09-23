@@ -106,23 +106,33 @@ def test_enabled_false_is_the_undecorated_callable():
         assert (g(x, w).numpy() == chain(x, w).numpy()).all()
 
 
-def test_a_kv_cache_cannot_be_captured():
-    """The one way a replay could go quietly wrong: a cache's fill level is a
-    host value the recorded commands carry, and the shapes do not change with
-    it, so nothing downstream would notice a stale length. It must refuse
-    (crates/grilly-infer/src/kv_cache.rs, module header)."""
+
+def test_a_kv_cache_decode_step_replays_and_the_cache_advances():
+    """The cache's fill level is a device cursor, so a recorded append writes
+    the next slot and a recorded attend covers everything held. Bit-exact
+    against the same steps run eagerly on a second cache."""
     from grilly.infer.cache import KVCache
 
-    cache = KVCache(1, 1, 2, 8, 64)
-    k, v = rand(1, 2, 1, 8, seed=13), rand(1, 2, 1, 8, seed=14)
-    cache.append(0, k, v)
+    def token(seed):
+        return rand(1, 2, 1, 8, seed=seed)
 
-    def decode(q):
+    def step(cache, k, v, q):
+        cache.append(0, k, v)
         return cache.attend(0, q)
 
-    g = grilly.graphed(decode)
     with grilly.no_grad():
-        g(rand(1, 2, 1, 8, seed=15))                      # first sighting: eager
-        with pytest.raises(RuntimeError, match="cannot be captured"):
-            g(rand(1, 2, 1, 8, seed=16))
-    assert cache.get_seq_length(0) == 1
+        eager, graphed_cache = KVCache(1, 1, 2, 8, 64), KVCache(1, 1, 2, 8, 64)
+        for cache in (eager, graphed_cache):
+            cache.append(0, token(100), token(200))
+
+        want = [step(eager, token(t), token(50 + t), token(80 + t)).numpy().copy()
+                for t in range(5)]
+
+        g = grilly.graphed(step)
+        got = [g(graphed_cache, token(t), token(50 + t), token(80 + t)).numpy().copy()
+               for t in range(5)]
+
+    assert g.replays >= 2, "nothing replayed, so the comparison proved nothing"
+    for t, (a, b) in enumerate(zip(want, got)):
+        assert (a == b).all(), f"step {t}"
+    assert graphed_cache.device_len(0) == 6
