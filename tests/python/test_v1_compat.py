@@ -514,3 +514,27 @@ def test_the_moqe_names_point_at_int8_weight_only_with_the_reason():
             getattr(_bridge, name)
     with pytest.raises(NotImplementedError, match="memory-bound"):
         _bridge.moqe_fused_gemv
+
+
+def test_the_snn_aliases_keep_v1s_names_and_warn():
+    from grilly.functional import snn as v1_snn
+    from grilly.nn.snn_neurons import LIFNode as OldLIF
+    from grilly.nn.snn_surrogate import ATan as OldATan
+    from grilly.snn import LIFNode
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        node = OldLIF(tau=2.0, surrogate_function=OldATan(alpha=3.0))
+    assert any("grilly.snn.LIFNode" in str(c.message) for c in caught)
+    assert isinstance(node, LIFNode), "the alias is the ported class, not a copy"
+
+    with quiet():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        assert float(node(grilly.tensor([1.5]))[0].item()) == 1.0
+        v1_snn.reset_net(node)
+    assert node.v is None
+
+    # v1's element-wise neuron steps became modules that hold their own state
+    for name in ("if_step", "lif_step"):
+        with pytest.raises(NotImplementedError, match="membrane"):
+            getattr(v1_snn, name)

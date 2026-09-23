@@ -1,29 +1,48 @@
-"""Spiking and neuromorphic pieces.
+"""Spiking neural networks.
 
-What is here so far is the part of v1's SNN work that is self-contained
-and needed no rewrite:
+    import grilly.nn as nn
+    from grilly.snn import LIFNode, functional as SF
 
-- :mod:`grilly.snn.cells` — place cells, time cells, theta-gamma coupling;
+    net = nn.Sequential(nn.Linear(784, 100), LIFNode(), nn.Linear(100, 10), LIFNode())
+    for x_t in stimulus:
+        out = net(x_t)
+    SF.reset_net(net)
+
+- :mod:`grilly.snn.neuron` — ``IFNode``, ``LIFNode``, ``ParametricLIFNode``;
+- :mod:`grilly.snn.surrogate` — the gradients that make a spike
+  differentiable: ``ATan``, ``Sigmoid``, ``FastSigmoid``;
+- :mod:`grilly.snn.functional` — ``reset_net``, ``set_step_mode``,
+  ``multi_step_forward``;
 - :mod:`grilly.snn.encoding` — continuous values to spike trains and back;
+- :mod:`grilly.snn.cells` — place cells, time cells, theta-gamma coupling;
 - :mod:`grilly.snn.hippocampus` — ``DentateGyrus``, sparse expansion with
   k-winners-take-all.
 
-The neuron models themselves (LIF, IF, parametric LIF, the surrogate
-gradients, the synapse and container types) are **not** here yet. v1 built
-them on its own autograd ``Variable``, so bringing them over is a rewrite
-onto ``grilly.nn.Module`` with real gradients through surrogate functions,
-not a translation — see ``docs/v1-migration.md``. Until then, the v1 names
-raise and say so rather than half-working.
+spikingjelly's API, because it is the one people write against: the class
+names, the argument names, ``step_mode``, and time-first ``(T, N, ...)``
+sequences.
+
+v1 had all of this built on its own autograd, with hand-written
+``backward`` methods on each neuron; this is a rewrite onto
+``grilly.nn.Module``, so a gradient goes all the way back through time.
+Not ported yet: the synapse models, the ANN-to-SNN converter, the spiking
+attention variants and the monitors — see ``docs/v1-migration.md``.
 """
 
 from __future__ import annotations
 
-from . import cells, encoding, hippocampus  # noqa: F401
+from . import cells, encoding, functional, hippocampus, neuron, surrogate  # noqa: F401
 from .cells import place_cell, theta_gamma_encoding, time_cell  # noqa: F401
 from .encoding import continuous_to_spikes, spikes_to_continuous  # noqa: F401
+from .functional import multi_step_forward, reset_net, set_step_mode  # noqa: F401
 from .hippocampus import DentateGyrus  # noqa: F401
+from .neuron import BaseNode, IFNode, LIFNode, ParametricLIFNode  # noqa: F401
+from .surrogate import ATan, FastSigmoid, Sigmoid  # noqa: F401
 
 __all__ = [
-    "DentateGyrus", "cells", "continuous_to_spikes", "encoding", "hippocampus",
-    "place_cell", "spikes_to_continuous", "theta_gamma_encoding", "time_cell",
+    "ATan", "BaseNode", "DentateGyrus", "FastSigmoid", "IFNode", "LIFNode",
+    "ParametricLIFNode", "Sigmoid", "cells", "continuous_to_spikes", "encoding",
+    "functional", "hippocampus", "multi_step_forward", "neuron", "place_cell",
+    "reset_net", "set_step_mode", "spikes_to_continuous", "surrogate",
+    "theta_gamma_encoding", "time_cell",
 ]

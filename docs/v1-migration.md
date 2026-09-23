@@ -56,7 +56,8 @@ tier and get the right numbers. It does.
 | `experimental.vsa.ops.HolographicOps` | `grilly.vsa.holographic` | **done.** No kernel either — HRR binding is the block-code kernel at `k = 1`. Direct, so O(d²): a clear win below 4096 and a wash at 10240, with the measured table in the module |
 | `_bridge.vsa_bind` / `_unbind` / `_bundle` / `_bitpack`, `_bridge.blake3_role` | `grilly.vsa.bipolar` | **done**, and they work for the first time — v1's wrappers passed a device handle the compiled functions do not take, so every one returned `None` |
 | `experimental.vsa.resonator.ResonatorNetwork` | `grilly.vsa.resonator` | **done**, faithfully, which means it inherits v1's weakness: 2/20 at 32 items a factor. The restart count v1 hard-coded is now a parameter (8/20 at 100 restarts). The published dynamics would fix it and are not implemented |
-| `nn.snn*` (10 modules: neurons, surrogates, synapses, containers, normalization, attention, ann2snn, monitor), `_bridge.lif_step` / `gif_neuron_step` / `snn_node_*` | `grilly.snn` | to do |
+| `nn.snn_neurons` (`IFNode`, `LIFNode`, `ParametricLIFNode`), `nn.snn_surrogate` (`ATan`, `Sigmoid`, `FastSigmoid`), `functional.snn` (`reset_net`, `multi_step_forward`, `set_step_mode`) | `grilly.snn` | **done.** A rewrite: v1's neurons carried hand-written `backward` methods over its own autograd, so a gradient reached one layer. These are `grilly.nn.Module`s and a test trains one through 12 timesteps, chance to 100% |
+| `nn.snn_synapses`, `nn.snn_ann2snn`, `nn.snn_attention`, `nn.snn_monitor`, `nn.snn_normalization`, `nn.snn_containers`, `_bridge.lif_step` / `gif_neuron_step` / `snn_node_*` | `grilly.snn` | to do — the neurons are there, the surrounding machinery is not |
 | `_bridge.stdp_learning` / `hebbian_learning` / `oja_learning`, `nn.snn.HebbianLayer` / `STDPLayer` | `grilly.snn` (plasticity) | to do |
 | `functional.cells` (`place_cell`, `time_cell`, `theta_gamma_encoding`) | `grilly.snn.cells` | **done.** No kernels: a squared distance, an exponential and an outer product |
 | `functional.bridge` (`continuous_to_spikes`, `spikes_to_continuous`) | `grilly.snn.encoding` | **done.** v1 accepted an `encoding_type` of temporal or phase and rate-coded anyway; those now raise |
@@ -114,16 +115,14 @@ representation exactly, and the two rank a codebook identically.
 
 What is left:
 
-1. **SNN** — the largest group by far: 10 `nn.snn*` modules, ~60 classes,
-   plus the plasticity rules and the bridge's neuron steps. It is a
-   spiking-neural-network library that happens to sit on a tensor
-   framework, and it is the one place where "port it" hides a design
-   question: v1's SNN modules are built on v1's `Variable`, so porting them
-   means rewriting them as `grilly.nn.Module`s with real autograd through
-   surrogate gradients. That is a rewrite, not a translation, and it wants
-   its own milestone. **Nobody in the live consumer list imports it** —
-   only `grilly-experimental` and `cubemind` do — so it is not urgent, and
-   the question is whether it ships at all or waits for a user.
+1. **SNN, the rest of it.** The neurons and their surrogate gradients are
+   done, and the rewrite turned out to be the easy part: the surrogate
+   needs no custom autograd node, because
+   `heaviside(x) + (g(x).detach() * x - (g(x).detach() * x).detach())` has
+   the step as its value and `g` as its derivative, which composes with
+   ordinary autograd. What is left is the surrounding machinery —
+   synapses, the ANN-to-SNN converter, the spiking attention variants,
+   monitors — and none of it has a live consumer, so it waits for one.
 
 2. **Capsules** turned out to be the case the classification exists to
    catch, and the answer was not "port it". `CapsuleProject` and
