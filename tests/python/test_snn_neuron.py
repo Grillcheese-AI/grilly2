@@ -277,3 +277,96 @@ def test_a_spiking_network_trains_through_time():
     print(f"spiking net: {first_acc:.3f} -> {last_acc:.3f} train accuracy over 60 steps")
     assert first_acc < 0.6 and last_acc > 0.9
     assert float(net[0].weight.grad.abs().sum().item()) > 0.0, "the first layer got a gradient"
+
+
+# ── the fused kernel ─────────────────────────────────────────────────────
+
+
+class _Composed(LIFNode):
+    """The same neuron with the fused kernel switched off."""
+
+    def _fused(self, x):
+        return None
+
+
+@pytest.mark.parametrize("tau, decay_input, v_reset, detach_reset, surrogate_fn", [
+    (2.0, False, 0.0, False, None),
+    (2.0, True, 0.0, False, None),
+    (3.5, False, None, False, None),          # soft reset
+    (2.0, False, 0.0, True, None),            # reset detached
+    (2.0, False, 0.25, False, Sigmoid()),     # a non-zero rest, another surrogate
+    (1.0, False, 0.0, False, FastSigmoid()),  # tau = 1 is a non-leaky neuron
+])
+def test_the_fused_step_is_bit_exact_against_the_composed_one(
+        tau, decay_input, v_reset, detach_reset, surrogate_fn):
+    """CLAUDE.md §9(a) at its strictest: the kernel is the same arithmetic
+    in the same order as the expression it replaces, so there is no
+    reassociation to excuse a difference. `==`, not allclose."""
+    kwargs = dict(tau=tau, decay_input=decay_input, v_reset=v_reset, detach_reset=detach_reset)
+    if surrogate_fn is not None:
+        kwargs["surrogate_function"] = surrogate_fn
+    fused, composed = LIFNode(**kwargs), _Composed(**kwargs)
+    assert fused._fused(grilly.zeros(1)) is not None, "this case should take the kernel"
+
+    x = grilly.randn(12, 3, 37, generator=gen(20)) * 1.5
+    for t in range(12):
+        a, b = fused(x[t]), composed(x[t])
+        assert (a.detach().numpy() == b.detach().numpy()).all(), f"spikes at t={t}"
+        assert (fused.v.detach().numpy() == composed.v.detach().numpy()).all(), f"membrane at t={t}"
+
+
+@pytest.mark.parametrize("steps", [1, 8, 32])
+def test_the_fused_gradients_match_the_composed_ones_to_two_ulp(steps):
+    """The forward is bit-exact, the backward is not, and the reason is
+    association rather than a different rule: the kernel computes
+    ``g * ((1 - s) + (rest - h) * ds_dh)`` where autograd sums
+    ``g * (1 - s)`` and ``g * (rest - h) * ds_dh`` as two contributions.
+
+    The bound is **2 ULP of the gradient field's largest element**, and the
+    scale matters: element-wise relative error is meaningless where the
+    true gradient is near zero, and measuring it that way reports 9 ULP at
+    32 steps for one tiny element while the field is unchanged. Measured
+    this way it is 0.13 to 1.09 ULP and does not grow with the sequence
+    length, which is what says it is reassociation and not drift."""
+    x = grilly.randn(steps, 4, 16, generator=gen(21))
+    grads = []
+    for cls in (LIFNode, _Composed):
+        xi = x.clone()
+        xi.requires_grad_(True)
+        node = cls(tau=2.0)
+        total = None
+        for t in range(steps):
+            s = node(xi[t])
+            total = s if total is None else total + s
+        (total * grilly.arange(16, dtype=grilly.float32)).sum().backward()
+        grads.append(xi.grad.numpy().copy())
+
+    a, b = grads
+    bound = 2 * float(np.finfo(np.float32).eps) * float(np.abs(b).max())
+    worst = float(np.abs(a - b).max())
+    print(f"{steps} steps: worst gradient difference {worst / bound:.2f} of 2 ULP")
+    assert worst <= bound
+
+
+def test_a_learned_time_constant_takes_the_composed_path():
+    """The kernel holds tau as a push constant, so it cannot produce
+    dL/dtau. The neuron says so by not using it, rather than silently
+    dropping the gradient."""
+    plif = ParametricLIFNode(init_tau=2.0)
+    assert plif._fused(grilly.zeros(1)) is None
+    assert LIFNode(tau=2.0)._fused(grilly.zeros(1)) is not None
+
+
+def test_a_surrogate_the_kernel_does_not_know_still_works():
+    """A custom surrogate is not an error — the neuron composes the step
+    instead, and the answer is the one the surrogate asks for."""
+
+    class Triangle(surrogate.SurrogateFunction):
+        def gradient(self, v):
+            return (1.0 - v.abs()).clamp(min=0.0)
+
+    node = LIFNode(tau=2.0, surrogate_function=Triangle())
+    assert node._fused(grilly.zeros(1)) is None
+    v = grilly.tensor([[0.5, 1.5]], requires_grad=True)
+    node(v).sum().backward()
+    assert v.grad is not None and float(v.grad.abs().sum().item()) > 0.0

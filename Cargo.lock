@@ -80,9 +80,17 @@ version = "0.1.0"
 dependencies = [
  "grilly-core",
  "grilly-infer",
+ "grilly-snn",
  "grilly-torch",
  "grilly-vsa",
  "pyo3",
+]
+
+[[package]]
+name = "grilly-snn"
+version = "0.1.0"
+dependencies = [
+ "grilly-core",
 ]
 
 [[package]]
