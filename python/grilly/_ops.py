@@ -885,6 +885,81 @@ def index_select(input, dim, index) -> Tensor:
     return _w(_C.index_select(x._t, _dim(dim, x.dim()), i._t))
 
 
+def _expand_index(x: Tensor, dim: int, index: Tensor, source: Tensor, name: str) -> Tensor:
+    """A 1-D ``index`` over ``dim`` as the full-shaped index ``scatter_``
+    wants: the same value repeated across every other dimension."""
+    if index.dim() != 1:
+        raise RuntimeError(f"{name}(): Index is supposed to be a vector, got {index.dim()}D")
+    if source.dim() != x.dim():
+        raise RuntimeError(
+            f"{name}(): Source/destination tensor must have same number of dimensions, "
+            f"got {source.dim()} and {x.dim()}"
+        )
+    if source.shape[dim] != index.numel():
+        raise RuntimeError(
+            f"{name}(): Number of indices ({index.numel()}) should be equal to "
+            f"source.shape[{dim}] ({source.shape[dim]})"
+        )
+    shape = [1] * x.dim()
+    shape[dim] = index.numel()
+    return index.reshape(shape).expand(*source.shape)
+
+
+def index_copy_(input, dim, index, source) -> Tensor:
+    """``self[index[i], ...] = source[i, ...]`` along ``dim``, in place.
+
+    A ring buffer's write. Stays on the device and inside a capture: the
+    index is expanded and handed to ``scatter_``, which validates its
+    bounds on the device (``grilly_core::fault``).
+    """
+    x = _require_tensor("input", input)
+    i, src = _require_tensor("index", index), _require_tensor("source", source)
+    d = _dim(dim, x.dim())
+    return x.scatter_(d, _expand_index(x, d, i, src, "index_copy_"), src)
+
+
+def index_add_(input, dim, index, source, *, alpha=1) -> Tensor:
+    """``self[index[i], ...] += alpha * source[i, ...]`` along ``dim``.
+
+    Accumulating, so repeated indices all land — which is the difference
+    from ``index_copy_`` and the reason a histogram or a scatter-gather
+    uses it.
+    """
+    x = _require_tensor("input", input)
+    i, src = _require_tensor("index", index), _require_tensor("source", source)
+    d = _dim(dim, x.dim())
+    if alpha != 1:
+        src = src * alpha
+    return x.add_(_w(_C.index_add_into_zeros(src._t, d, i._t, list(x.shape))))
+
+
+def index_fill_(input, dim, index, value) -> Tensor:
+    """``self[index[i], ...] = value`` along ``dim``, in place."""
+    from . import full
+
+    x = _require_tensor("input", input)
+    i = _require_tensor("index", index)
+    d = _dim(dim, x.dim())
+    shape = list(x.shape)
+    shape[d] = i.numel()
+    return index_copy_(x, d, i, full(builtins.tuple(shape), value, dtype=x.dtype))
+
+
+def index_copy(input, dim, index, source) -> Tensor:
+    """:func:`index_copy_` on a copy."""
+    return index_copy_(_require_tensor("input", input).clone(), dim, index, source)
+
+
+def index_add(input, dim, index, source, *, alpha=1) -> Tensor:
+    """:func:`index_add_` on a copy."""
+    return index_add_(_require_tensor("input", input).clone(), dim, index, source, alpha=alpha)
+
+
+def index_fill(input, dim, index, value) -> Tensor:
+    """:func:`index_fill_` on a copy."""
+    return index_fill_(_require_tensor("input", input).clone(), dim, index, value)
+
+
 def _scatter_args(x: Tensor, index, src, reduce):
     if reduce is not None:
         raise _not_yet(f"scatter(reduce={reduce!r})")
@@ -1045,6 +1120,19 @@ def _advanced_setitem(x: Tensor, items, value) -> None:
             m = mask.reshape(list(mask.shape) + [1] * (x.dim() - mask.dim()))
             x.copy_(where(m, _as(value, x.dtype), x))
             return
+    if len(items) == 1 and _is_advanced(items[0]):
+        key = _index_tensor(items[0])
+        if key.dtype is not b_ and not key.is_floating_point() and key.dim() == 1 and x.dim() >= 1:
+            # x[rows] = value along dim 0: a ring buffer's write, and the one
+            # advanced key worth keeping on the device. Everything else below
+            # is setup code and goes through numpy.
+            shape = [key.numel()] + list(x.shape[1:])
+            src = _as(value, x.dtype)
+            if not isinstance(src, Tensor) or builtins.tuple(src.shape) != builtins.tuple(shape):
+                from . import empty
+                src = empty(*shape, dtype=x.dtype).copy_(_as(value, x.dtype))
+            index_copy_(x, 0, key, src)
+            return
     for i in items:
         if _is_advanced(i) and _index_tensor(i).is_floating_point():
             raise IndexError("tensors used as indices must be long, int, byte or bool tensors")
@@ -1061,7 +1149,8 @@ def _advanced_setitem(x: Tensor, items, value) -> None:
 
 def _install() -> None:
     T = Tensor
-    for name in ("sin", "cos", "add", "sub", "mul", "div", "pow", "neg", "abs", "sign", "exp", "log",
+    for name in ("index_copy_", "index_add_", "index_fill_", "index_copy", "index_add", "index_fill",
+                 "sin", "cos", "add", "sub", "mul", "div", "pow", "neg", "abs", "sign", "exp", "log",
                  "sqrt", "rsqrt", "tanh", "sigmoid", "square", "clamp", "clip", "clamp_min",
                  "clamp_max", "sum", "mean", "amax", "amin", "max", "min", "argmax", "argmin", "sort",
                  "argsort", "topk", "cumsum", "logcumsumexp", "scatter", "floor_divide", "remainder",

@@ -202,6 +202,28 @@ fn matmul(py: Python<'_>, a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
     run(py, move || shape::matmul(&a, &b))
 }
 
+/// Scatter-add `src` along `dim` at `index` into a zero tensor of `shape`.
+/// python/grilly/_ops.py builds `index_add_` on it.
+#[pyfunction]
+fn index_add_into_zeros(
+    py: Python<'_>,
+    src: &PyTensor,
+    dim: usize,
+    index: &PyTensor,
+    shape: Vec<usize>,
+) -> PyResult<PyTensor> {
+    let (src, index) = (src.inner.clone(), index.inner.clone());
+    run(py, move || {
+        grilly_core::generic::index_add_backward(
+            &src,
+            dim,
+            &index,
+            grilly_core::generic::IndexMode::Select,
+            &shape,
+        )
+    })
+}
+
 /// `a @ b^T` over the last two dims, without ever building `b^T`.
 /// python/grilly/__init__.py routes `x @ w.t()` here.
 #[pyfunction]
@@ -591,6 +613,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(stack, m)?)?;
     m.add_function(wrap_pyfunction!(matmul, m)?)?;
     m.add_function(wrap_pyfunction!(matmul_t, m)?)?;
+    m.add_function(wrap_pyfunction!(index_add_into_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(contiguous, m)?)?;
     m.add_function(wrap_pyfunction!(is_view_copy, m)?)?;
     Ok(())

@@ -97,6 +97,19 @@ impl Tensor {
         Tensor::from_bytes_in(device, data, shape, dtype, MemClass::Device)
     }
 
+    /// [`Tensor::from_bytes`] for bytes that are **constant for the life of
+    /// a recording**, so a capture may take them.
+    ///
+    /// See [`Buffer::write_constant`] for what that promise means and why it
+    /// is not the general rule. The only caller is `crate::fusion`.
+    pub(crate) fn constant_from_bytes(device: &Device, data: &[u8], shape: &[usize], dtype: DType) -> Result<Tensor> {
+        let t = Tensor::empty_in(device, shape, dtype, MemClass::Device)?;
+        if !data.is_empty() {
+            t.storage.write_constant(0, data)?;
+        }
+        Ok(t)
+    }
+
     /// [`Tensor::from_bytes`] into memory of class `mem` (see [`Tensor::empty_in`]).
     pub fn from_bytes_in(device: &Device, data: &[u8], shape: &[usize], dtype: DType, mem: MemClass) -> Result<Tensor> {
         let n = numel_of(shape)?;
@@ -193,6 +206,9 @@ impl Tensor {
         if !out.is_empty() {
             self.storage.read(self.byte_offset(), &mut out)?;
         }
+        // The read flushed and waited, so a bad index recorded on the
+        // device has landed. Raising here is what torch does on CUDA.
+        crate::fault::take(self.device())?;
         Ok(out)
     }
 

@@ -18,6 +18,18 @@ RNG = np.random.default_rng(7)
 X = RNG.standard_normal((4, 5, 3)).astype(np.float32)
 
 
+def surfaced():
+    """Let a bad index report.
+
+    grilly checks index bounds **on the device** and raises at the next
+    host read, which is what torch does on CUDA and what lets an indexing
+    op be captured into a graph (grilly_core::fault). So a test that wants
+    the error has to read something; on torch's CPU tensors the raise has
+    already happened by the time this is reached.
+    """
+    grilly._C.synchronize()
+
+
 def leaves():
     return grilly.tensor(X, requires_grad=True), torch.tensor(X, requires_grad=True)
 
@@ -49,8 +61,9 @@ GATHER = RNG.integers(0, 5, (4, 7, 3))
 ])
 def test_gather_matches_torch(mode, dim, index):
     if index.min() < 0:
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="out of bounds"):
             grilly.gather(grilly.tensor(X), dim, grilly.tensor(index))
+            surfaced()
         return
     check(lambda a: a.gather(dim, grilly.tensor(index)), lambda t: t.gather(dim, torch.tensor(index)))
 
@@ -120,10 +133,13 @@ def test_index_errors_match_torch():
             t[tuple(torch.tensor(k) for k in key) if isinstance(key, tuple) else torch.tensor(key)]
         with pytest.raises(IndexError):
             g[tuple(grilly.tensor(k) for k in key) if isinstance(key, tuple) else grilly.tensor(key)]
+            surfaced()
     with pytest.raises(RuntimeError):
         grilly.index_select(g, 0, grilly.tensor([4]))
+        surfaced()
     with pytest.raises(RuntimeError):
         grilly.gather(g, 1, grilly.tensor(np.full((1, 1, 1), 5)))
+        surfaced()
     with pytest.raises(IndexError):
         g[grilly.tensor([True, False])]
     with pytest.raises(IndexError, match="must be long, int, byte or bool"):
@@ -146,6 +162,7 @@ def test_embedding_matches_torch(mode, padding_idx):
     np.testing.assert_allclose(wg.grad.numpy(), wt.grad.numpy(), rtol=1e-6, atol=1e-6)
     with pytest.raises(IndexError, match="index out of range in self"):
         F.embedding(grilly.tensor([10]), wg)
+        surfaced()
 
 
 def test_embedding_module():

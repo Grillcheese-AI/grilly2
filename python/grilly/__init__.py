@@ -399,6 +399,27 @@ class Tensor:
     def detach(self) -> "Tensor":
         return Tensor._wrap(self._t.detach())
 
+    @property
+    def data(self) -> "Tensor":
+        """torch's ``.data``: these values, detached, **sharing storage**.
+
+        So ``p.data.copy_(w)`` writes through to ``p`` — the idiom for
+        setting a parameter without autograd noticing. It is the blunt
+        version of ``with no_grad(): p.copy_(w)``, and torch's docs prefer
+        the latter for the same reason: ``.data`` bypasses the version
+        counter that catches a tensor modified after being saved for
+        backward.
+        """
+        return self.detach()
+
+    @data.setter
+    def data(self, value) -> None:
+        replacement = _require_tensor("data", value).detach()
+        wanted = self.requires_grad
+        self._t = replacement._t
+        if wanted:
+            self.requires_grad_(True)
+
     def clone(self) -> "Tensor":
         return Tensor._wrap(self._t.clone_data())
 

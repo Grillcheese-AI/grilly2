@@ -196,7 +196,11 @@ impl Graph {
         }
         meta.extend(params.iter().map(|p| p.to_bits()));
         let bytes: Vec<u8> = meta.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let meta = Tensor::from_bytes(device, &bytes, &[meta.len()], DType::I32)?;
+        // Constant for a recording's life: the shapes and offsets a capture
+        // already fixes, plus the scalars written into the expression. The
+        // replay re-issues the dispatch that reads this and nothing writes
+        // it again (Buffer::write_constant).
+        let meta = Tensor::constant_from_bytes(device, &bytes, &[meta.len()], DType::I32)?;
 
         let kernel = Kernel {
             shader: device.generated_kernel(&self.source())?,

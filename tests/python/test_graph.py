@@ -136,3 +136,47 @@ def test_a_kv_cache_decode_step_replays_and_the_cache_advances():
     for t, (a, b) in enumerate(zip(want, got)):
         assert (a == b).all(), f"step {t}"
     assert graphed_cache.device_len(0) == 6
+
+
+def test_a_compiled_region_can_be_captured():
+    """``graphed(compile(fn))`` — fusion removes launches, replay removes
+    the Python, and they were mutually exclusive: a fused kernel uploads a
+    metadata blob from the host and a capture refused the write.
+
+    Those bytes are the shapes and buffer offsets a capture already fixes,
+    plus the scalars written into the expression, so they are constant for
+    the recording's life and the replay re-reads the same buffer
+    (``Buffer::write_constant``). Bit-exact against the uncompiled path.
+    """
+    w = rand(32, 32, seed=30)
+    b = rand(32, seed=31)
+
+    def block(x):
+        h = (x @ w + b).tanh()
+        return (h * 0.5 + 0.25).relu()
+
+    plain = grilly.graphed(block)
+    fused = grilly.graphed(grilly.compile(block))
+    with grilly.no_grad():
+        for seed in range(5):
+            x = rand(4, 32, seed=40 + seed)
+            assert (fused(x).numpy() == plain(x).numpy()).all(), f"seed {seed}"
+    assert fused.replays >= 2 and plain.replays >= 2, "neither actually replayed"
+
+
+def test_a_captured_step_can_look_up_an_embedding():
+    """The op that kept every language model out of a graph."""
+    table = grilly.from_numpy(
+        np.arange(200, dtype=np.float32).reshape(50, 4))
+    token = grilly.tensor([3])
+
+    def step(tok):
+        return grilly.nn.functional.embedding(tok, table) * 2.0
+
+    g = grilly.graphed(step)
+    with grilly.no_grad():
+        want = [(step(grilly.tensor([t])).numpy().copy()) for t in (3, 11, 47)]
+        got = [g(grilly.tensor([t])).numpy().copy() for t in (3, 11, 47)]
+    assert g.replays >= 1
+    for a, b in zip(want, got):
+        assert (a == b).all()

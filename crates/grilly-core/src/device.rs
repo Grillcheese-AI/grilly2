@@ -243,8 +243,13 @@ impl Device {
 
     /// Run everything recorded so far and wait for it.
     pub fn synchronize(&self) -> Result<()> {
-        let mut state = self.lock();
-        self.flush(&mut state)
+        {
+            let mut state = self.lock();
+            self.flush(&mut state)?;
+        }
+        // Everything issued has run, so an index fault recorded on the
+        // device is visible now (crate::fault).
+        crate::fault::take(self)
     }
 
     pub(crate) fn same(&self, other: &Device) -> bool {
@@ -434,7 +439,29 @@ impl Buffer {
     /// step that builds one small tensor per layer — a position, a counter —
     /// used to pay one of those per layer (docs/submission.md).
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
-        if self.device.capturing() {
+        self.write_in(offset, data, false)
+    }
+
+    /// [`Buffer::write`] for bytes the caller guarantees are **constant for
+    /// the life of a recording**, so a capture may take them.
+    ///
+    /// The one user is a fused kernel's metadata (`crate::fusion`): the
+    /// shapes and buffer offsets a capture already fixes, plus the scalars
+    /// written into the expression's source. A replay re-issues the
+    /// dispatch that reads this buffer and nothing ever writes it again, so
+    /// the bytes are still there.
+    ///
+    /// This is deliberately not the general rule. A per-step value written
+    /// from the host — `torch.tensor(pos + 1)` — looks identical to the
+    /// device and would replay stale, so [`Buffer::write`] keeps refusing
+    /// it. Anything reaching for this has to be able to say why its bytes
+    /// cannot change.
+    pub(crate) fn write_constant(&self, offset: u64, data: &[u8]) -> Result<()> {
+        self.write_in(offset, data, true)
+    }
+
+    fn write_in(&self, offset: u64, data: &[u8], constant: bool) -> Result<()> {
+        if self.device.capturing() && !constant {
             return Err(Error::Invalid(
                 "a capture wrote host data into a tensor. A replay re-issues the recorded commands, so                  it would write those same bytes every time: put the value in a tensor and update it                  between replays instead, which is what a captured step's inputs are for."
                     .into(),

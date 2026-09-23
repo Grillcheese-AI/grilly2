@@ -165,3 +165,25 @@ def test_import_is_quiet():
                          capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     assert out.stdout == ""
+
+
+def test_data_is_a_view_of_the_values_like_torchs():
+    """``p.data.copy_(w)`` is the common idiom for setting a parameter
+    without autograd noticing, and it only works if ``.data`` shares
+    storage."""
+    import torch
+
+    for lib in (torch, grilly):
+        p = lib.nn.Parameter(lib.zeros(3))
+        p.data.copy_(lib.ones(3) * 2)
+        assert p.detach().numpy().tolist() == [2.0, 2.0, 2.0], lib.__name__
+        assert p.requires_grad, lib.__name__
+        assert not p.data.requires_grad, lib.__name__
+
+        p.data = lib.ones(4) * 5          # may change the shape, as torch's does
+        assert p.detach().numpy().tolist() == [5.0] * 4, lib.__name__
+        assert p.requires_grad, lib.__name__
+
+        x = lib.zeros(2)                  # and on a plain tensor
+        x.data.copy_(lib.ones(2))
+        assert x.numpy().tolist() == [1.0, 1.0], lib.__name__

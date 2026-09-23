@@ -212,7 +212,11 @@ def test_scatter_errors_match_torch():
     for lib in (torch, grilly):
         x = lib.zeros(3, 4)
         with pytest.raises(RuntimeError, match="out of bounds"):
+            # grilly checks index bounds on the device and raises at the
+            # next read, as torch does on CUDA; torch's CPU tensors have
+            # raised before the synchronize is reached
             x.scatter(1, lib.tensor([[4]]), lib.ones(1, 1))
+            grilly._C.synchronize()
         with pytest.raises(RuntimeError, match="same number of dimensions"):
             x.scatter(1, lib.tensor([1]), lib.ones(1))
         with pytest.raises(RuntimeError, match="self.dtype to be equal to src.dtype"):

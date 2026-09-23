@@ -95,6 +95,42 @@ however full it is; the count is chosen from `max_len` rather than the
 current length, which is what makes it stable — an early step just leaves
 the later slices empty and they return at once.
 
+## Index ops, and what a bad index does
+
+An index op — `nn.Embedding`, `F.embedding`, `index_select`, `x[idx]`,
+`gather`, and the in-place writes a ring buffer needs — used to ask the
+host whether its indices were in range. That is a read back, so every one
+of them was refused inside a capture, which kept every model with an
+embedding out of `graphed` entirely.
+
+The check now runs on the device: `g2-index-fault` records the first bad
+value in a small host-visible buffer, and the next host read raises. torch
+makes the same bargain on CUDA, where a device assert surfaces at the next
+synchronize. It is also cheaper — one dispatch instead of two reductions
+and a readback, and a readback ends the command batch.
+
+The cost is that **the error does not arrive at the line that indexed**.
+It arrives at whatever reads next, so the message says so:
+
+    IndexError: index out of range in self (recorded by embedding; grilly
+    checks index bounds on the device and reports at the next read, as
+    torch does on CUDA, so this is not the line that indexed)
+
+## Fused regions
+
+`graphed(compile(fn))` composes: fusion removes kernel launches, replay
+removes the Python, and a decode step wants both.
+
+A fused kernel uploads a small metadata blob — the shapes, the input
+buffer offsets, and the scalars written into the expression. Those are
+constant for a recording's life, which is why the capture may take them
+(`Buffer::write_constant`), and a replay re-reads the same buffer.
+
+The consequence is worth knowing: **a scalar inside a compiled region is
+frozen at capture.** A Python float threaded into the expression — a
+learning rate, a schedule — will not change on a replay, for the same
+reason `int(pos)` cannot. Put a per-step value in a tensor.
+
 ## Keying, and the growing cache
 
 A graph is valid for one set of shapes, so calls are keyed by a **shape

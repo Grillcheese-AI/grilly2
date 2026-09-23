@@ -4,6 +4,7 @@
 //! than silently missing the original). Gradients are torch's.
 
 use grilly_core::generic::{self as k, contiguous_strides, IndexMode};
+use grilly_core::fault::{self, IndexOp};
 use grilly_core::{DType, Error, Result, Tensor};
 
 use crate::math::record;
@@ -302,19 +303,17 @@ fn as_index(index: &Tensor, op: &str) -> Result<Tensor> {
     }
 }
 
-/// The values of `index` lie in [lo, size) (lo = -size when negative indices
-/// count from the end, else 0); otherwise `error(bad value)`.
-fn check_bounds(index: &Tensor, size: usize, allow_negative: bool, error: impl Fn(i64) -> Error) -> Result<()> {
-    let lo = if allow_negative { -(size as i64) } else { 0 };
-    if let Some((min, max)) = k::index_bounds(index)? {
-        if min < lo {
-            return Err(error(min));
-        }
-        if max >= size as i64 {
-            return Err(error(max));
-        }
-    }
-    Ok(())
+/// Check that `index`'s values lie in `[lo, size)` — on the device.
+///
+/// This used to read the indices back and raise here. That cost a readback
+/// per index op, and it made every one of them impossible to capture: a
+/// replay cannot re-run the host, so an op that asks the host a question is
+/// refused, which kept every model with an embedding out of
+/// `grilly.graphed`. torch does not ask either — CUDA asserts on the device
+/// and the error surfaces at the next synchronize. The fault is recorded on
+/// the device and raised at the next host read (`grilly_core::fault`).
+fn check_bounds(index: &Tensor, size: usize, allow_negative: bool, op: IndexOp, dim: usize) -> Result<()> {
+    fault::check_indices(index, size, allow_negative, op, dim)
 }
 
 fn indexed(src: &Tensor, dim: usize, index: &Tensor, mode: IndexMode, name: &'static str) -> Result<Tensor> {
@@ -330,9 +329,7 @@ fn indexed(src: &Tensor, dim: usize, index: &Tensor, mode: IndexMode, name: &'st
 pub fn gather(input: &Tensor, dim: usize, index: &Tensor) -> Result<Tensor> {
     let index = as_index(index, "gather")?;
     let size = *input.shape().get(dim).ok_or_else(|| Error::Shape(format!("gather: dim {dim} out of range")))?;
-    check_bounds(&index, size, false, |v| {
-        Error::Invalid(format!("index {v} is out of bounds for dimension {dim} with size {size}"))
-    })?;
+    check_bounds(&index, size, false, IndexOp::Gather, dim)?;
     indexed(input, dim, &index, IndexMode::Gather, "GatherBackward0")
 }
 
@@ -340,9 +337,7 @@ pub fn gather(input: &Tensor, dim: usize, index: &Tensor) -> Result<Tensor> {
 pub fn index_select(input: &Tensor, dim: usize, index: &Tensor) -> Result<Tensor> {
     let index = as_index(index, "index_select")?;
     let size = *input.shape().get(dim).ok_or_else(|| Error::Shape(format!("index_select: dim {dim} out of range")))?;
-    check_bounds(&index, size, false, |v| {
-        Error::Invalid(format!("INDICES element is out of DATA bounds, id={v} axis_dim={size}"))
-    })?;
+    check_bounds(&index, size, false, IndexOp::IndexSelect, dim)?;
     indexed(input, dim, &index, IndexMode::Select, "IndexSelectBackward0")
 }
 
@@ -351,9 +346,7 @@ pub fn index_select(input: &Tensor, dim: usize, index: &Tensor) -> Result<Tensor
 pub fn index_tensor(input: &Tensor, dim: usize, index: &Tensor) -> Result<Tensor> {
     let index = as_index(index, "index")?;
     let size = input.shape()[dim];
-    check_bounds(&index, size, true, |v| {
-        Error::Index(format!("index {v} is out of bounds for dimension {dim} with size {size}"))
-    })?;
+    check_bounds(&index, size, true, IndexOp::Index, dim)?;
     let flat = index.detach().reshape(&[index.numel()])?;
     let picked = indexed(input, dim, &flat, IndexMode::Select, "IndexBackward0")?;
     let mut shape = input.shape()[..dim].to_vec();
@@ -370,7 +363,7 @@ pub fn embedding(input: &Tensor, weight: &Tensor, padding_idx: Option<usize>) ->
         return Err(Error::Shape("'weight' must be 2-D".into()));
     }
     let (rows, width) = (weight.shape()[0], weight.shape()[1]);
-    check_bounds(&index, rows, false, |_| Error::Index("index out of range in self".into()))?;
+    check_bounds(&index, rows, false, IndexOp::Embedding, 0)?;
     let flat = index.detach().reshape(&[index.numel()])?;
     let mut out = k::index_gather(weight, 0, &flat, IndexMode::Select)?;
     let w_shape = weight.shape().to_vec();
@@ -477,9 +470,7 @@ fn check_scatter(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Resu
         )));
     }
     let size = dst.shape()[dim];
-    check_bounds(&index, size, false, |v| {
-        Error::Invalid(format!("index {v} is out of bounds for dimension {dim} with size {size}"))
-    })?;
+    check_bounds(&index, size, false, IndexOp::Scatter, dim)?;
     Ok(index.detach())
 }
 
