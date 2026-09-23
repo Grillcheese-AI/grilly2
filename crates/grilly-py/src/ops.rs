@@ -202,6 +202,14 @@ fn matmul(py: Python<'_>, a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
     run(py, move || shape::matmul(&a, &b))
 }
 
+/// `a @ b^T` over the last two dims, without ever building `b^T`.
+/// python/grilly/__init__.py routes `x @ w.t()` here.
+#[pyfunction]
+fn matmul_t(py: Python<'_>, a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
+    let (a, b) = (a.inner.clone(), b.inner.clone());
+    run(py, move || shape::matmul_t(&a, &b))
+}
+
 /// torch's `contiguous()`: the tensor itself, or a real copy of a view copy
 /// (so writes to the result are allowed).
 #[pyfunction]
@@ -582,6 +590,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cat, m)?)?;
     m.add_function(wrap_pyfunction!(stack, m)?)?;
     m.add_function(wrap_pyfunction!(matmul, m)?)?;
+    m.add_function(wrap_pyfunction!(matmul_t, m)?)?;
     m.add_function(wrap_pyfunction!(contiguous, m)?)?;
     m.add_function(wrap_pyfunction!(is_view_copy, m)?)?;
     Ok(())

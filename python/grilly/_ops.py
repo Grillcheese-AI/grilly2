@@ -621,8 +621,18 @@ def _size_list(sizes) -> list:
 
 
 def transpose(input, dim0, dim1) -> Tensor:
+    """``x.transpose(dim0, dim1)``.
+
+    A swap of the last two dims is **deferred**: grilly has no strides, so
+    building it means copying the whole tensor, and the one thing that
+    usually consumes it — a matmul — can read the original in place
+    instead (python/grilly/_transposed.py). Anything else materializes it
+    on first use.
+    """
+    from ._transposed import lazy_transpose
+
     x = _require_tensor("input", input)
-    return _w(_C.transpose(x._t, _dim(dim0, x.dim()), _dim(dim1, x.dim())))
+    return lazy_transpose(x, _dim(dim0, x.dim()), _dim(dim1, x.dim()))
 
 
 swapaxes = swapdims = transpose
@@ -734,7 +744,20 @@ def stack(tensors, dim=0) -> Tensor:
 
 
 def matmul(input, other) -> Tensor:
-    return _w(_C.matmul(_require_tensor("input", input)._t, _require_tensor("other", other)._t))
+    """``input @ other``.
+
+    When ``other`` is a deferred transpose this reads its base with a
+    transpose flag rather than building the copy, which is what torch does
+    by passing one to BLAS. ``x @ w.t()`` is then exactly ``linear(x, w)``.
+    """
+    from ._transposed import transposed_base
+
+    a = _require_tensor("input", input)
+    b = _require_tensor("other", other)
+    base = transposed_base(b)
+    if base is not None and a.dim() >= 1 and base.dim() >= 2:
+        return _w(_C.matmul_t(a._t, base._t))
+    return _w(_C.matmul(a._t, b._t))
 
 
 mm = matmul
