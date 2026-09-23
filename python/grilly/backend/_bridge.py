@@ -7,11 +7,12 @@ names — ``linear``, ``gelu``, ``softmax``, ``layernorm``, ``rope``,
 at the torch name, because providing them again would rebuild the parallel
 framework the rewrite exists to remove (CLAUDE.md §1, §5).
 
-What is here is the part that was never a torch op: the two VSA algebras.
-They keep v1's exact signatures — flat ``(batch, num_blocks * block_size)``
-float32 for the block codes, uint32 words for the packed ones, numpy in and
-numpy out — so a caller that only imports this keeps working, and now runs
-on the GPU.
+What is here is the part that was never a torch op: the VSA algebras —
+sparse block codes, packed bits, bipolar ±1. They keep v1's exact
+signatures, flat ``(batch, num_blocks * block_size)`` float32 for the block
+codes, uint32 words for the packed ones, int8 for the bipolar ones, numpy
+in and numpy out — so a caller that only imports this keeps working, and
+now runs on the GPU.
 
 A capability check like v1's own ``hasattr(_bridge, "blockcode_bind")``
 still answers True, and now it means what it says.
@@ -24,12 +25,14 @@ import numpy as np
 import grilly
 from grilly import vsa
 from grilly._v1 import moved, v1_module_getattr
+from grilly.vsa import bipolar as _bipolar
 from grilly.vsa import packed as _packed
 
 __all__ = [
-    "blockcode_bind", "blockcode_similarity", "blockcode_unbind", "hamming_topk",
-    "hdc_bind_packed", "hdc_bundle_packed", "hdc_permute_packed", "hdc_similarity_packed",
-    "is_available",
+    "blake3_role", "blockcode_bind", "blockcode_similarity", "blockcode_unbind",
+    "hamming_topk", "hdc_bind_packed", "hdc_bundle_packed", "hdc_permute_packed",
+    "hdc_similarity_packed", "is_available", "vsa_bind", "vsa_bitpack",
+    "vsa_bundle", "vsa_unbind",
 ]
 
 
@@ -149,6 +152,67 @@ def hamming_topk(query, cache, dim, k=10):
         "distances": distances.numpy().astype(np.int32),
         "similarities": sims.numpy().astype(np.float32),
     }
+
+
+# ── bipolar hypervectors ─────────────────────────────────────────────────
+#
+# These four returned **None in every case** in v1, and not because a GPU
+# was missing: the Python wrappers passed a device handle that the compiled
+# functions do not take (`_core.vsa_bind(dev, a, b)` against a two-argument
+# binding), and `_core.vsa_unbind` does not exist at all. Every call raised
+# inside the try, was swallowed, and came back None — v1's "declined, fall
+# through" signal, permanently on (CLAUDE.md §8.4).
+#
+# So these now work where they never did, which cannot break a caller: one
+# that handled None still handles a value.
+#
+# The semantics are the compiled ones, checked against v1's extension
+# directly rather than against its Python docstrings, which say "circular
+# convolution" and are wrong: it is an element-wise product on bipolar int8.
+
+
+def _bipolar_in(x):
+    return grilly.from_numpy(np.ascontiguousarray(x, dtype=np.float32))
+
+
+def _bipolar_out(t):
+    return t.numpy().astype(np.int8)
+
+
+def vsa_bind(a, b):
+    """Bipolar binding: element-wise product. int8 out, as v1's C++ gave."""
+    moved("_bridge.vsa_bind", "grilly.vsa.bipolar.bind")
+    return _bipolar_out(_bipolar.bind(_bipolar_in(a), _bipolar_in(b)))
+
+
+def vsa_unbind(composite, key):
+    """Bipolar unbinding, which is binding again."""
+    moved("_bridge.vsa_unbind", "grilly.vsa.bipolar.unbind")
+    return _bipolar_out(_bipolar.unbind(_bipolar_in(composite), _bipolar_in(key)))
+
+
+def vsa_bundle(a, b):
+    """Bipolar bundling: majority vote. v1's Python took two vectors where
+    its C++ took a list; this keeps the Python signature."""
+    moved("_bridge.vsa_bundle", "grilly.vsa.bipolar.bundle")
+    return _bipolar_out(_bipolar.bundle([_bipolar_in(a), _bipolar_in(b)]))
+
+
+def vsa_bitpack(x):
+    """Bipolar int8 to packed uint32 words: ``+1`` sets the bit."""
+    moved("_bridge.vsa_bitpack", "grilly.vsa.bipolar.pack")
+    return _words_out(_bipolar.pack(_bipolar_in(x)))
+
+
+def blake3_role(seed_string, dim):
+    """A deterministic bipolar role vector for a string, int8.
+
+    Byte-for-byte v1's, which was checked against its compiled
+    ``blake3_role`` rather than assumed: the same BLAKE3 stream under the
+    domain ``grilly.cubemind``.
+    """
+    moved("_bridge.blake3_role", "grilly.vsa.bipolar.from_key")
+    return _bipolar.from_key(str(seed_string), int(dim), domain="grilly.cubemind").numpy().astype(np.int8)
 
 
 # ── everything v1 had that the torch API already names ───────────────────

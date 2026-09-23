@@ -52,8 +52,10 @@ tier and get the right numbers. It does.
 | `_bridge.blockcode_bind` / `_unbind` / `_similarity` | `grilly.vsa` | **done.** Bit-exact with v1's shader on one-hot codes, and unlike it, correct for continuous ones too |
 | `_bridge.hdc_*_packed`, `_bridge.hamming_topk` | `grilly.vsa.packed` | **done.** v1's were numpy only ("GPU path not yet wired"); these run on the card |
 | `utils.stable_hash` | `grilly.vsa.hashing` | **done.** Digests match v1's, which they must: they seed hypervectors |
-| `experimental.vsa.ops.BinaryOps` / `HolographicOps`, `_bridge.vsa_*` | `grilly.vsa` (a third algebra: bipolar int8) | to do |
-| `experimental.vsa.resonator.ResonatorNetwork` | `grilly.vsa` | to do |
+| `experimental.vsa.ops.BinaryOps` | `grilly.vsa.bipolar` | **done.** No kernels: a product, a sum, a sign and a dot are ops the framework already had |
+| `experimental.vsa.ops.HolographicOps` | `grilly.vsa.holographic` | **done.** No kernel either — HRR binding is the block-code kernel at `k = 1`. Direct, so O(d²): a clear win below 4096 and a wash at 10240, with the measured table in the module |
+| `_bridge.vsa_bind` / `_unbind` / `_bundle` / `_bitpack`, `_bridge.blake3_role` | `grilly.vsa.bipolar` | **done**, and they work for the first time — v1's wrappers passed a device handle the compiled functions do not take, so every one returned `None` |
+| `experimental.vsa.resonator.ResonatorNetwork` | `grilly.vsa.resonator` | **done**, faithfully, which means it inherits v1's weakness: 2/20 at 32 items a factor. The restart count v1 hard-coded is now a parameter (8/20 at 100 restarts). The published dynamics would fix it and are not implemented |
 | `nn.snn*` (10 modules: neurons, surrogates, synapses, containers, normalization, attention, ann2snn, monitor), `_bridge.lif_step` / `gif_neuron_step` / `snn_node_*` | `grilly.snn` | to do |
 | `_bridge.stdp_learning` / `hebbian_learning` / `oja_learning`, `nn.snn.HebbianLayer` / `STDPLayer` | `grilly.snn` (plasticity) | to do |
 | `functional.cells`, `nn.cells` (`PlaceCell`, `TimeCell`, `ThetaGammaEncoder`) | `grilly.snn` or its own module | to do |
@@ -97,16 +99,17 @@ job.
 VSA is done. The order for what is left follows the consumers above, but
 three of the groups have a real choice in them, and those are for the owner:
 
-1. **The other two VSA algebras** — bipolar int8 (`vsa_bind`, `vsa_bundle`,
-   `vsa_unbind`, `vsa_bitpack`) and the resonator network. Small, and they
-   complete `grilly.vsa`. `blockcode_*` and `vsa_*` are **different
-   algebras** and stay that way (CLAUDE.md §8.3); the only question is
-   whether the bipolar one earns its own kernels or is a thin layer over
-   `grilly.vsa.packed`, which it may well be — bipolar ±1 packed to bits is
-   the same thing wearing a different dtype. That is a measurement, not a
-   judgement call.
+`grilly.vsa` is complete: four algebras — block codes, bipolar,
+packed and holographic — plus the resonator and the deterministic hashing
+that seeds them. The bipolar question ("its own kernels, or a layer over
+packed?") was settled by measurement, and the answer was neither: it needs
+no kernels at all, because multiplication, a sum, a sign and a dot product
+are ops the framework already has. `pack` and `unpack` bridge to the packed
+representation exactly, and the two rank a codebook identically.
 
-2. **SNN** — the largest group by far: 10 `nn.snn*` modules, ~60 classes,
+What is left:
+
+1. **SNN** — the largest group by far: 10 `nn.snn*` modules, ~60 classes,
    plus the plasticity rules and the bridge's neuron steps. It is a
    spiking-neural-network library that happens to sit on a tensor
    framework, and it is the one place where "port it" hides a design
@@ -117,14 +120,13 @@ three of the groups have a real choice in them, and those are for the owner:
    only `grilly-experimental` and `cubemind` do — so it is not urgent, and
    the question is whether it ships at all or waits for a user.
 
-3. **Capsules, CVL, and the learning rules** (EWC / Fisher / natural
+2. **Capsules, CVL, and the learning rules** (EWC / Fisher / natural
    gradient / NLMS / whitening) — each has exactly one consumer, and two of
-   those consumers are repos that are not being touched. The question is
-   whether these are *libraries* (port them, with tests and an API) or
-   *model code that lived in the wrong place* (move them into the repo that
-   uses them, which is `cubbyverse` for CVL and `mowm` for capsules).
-   Getting this wrong in the direction of "port everything" is how v1's
-   surface reached 230 exported symbols.
+   those consumers are repos that are not being touched. **Decided: port
+   them into grilly2**, as libraries with an API and tests, rather than
+   pushing them into the one repo that happens to use each. The risk
+   accepted is surface; the risk avoided is v1's other failure — a general
+   capability reachable only through one consumer's code (CLAUDE.md §11).
 
 The immediate next piece, if the answer is "keep going in consumer order",
 is **cubemind**: 60 imports across 44 files, and the only live consumer

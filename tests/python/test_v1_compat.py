@@ -223,3 +223,116 @@ def test_the_old_hash_path_still_works_and_warns():
         got = stable_hash.stable_u32("cat")
     assert got == hashing.stable_u32("cat")
     assert any("grilly.vsa.hashing" in str(c.message) for c in caught)
+
+
+# ── the bipolar bridge, against v1's compiled extension ──────────────────
+
+
+def v1_extension():
+    """v1's compiled module, if there is a build beside this checkout.
+
+    These functions are host-side, so importing it costs nothing and opens
+    no device. They are the reference because v1's *Python* docstrings are
+    wrong about them — ``vsa_bind`` says "circular convolution" and is an
+    element-wise product.
+    """
+    env = os.environ.get("GRILLY_V1_DIR")
+    root = pathlib.Path(env) if env else pathlib.Path(__file__).resolve().parents[2].parent / "grilly"
+    matches = sorted(root.glob("grilly_core*.pyd")) + sorted(root.glob("grilly_core*.so"))
+    if not matches:
+        pytest.skip("no built v1 extension beside this checkout (set GRILLY_V1_DIR)")
+    # an extension has to be imported under the name its PyInit_ function
+    # carries, which is the file stem up to the first dot
+    name = matches[0].name.split(".")[0]
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, matches[0])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except ImportError as e:                      # a build for another Python
+        del sys.modules[name]
+        pytest.skip(f"v1's extension will not load here: {e}")
+    return module
+
+
+def bipolar_np(n, seed):
+    rng = np.random.default_rng(seed)
+    return (rng.integers(0, 2, size=n) * 2 - 1).astype(np.int8)
+
+
+def test_the_bipolar_bridge_matches_v1s_compiled_semantics():
+    core = v1_extension()
+    from grilly.backend import _bridge
+
+    a, b = bipolar_np(256, 1), bipolar_np(256, 2)
+    with quiet():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        assert (_bridge.vsa_bind(a, b) == core.vsa_bind(a, b)).all()
+        assert (_bridge.vsa_bundle(a, b) == core.vsa_bundle([a, b])).all()
+        assert (_bridge.vsa_bitpack(a) == core.vsa_bitpack(a)).all()
+        assert (_bridge.blake3_role("cat", 256) == core.blake3_role("cat", 256)).all()
+
+
+def test_the_bipolar_bridge_returns_v1s_dtypes():
+    """v1's C++ gave int8 back from bind and bundle, and uint32 from
+    bitpack. A caller that indexes or packs the result depends on it."""
+    from grilly.backend import _bridge
+
+    a, b = bipolar_np(64, 3), bipolar_np(64, 4)
+    with quiet():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        assert _bridge.vsa_bind(a, b).dtype == np.int8
+        assert _bridge.vsa_unbind(_bridge.vsa_bind(a, b), b).dtype == np.int8
+        assert (_bridge.vsa_unbind(_bridge.vsa_bind(a, b), b) == a).all()
+        assert _bridge.vsa_bitpack(a).dtype == np.uint32
+        assert _bridge.blake3_role("cat", 64).dtype == np.int8
+
+
+def test_the_v1_bridge_wrappers_returned_none_for_these():
+    """Not a grilly2 test — a record of why replacing them cannot break a
+    caller. v1's wrappers passed a device handle the compiled functions do
+    not take, and ``vsa_unbind`` was never compiled at all, so every call
+    fell into the except and returned None."""
+    core = v1_extension()
+    a = bipolar_np(32, 5)
+    assert not hasattr(core, "vsa_unbind")
+    for call in (lambda: core.vsa_bind(None, a, a),
+                 lambda: core.vsa_bundle(None, a, a),
+                 lambda: core.vsa_bitpack(None, a)):
+        with pytest.raises(TypeError):
+            call()
+
+
+def test_binary_and_holographic_ops_agree_with_the_new_api():
+    from grilly.experimental.vsa import BinaryOps, HolographicOps
+    from grilly.vsa import bipolar, holographic
+
+    a, b = bipolar_np(256, 6).astype(np.float32), bipolar_np(256, 7).astype(np.float32)
+    with quiet():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        assert (BinaryOps.bind(a, b) == bipolar.bind(grilly.from_numpy(a), grilly.from_numpy(b)).numpy()).all()
+        assert BinaryOps.similarity(a, a) == 1.0
+        h = HolographicOps.random_vector(256, seed=8)
+        assert abs(np.linalg.norm(h) - 1.0) < 1e-5
+        assert (HolographicOps.convolve(h, h)
+                == holographic.bind(grilly.from_numpy(h), grilly.from_numpy(h)).numpy()).all()
+
+
+def test_the_resonator_alias_keeps_v1s_return_order():
+    """v1 returned (estimates, indices, iterations); the new API returns the
+    indices first. The alias must not silently swap them."""
+    from grilly.experimental.vsa import ResonatorNetwork
+
+    rng = np.random.default_rng(9)
+    cbs = {n: np.sign(rng.standard_normal((4, 256))).astype(np.float32) for n in ("a", "b")}
+    composite = (cbs["a"][1] * cbs["b"][2]).astype(np.float32)
+    with quiet():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        estimates, indices, iterations = ResonatorNetwork(cbs).factorize(composite)
+        recovered = ResonatorNetwork(cbs).factorize_partial(composite, {"a": cbs["a"][1]})
+    assert isinstance(estimates, dict) and isinstance(indices, dict)
+    assert set(estimates) == {"a", "b"} and all(isinstance(v, int) for v in indices.values())
+    assert isinstance(iterations, int)
+    assert (recovered == cbs["b"][2]).all(), "unbinding a known factor is exact"

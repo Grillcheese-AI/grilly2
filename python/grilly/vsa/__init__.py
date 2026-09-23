@@ -32,12 +32,11 @@ import builtins as _builtins
 import grilly as _g
 from .. import Tensor, _C, _require_tensor
 
-from . import packed  # noqa: F401  -- the other algebra, deliberately its own namespace
-
 __all__ = [
-    "bind", "bundle", "codebook", "cyclic_shift", "discretize", "from_flat",
-    "packed", "random_continuous", "random_discrete", "similarity",
-    "similarity_batch", "to_flat", "unbind", "zero",
+    "bind", "bipolar", "bundle", "codebook", "cyclic_shift", "discretize",
+    "from_flat", "hashing", "holographic", "packed", "random_continuous",
+    "random_discrete", "resonator", "similarity", "similarity_batch",
+    "to_flat", "unbind", "zero",
 ]
 
 
@@ -190,3 +189,13 @@ def from_flat(v, k: _builtins.int) -> Tensor:
     if width % k:
         raise ValueError(f"from_flat: {width} is not divisible by k = {k}")
     return v.reshape(*v.shape[:-1], k, width // k)
+
+
+# ── the other algebras, each deliberately its own namespace ──────────────
+#
+# Four of them, and they are not four implementations of one thing: block
+# codes (here), bipolar ±1, packed bits, and holographic. They take
+# different dtypes and mean different things by "bind" and by "unrelated".
+# v1 let a capability check for one gate the other (CLAUDE.md §8.3).
+
+from . import bipolar, hashing, holographic, packed, resonator  # noqa: E402,F401

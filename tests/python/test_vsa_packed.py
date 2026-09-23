@@ -125,3 +125,66 @@ def test_the_two_algebras_do_not_accept_each_others_vectors():
         packed.bind(block, block)
     with pytest.raises(Exception):
         vsa.bind(packed.random(256), packed.random(256))
+
+
+# ── bipolar: the same vectors, dense ──────────────────────────────────────
+
+
+def test_bipolar_bind_is_a_product_and_its_own_inverse():
+    from grilly.vsa import bipolar
+
+    g = grilly.Generator().manual_seed(0)
+    a, b = bipolar.random(DIM, generator=g), bipolar.random(DIM, generator=g)
+    assert (bipolar.bind(a, b).numpy() == a.numpy() * b.numpy()).all()
+    assert (bipolar.unbind(bipolar.bind(a, b), b).numpy() == a.numpy()).all()
+    assert bipolar.similarity(a, a) == 1.0
+    assert abs(bipolar.similarity(a, b)) < 0.1, "random bipolar vectors sit near 0, not 0.5"
+
+
+def test_bipolar_and_packed_rank_a_codebook_identically():
+    """The relation that survives the representation change, and the reason
+    a large store can hold bits and still be searched: similarity maps
+    linearly, so the ORDER is the same."""
+    from grilly.vsa import bipolar
+
+    g = grilly.Generator().manual_seed(1)
+    cb = bipolar.random(DIM, generator=g, n=32)
+    query = cb[7]
+    dense = bipolar.similarity_batch(query, cb).numpy()
+    bits = packed.similarity_batch(bipolar.pack(query), bipolar.pack(cb), DIM).numpy()
+    assert np.abs(dense - (2 * bits - 1)).max() < 1e-6
+    assert (np.argsort(-dense) == np.argsort(-bits)).all()
+
+
+def test_packing_round_trips_and_uses_v1s_convention():
+    """``+1`` sets the bit, which is what v1's ``vsa_bitpack`` wrote, so a
+    packed store written by v1 reads back as the same vectors."""
+    from grilly.vsa import bipolar
+
+    g = grilly.Generator().manual_seed(2)
+    x = bipolar.random(DIM, generator=g)
+    bits = packed.to_bits(bipolar.pack(x), DIM)
+    assert (bits == (x.numpy() > 0).astype(np.uint8)).all()
+    assert (bipolar.unpack(bipolar.pack(x), DIM).numpy() == x.numpy()).all()
+
+
+def test_an_unnormalized_bundle_keeps_the_counts():
+    """What the dense representation is for: the packed one cannot hold
+    how many vectors voted each way."""
+    from grilly.vsa import bipolar
+
+    g = grilly.Generator().manual_seed(3)
+    vectors = [bipolar.random(64, generator=g) for _ in range(5)]
+    raw = bipolar.bundle(vectors, normalize=False).numpy()
+    assert set(np.unique(raw)) <= {-5.0, -3.0, -1.0, 1.0, 3.0, 5.0}
+    voted = bipolar.bundle(vectors).numpy()
+    assert (voted == np.where(raw < 0, -1.0, 1.0)).all()
+
+
+def test_from_key_is_deterministic_across_processes():
+    from grilly.vsa import bipolar
+
+    v = bipolar.from_key("cat", 256)
+    assert (v.numpy() == bipolar.from_key("cat", 256).numpy()).all()
+    assert set(np.unique(v.numpy())) <= {-1.0, 1.0}
+    assert bipolar.similarity(v, bipolar.from_key("dog", 256)) < 0.3
