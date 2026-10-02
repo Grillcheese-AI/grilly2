@@ -9,6 +9,8 @@
     SF.reset_net(net)
 
 - :mod:`grilly.snn.neuron` — ``IFNode``, ``LIFNode``, ``ParametricLIFNode``;
+- :mod:`grilly.snn.gated` -- ``GatedLIFCell``, minGRU as a spiking neuron
+  (the leak gated by the input);
 - :mod:`grilly.snn.surrogate` — the gradients that make a spike
   differentiable: ``ATan``, ``Sigmoid``, ``FastSigmoid``;
 - :mod:`grilly.snn.functional` — ``reset_net``, ``set_step_mode``,
@@ -33,9 +35,10 @@ attention variants and the monitors — see ``docs/v1-migration.md``.
 
 from __future__ import annotations
 
-from . import cells, encoding, functional, hippocampus, neuron, plasticity, surrogate  # noqa: F401
+from . import cells, encoding, functional, gated, hippocampus, neuron, plasticity, surrogate  # noqa: F401
 from .cells import place_cell, theta_gamma_encoding, time_cell  # noqa: F401
 from .encoding import continuous_to_spikes, spikes_to_continuous  # noqa: F401
+from .gated import GatedLIFCell  # noqa: F401
 from .functional import multi_step_forward, reset_net, set_step_mode  # noqa: F401
 from .hippocampus import DentateGyrus  # noqa: F401
 from .neuron import BaseNode, IFNode, LIFNode, ParametricLIFNode  # noqa: F401
@@ -43,9 +46,9 @@ from .plasticity import STDPLearner, hebbian_update, oja_update  # noqa: F401
 from .surrogate import ATan, FastSigmoid, Sigmoid  # noqa: F401
 
 __all__ = [
-    "ATan", "BaseNode", "DentateGyrus", "FastSigmoid", "IFNode", "LIFNode",
+    "ATan", "BaseNode", "DentateGyrus", "FastSigmoid", "GatedLIFCell", "IFNode", "LIFNode",
     "ParametricLIFNode", "STDPLearner", "Sigmoid", "cells", "continuous_to_spikes",
-    "encoding", "functional", "hebbian_update", "hippocampus", "multi_step_forward",
+    "encoding", "functional", "gated", "hebbian_update", "hippocampus", "multi_step_forward",
     "neuron", "oja_update", "place_cell", "plasticity", "reset_net",
     "set_step_mode", "spikes_to_continuous", "surrogate", "theta_gamma_encoding",
     "time_cell",

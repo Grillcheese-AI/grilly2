@@ -26,7 +26,12 @@ import builtins as _builtins
 import grilly as _g
 from .. import Tensor, _require_tensor
 from ..nn import Module
+from .gated import GatedLIFCell
 from .neuron import BaseNode
+
+#: everything with a membrane: what reset_net clears, set_step_mode switches,
+#: and seq_to_ann_forward refuses.
+_STATEFUL = (BaseNode, GatedLIFCell)
 
 __all__ = ["multi_step_forward", "reset_net", "seq_to_ann_forward", "set_step_mode"]
 
@@ -35,9 +40,9 @@ def reset_net(net: Module) -> None:
     """Clear the membrane of every spiking neuron in ``net``, recursively."""
     for module in net.modules():
         reset = getattr(module, "reset", None)
-        if module is not net and callable(reset) and isinstance(module, BaseNode):
+        if module is not net and callable(reset) and isinstance(module, _STATEFUL):
             reset()
-    if isinstance(net, BaseNode):
+    if isinstance(net, _STATEFUL):
         net.reset()
 
 
@@ -46,7 +51,7 @@ def set_step_mode(net: Module, step_mode: str) -> None:
     if step_mode not in ("s", "m"):
         raise ValueError(f"step_mode must be 's' or 'm', got {step_mode!r}")
     for module in net.modules():
-        if isinstance(module, BaseNode):
+        if isinstance(module, _STATEFUL):
             module.step_mode = step_mode
 
 
@@ -70,7 +75,7 @@ def seq_to_ann_forward(x_seq, module: Module) -> Tensor:
     x_seq = _require_tensor("x_seq", x_seq)
     if x_seq.dim() < 2:
         raise ValueError(f"a multi-step input is (T, N, ...), got {tuple(x_seq.shape)}")
-    if isinstance(module, BaseNode):
+    if isinstance(module, _STATEFUL):
         raise ValueError(
             "seq_to_ann_forward folds time into the batch, which loses the order the "
             "membrane depends on. Use multi_step_forward, or the neuron's own step_mode='m'."
