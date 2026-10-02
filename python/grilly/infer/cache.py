@@ -21,13 +21,19 @@ length, nothing downstream would notice.
 
 Not v1's cache: that one moves keys and values through host arrays on every
 call and stores them lossily (docs/inference.md).
+
+:class:`PaddedKVCache` is the cache for a batch whose prompts differ in
+length (left-padded) or whose finished rows should be dropped: plain
+tensors, masked reads, and ``select_rows``.
 """
 
 from __future__ import annotations
 
-from .. import Tensor, _C, _require_tensor
+import numpy as np
 
-__all__ = ["KVCache"]
+from .. import Tensor, _C, _require_tensor, arange, tensor, zeros
+
+__all__ = ["KVCache", "PaddedKVCache"]
 
 
 class KVCache:
@@ -82,3 +88,140 @@ class KVCache:
     def nbytes(self) -> int:
         """Device bytes held by the keys and values."""
         return self._c.nbytes
+
+
+class PaddedKVCache:
+    """A cache for a batch of **left-padded** prompts, which can also drop
+    rows as their streams finish.
+
+        cache = PaddedKVCache(num_layers, batch_size, num_kv_heads, head_dim, max_length, keep)
+
+    ``keep`` is the prompt's ``attention_mask``, ``(batch, prompt_length)``:
+    0 on each row's left padding, 1 on its tokens (transformers'
+    convention). Every row is written at the same positions, so a row with
+    ``p`` pads holds its tokens at ``p, p+1, ...`` rather than ``0, 1, ...``.
+    That shift changes no attention score, because a rotary embedding's
+    ``q . k`` depends only on the distance between the two positions; with
+    the padding masked out of every key read, each row attends exactly as
+    it would alone (up to rounding).
+
+    What :class:`KVCache` cannot do and this can:
+
+    - mask each row's padding (``prompt_mask``, ``decode_mask``,
+      ``pad_columns``);
+    - **drop rows** (``select_rows``), so a batch stops paying for streams
+      that have finished. The C++ cache has one fixed batch.
+
+    It is plain grilly tensors, written in place with ``index_copy_``, so a
+    decode step costs a masked attention per layer where the C++ cache
+    costs one dispatch, and it is not built for capture. ``generate`` uses
+    it only for batches that need it.
+    """
+
+    #: what the attention layers check to take the masked path
+    padded = True
+
+    def __init__(self, num_layers: int, batch_size: int, num_kv_heads: int, head_dim: int, max_length: int,
+                 keep) -> None:
+        keep = np.asarray(keep)
+        if keep.ndim != 2 or keep.shape[0] != batch_size or keep.shape[1] > max_length:
+            raise ValueError(f"keep must be (batch_size={batch_size}, prompt_length <= {max_length}), "
+                             f"got {keep.shape}")
+        self._keep = np.ones((batch_size, max_length), dtype=bool)
+        self._keep[:, :keep.shape[1]] = keep != 0
+        shape = (batch_size, num_kv_heads, max_length, head_dim)
+        self.keys = [zeros(shape) for _ in range(num_layers)]
+        self.values = [zeros(shape) for _ in range(num_layers)]
+        self._len = [0] * num_layers
+        self._max_len = int(max_length)
+        self._masks: dict = {}  # kind -> (argument, tensor): the layers of one step share one mask
+
+    def append(self, layer: int, keys, values) -> None:
+        """Write ``(batch, kv_heads, T, head_dim)`` keys and values at the
+        layer's next ``T`` positions, in place."""
+        keys, values = _require_tensor("keys", keys), _require_tensor("values", values)
+        start, t = self._len[layer], keys.shape[2]
+        if start + t > self._max_len:
+            raise RuntimeError(f"the cache holds {self._max_len} positions; {start} are filled and {t} more came")
+        where = arange(start, start + t)
+        self.keys[layer].index_copy_(2, where, keys.contiguous())
+        self.values[layer].index_copy_(2, where, values.contiguous())
+        self._len[layer] = start + t
+
+    def layer(self, layer: int) -> tuple:
+        """The layer's whole ``(batch, kv_heads, max_length, head_dim)``
+        key and value buffers, filled or not; ``decode_mask`` says which
+        positions to read."""
+        return self.keys[layer], self.values[layer]
+
+    def _mask(self, kind: str, arg, build) -> Tensor:
+        held = self._masks.get(kind)
+        if held is None or held[0] != arg:
+            held = self._masks[kind] = (arg, build())
+        return held[1]
+
+    def prompt_mask(self, length: int) -> Tensor:
+        """``(batch, 1, 1, length)`` bool: the prompt keys each row may read,
+        which is its tokens and not its padding. Attention adds the causal
+        triangle (``is_causal=True``)."""
+        return self._mask("prompt", length, lambda: tensor(np.ascontiguousarray(self._keep[:, None, None, :length])))
+
+    def decode_mask(self, layer: int) -> Tensor:
+        """``(batch, 1, 1, max_length)`` bool: the layer's filled positions,
+        minus each row's padding. One mask serves every layer of a step."""
+        n = self._len[layer]
+
+        def build():
+            m = self._keep.copy()
+            m[:, n:] = False
+            return tensor(np.ascontiguousarray(m[:, None, None, :]))
+
+        return self._mask("decode", n, build)
+
+    def pad_columns(self, length: int):
+        """``(batch, 1, length)`` float32, 0 on padding and 1 elsewhere, for
+        a layer that mixes positions without attention (LFM2's short
+        convolution) to zero its padding with. None when none of the first
+        ``length`` positions is padding."""
+        part = self._keep[:, :length]
+        if part.all():
+            return None
+        return self._mask("columns", length, lambda: tensor(np.ascontiguousarray(part[:, None, :], dtype=np.float32)))
+
+    def select_rows(self, index) -> None:
+        """Keep only batch rows ``index`` (an int64 tensor), in that order.
+        The buffers are reallocated at the smaller batch, so the dropped
+        rows' memory is freed."""
+        index = _require_tensor("index", index)
+        rows = index.tolist()
+        self.keys = [k.index_select(0, index) for k in self.keys]
+        self.values = [v.index_select(0, index) for v in self.values]
+        self._keep = self._keep[rows]
+        self._masks.clear()
+
+    def get_seq_length(self, layer: int = 0) -> int:
+        """Positions filled in ``layer``, padding included."""
+        return self._len[layer]
+
+    def reset(self) -> None:
+        """Forget every position; the buffers stay allocated. The padding
+        stays as given."""
+        self._len = [0] * len(self._len)
+        self._masks.clear()
+
+    @property
+    def batch_size(self) -> int:
+        return self._keep.shape[0]
+
+    @property
+    def num_layers(self) -> int:
+        return len(self.keys)
+
+    @property
+    def max_length(self) -> int:
+        return self._max_len
+
+    @property
+    def nbytes(self) -> int:
+        """Device bytes held by the keys and values."""
+        return sum(4 * k.numel() for k in self.keys + self.values)

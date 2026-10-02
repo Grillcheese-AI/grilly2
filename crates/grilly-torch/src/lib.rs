@@ -194,15 +194,24 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<
             }
         } else {
             let out = Tensor::empty(input.device(), &out_shape)?;
+            let group_count = rows;
             let (rows, k, n) = (u32_dim(rows, "rows")?, u32_dim(in_features, "in_features")?, u32_dim(out_features, "out_features")?);
             // With no bias the shader never reads binding 2; bind the weight there.
             let bias_arg = Arg::Tensor(bias.unwrap_or(weight));
-            kernels::LINEAR.launch(
-                input.device(),
-                &[Arg::Tensor(input), Arg::Tensor(weight), bias_arg, Arg::Tensor(&out)],
-                [n, rows, 1],
-                &[rows, k, n, bias.is_some() as u32],
-            )?;
+            let args = [Arg::Tensor(input), Arg::Tensor(weight), bias_arg, Arg::Tensor(&out)];
+            let push = [rows, k, n, bias.is_some() as u32];
+            if group_count <= kernels::GEMV_MAX_ROWS {
+                // Few rows: the tiled kernel would leave most of every tile
+                // empty. One workgroup per output feature instead, which is
+                // 2-D because a vocabulary-sized `out` passes the 65535
+                // workgroups a dimension allows.
+                let groups = out_features;
+                let gx = groups.min(65_535);
+                let threads = [u32_dim(gx * 64, "workgroups")?, u32_dim(groups.div_ceil(gx), "workgroups")?, 1];
+                kernels::GEMV.launch(input.device(), &args, threads, &push)?;
+            } else {
+                kernels::LINEAR.launch(input.device(), &args, [n, rows, 1], &push)?;
+            }
             out
         }
     };

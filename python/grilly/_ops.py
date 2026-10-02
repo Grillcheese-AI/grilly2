@@ -163,14 +163,90 @@ def mul(input, other) -> Tensor:
 
 
 def _int_division(input, other, op, name) -> Tensor:
-    """Exact integer floor/trunc division or remainder (torch's semantics);
-    float operands are not implemented yet."""
+    """Integer floor/trunc division or remainder, exact, with torch's signs.
+
+    Float operands take the composed route below: the integer kernels
+    divide integers, and a float `%` is not a different rounding rule but
+    the same formula over a different dtype.
+    """
     rt = result_type(input, other)
     if rt is None:
         raise TypeError("expected at least one Tensor operand")
     if _is_float(rt):
-        raise _not_yet(f"{name} of floating-point tensors")
+        return _float_division(input, other, op, name)
     return _arith(input, other, None, op)
+
+
+def _float_division(input, other, op, name) -> Tensor:
+    """``floor_divide``/``trunc_divide``/``remainder``/``fmod`` on floats.
+
+    Composed from divide-and-round rather than given a kernel, because a
+    float ``%`` is rare enough that a handful of dispatches is cheaper
+    than a shader to maintain. The one use that matters — a ring-buffer
+    slot, ``pos % window``, kept in a float32 counter so a decode step can
+    be captured — is a scalar.
+
+    **The correction is not optional.** ``input - floor(input / other) *
+    other`` is the formula torch documents, and on its own it is wrong:
+    the divide rounds, so ``floor`` can come out one too high or one too
+    low, and the remainder then falls outside ``[0, other)`` — measured
+    disagreeing with torch at operands as small as 2**12 against 3, and
+    with a *negative* result, which is not a rounding difference but a
+    wrong answer. So the quotient's off-by-one is repaired explicitly:
+    a remainder whose sign disagrees with the divisor gains one divisor,
+    and one that reaches the divisor's magnitude loses one. Both repairs
+    are exact (Sterbenz), and they are the same two lines torch's own
+    remainder applies on top of an exact ``fmod``.
+
+    What remains is the composition's real limit: ``floor(input/other) *
+    other`` loses low bits once that product passes the mantissa, and no
+    repair recovers them. Measured against torch over 8192 random values
+    per decade: **bit-exact while the dividend is within 2**24**, which
+    is the regime a float32 position counter lives in, and bit-exact all
+    the way to 2**39 when the divisor is a power of two, because then the
+    product is exact whatever the quotient. Outside that it is wrong
+    rather than imprecise — 2 at a dividend of 2**25 against 3, growing
+    with the dividend. ``tests/python/test_float_mod.py`` holds the
+    measurement.
+    """
+    q = div(input, other)
+    if op == "floor_divide":
+        return floor(q)
+    if op == "trunc_divide":
+        return trunc(q)
+    if op == "fmod":
+        # fmod takes the dividend's sign, remainder the divisor's, so one
+        # implementation serves both: give remainder a divisor already
+        # signed like the dividend.
+        mag = _magnitude(other)
+        signed = where(_is_negative(input), neg(mag) if isinstance(mag, Tensor) else -mag, mag)
+        return _float_division(input, signed, "remainder", name)
+    r = sub(input, mul(floor(q), other))
+    wrong_sign = logical_and(ne(r, 0.0), _sign_differs(r, other))
+    r = where(wrong_sign, add(r, other), r)
+    return where(ge(abs(r), _magnitude(other)), sub(r, other), r)
+
+
+def _magnitude(x):
+    """``abs`` over a tensor or a number, staying whichever it was."""
+    return abs(x) if isinstance(x, Tensor) else builtins.abs(x)
+
+
+def _is_negative(x):
+    """``x < 0`` as a tensor, or as a Python bool for a number."""
+    return lt(x, 0.0) if isinstance(x, Tensor) else x < 0
+
+
+def _sign_differs(a, b) -> Tensor:
+    """``(a < 0) != (b < 0)``, with either side allowed to be a number."""
+    a_neg, b_neg = _is_negative(a), _is_negative(b)
+    if isinstance(a_neg, bool):
+        a_neg, b_neg = b_neg, a_neg
+    if b_neg is True:
+        return logical_not(a_neg)
+    if b_neg is False:
+        return a_neg
+    return logical_xor(a_neg, b_neg)
 
 
 def floor_divide(input, other) -> Tensor:
@@ -181,6 +257,17 @@ def remainder(input, other) -> Tensor:
     """``input - floor(input / other) * other``: the result takes the
     divisor's sign, as Python's ``%`` does."""
     return _int_division(input, other, "remainder", "remainder")
+
+
+def fmod(input, other) -> Tensor:
+    """``input - trunc(input / other) * other``: the result takes the
+    *dividend's* sign, as C's ``fmod`` does. The difference from
+    :func:`remainder` shows only when the operands' signs disagree."""
+    if _is_float(result_type(input, other) or _dt()[3]):
+        return _float_division(input, other, "fmod", "fmod")
+    # integers have a truncating-divide kernel but no truncating remainder,
+    # and the identity is exact over integers, so compose it
+    return sub(input, mul(_int_division(input, other, "trunc_divide", "fmod"), other))
 
 
 def _rounded(input, op) -> Tensor:
@@ -908,14 +995,17 @@ def _expand_index(x: Tensor, dim: int, index: Tensor, source: Tensor, name: str)
 def index_copy_(input, dim, index, source) -> Tensor:
     """``self[index[i], ...] = source[i, ...]`` along ``dim``, in place.
 
-    A ring buffer's write. Stays on the device and inside a capture: the
-    index is expanded and handed to ``scatter_``, which validates its
-    bounds on the device (``grilly_core::fault``).
+    A ring buffer's write. Stays on the device and inside a capture, and
+    is **one dispatch**: the kernel reads the 1-D index by the ``dim``
+    coordinate rather than being handed a broadcast of it, which used to
+    cost a reshape and an expand first. Bounds are validated on the device
+    (``grilly_core::fault``).
     """
     x = _require_tensor("input", input)
     i, src = _require_tensor("index", index), _require_tensor("source", source)
     d = _dim(dim, x.dim())
-    return x.scatter_(d, _expand_index(x, d, i, src, "index_copy_"), src)
+    x._t = _C.index_copy_(x._t, d, i._t, src._t)
+    return x
 
 
 def index_add_(input, dim, index, source, *, alpha=1) -> Tensor:
@@ -1153,7 +1243,7 @@ def _install() -> None:
                  "sin", "cos", "add", "sub", "mul", "div", "pow", "neg", "abs", "sign", "exp", "log",
                  "sqrt", "rsqrt", "tanh", "sigmoid", "square", "clamp", "clip", "clamp_min",
                  "clamp_max", "sum", "mean", "amax", "amin", "max", "min", "argmax", "argmin", "sort",
-                 "argsort", "topk", "cumsum", "logcumsumexp", "scatter", "floor_divide", "remainder",
+                 "argsort", "topk", "cumsum", "logcumsumexp", "scatter", "floor_divide", "remainder", "fmod",
                  "floor", "ceil", "trunc", "round", "softmax",
                  "log_softmax", "transpose", "swapaxes", "t", "permute", "unsqueeze",
                  "squeeze", "flatten", "expand", "narrow", "select", "chunk", "split",
@@ -1161,6 +1251,7 @@ def _install() -> None:
                  "multiply", "subtract", "negative", "divide"):
         setattr(T, name, globals()[name])
     T.scatter_ = _scatter_
+    T.fmod = fmod
     T.__mod__ = remainder
     T.__rmod__ = lambda self, other: remainder(other, self)
     T.__floordiv__ = floor_divide

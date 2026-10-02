@@ -1,104 +1,89 @@
-//! Builds v1's `grilly_core_lib` with its own CMake project, compiles the
-//! extern "C" shim against v1's headers, and links both.
+//! Compiles grilly2's Vulkan layer and the `extern "C"` shim over it, and
+//! links them against Vulkan and shaderc. No CMake, no second project, no
+//! grilly v1.
 //!
-//! Locating v1 (first match wins):
-//!   1. `GRILLY_V1_DIR` — path to a grilly v1 checkout;
-//!   2. a `grilly` checkout beside this repository.
+//! `vulkan/` holds the device, buffer pool, pipeline cache and command
+//! batch — the four classes the shim names, brought over from v1 when the
+//! link to it was cut. They depend on nothing but `<vulkan/vulkan.h>`,
+//! VulkanMemoryAllocator and the standard library.
 //!
-//! `GRILLY_CORE_LIB_DIR` points at a directory holding an already-built
-//! `grilly_core_lib` and skips the CMake build. `VULKAN_SDK` must be set.
+//! Two things have to be found:
+//!   - `VULKAN_SDK` — the LunarG SDK, for the headers, `vulkan-1` and
+//!     `shaderc_combined` (the shader JIT behind `gc_compile_shader`);
+//!   - VulkanMemoryAllocator's single header, from `VMA_INCLUDE_DIR` if
+//!     set, otherwise the submodule under `third_party/`.
 
 use std::env;
 use std::path::{Path, PathBuf};
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let v1 = locate_v1(&manifest);
     let sdk = PathBuf::from(
         env::var("VULKAN_SDK").expect("VULKAN_SDK must point at the LunarG Vulkan SDK"),
     );
+    let vma = locate_vma(&manifest);
 
-    for var in ["GRILLY_V1_DIR", "GRILLY_CORE_LIB_DIR", "VULKAN_SDK", "CMAKE_GENERATOR"] {
+    for var in ["VULKAN_SDK", "VMA_INCLUDE_DIR"] {
         println!("cargo:rerun-if-env-changed={var}");
     }
     println!("cargo:rerun-if-changed=shim");
-    println!("cargo:rerun-if-changed={}", v1.join("cpp").display());
-    println!("cargo:rerun-if-changed={}", v1.join("CMakeLists.txt").display());
+    println!("cargo:rerun-if-changed=vulkan");
 
-    let lib_dir = match env::var("GRILLY_CORE_LIB_DIR") {
-        Ok(dir) => PathBuf::from(dir),
-        Err(_) => build_v1(&v1),
-    };
-
+    let vulkan = manifest.join("vulkan");
     cc::Build::new()
         .cpp(true)
         .std("c++17")
         .file(manifest.join("shim/gc_shim.cpp"))
+        .file(vulkan.join("device.cpp"))
+        .file(vulkan.join("buffer_pool.cpp"))
+        .file(vulkan.join("pipeline_cache.cpp"))
+        .file(vulkan.join("command_batch.cpp"))
         .include(manifest.join("shim"))
-        .include(v1.join("cpp/include"))
-        .include(v1.join("third_party/VulkanMemoryAllocator/include"))
+        .include(vulkan.join("include"))
+        .include(&vma)
         .include(sdk.join("Include"))
+        // the shim catches the Vulkan layer's exceptions, so unwinding has
+        // to be on; MSVC defaults it off for C++ without this
         .flag_if_supported("/EHsc")
-        .compile("gc_shim");
+        .compile("grilly_vulkan");
 
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=static=grilly_core_lib");
     println!("cargo:rustc-link-search=native={}", sdk.join("Lib").display());
     println!("cargo:rustc-link-lib=dylib=vulkan-1");
-    // shaderc, for gc_compile_shader (the same library v1 links for its JIT
-    // shader fusion; it ships with the Vulkan SDK)
     println!("cargo:rustc-link-lib=static=shaderc_combined");
-
-    // Exposed to dependents as DEP_GRILLY_CORE_V1_DIR, so tests and tools can
-    // find v1's compiled shaders without a hard-coded path.
-    println!("cargo:v1_dir={}", v1.display());
-    println!("cargo:rustc-env=GRILLY_SYS_V1_DIR={}", v1.display());
 }
 
-fn locate_v1(manifest: &Path) -> PathBuf {
-    let candidate = match env::var("GRILLY_V1_DIR") {
+/// VulkanMemoryAllocator's include directory.
+///
+/// The submodule is the default so a `--recursive` clone builds with
+/// nothing installed; `VMA_INCLUDE_DIR` overrides it for a distribution
+/// that already ships the header.
+fn locate_vma(manifest: &Path) -> PathBuf {
+    let candidate = match env::var("VMA_INCLUDE_DIR") {
         Ok(dir) => PathBuf::from(dir),
-        // crates/grilly-sys -> repo root -> its parent
-        Err(_) => manifest.join("../../../grilly"),
+        Err(_) => manifest.join("third_party/VulkanMemoryAllocator/include"),
     };
-    let marker = candidate.join("cpp/include/grilly/vulkan/vk_device.h");
-    if !marker.exists() {
+    if !candidate.join("vk_mem_alloc.h").exists() {
         panic!(
-            "grilly v1 checkout not found at {} — set GRILLY_V1_DIR",
+            "vk_mem_alloc.h not found in {} — run\n    \
+             git submodule update --init --recursive\n\
+             or point VMA_INCLUDE_DIR at a VulkanMemoryAllocator include directory",
             candidate.display()
         );
     }
-    // canonicalize() yields a `\\?\` verbatim path on Windows, which cl.exe
-    // rejects as an include directory.
-    let canonical = candidate.canonicalize().unwrap();
-    match canonical.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
-        Some(plain) => PathBuf::from(plain),
-        None => canonical,
-    }
+    plain(candidate)
 }
 
-fn build_v1(v1: &Path) -> PathBuf {
-    // Always Release: a Debug build would link the debug CRT, which Rust's
-    // MSVC target does not use. No injected flags: v1 is built exactly as its
-    // own CMake project builds it (on MSVC that keeps /EHsc, which the shim
-    // relies on to catch v1's exceptions). The generator follows the standard
-    // CMAKE_GENERATOR variable when set.
-    let mut cfg = cmake::Config::new(v1);
-    cfg.no_default_flags(true)
-        .profile("Release")
-        .build_target("grilly_core_lib");
-    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
-        // The cmake crate still passes CMAKE_CXX_FLAGS, which replaces MSVC's
-        // defaults; restore them (the values v1's own configure produces).
-        cfg.define("CMAKE_CXX_FLAGS", "/DWIN32 /D_WINDOWS /EHsc")
-            .define("CMAKE_C_FLAGS", "/DWIN32 /D_WINDOWS");
+/// A path MSVC will accept as an include directory.
+///
+/// `canonicalize()` yields a `\\?\` verbatim path on Windows, which
+/// `cl.exe` rejects.
+fn plain(path: PathBuf) -> PathBuf {
+    let canonical = match path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return path,
+    };
+    match canonical.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(p) => PathBuf::from(p),
+        None => canonical,
     }
-    let dst = cfg.build();
-    let build = dst.join("build");
-    for dir in [build.join("Release"), build.clone()] {
-        if dir.join("grilly_core_lib.lib").exists() || dir.join("libgrilly_core_lib.a").exists() {
-            return dir;
-        }
-    }
-    panic!("grilly_core_lib not found under {}", build.display());
 }

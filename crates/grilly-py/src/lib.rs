@@ -85,6 +85,29 @@ impl PyTensor {
         py.detach(|| Tensor::full_typed(&dev, &shape, value, dtype)).map(wrap).map_err(err)
     }
 
+    /// `start + i * step` for `n` elements, on the device.
+    ///
+    /// Whole-number bounds take the integer path, so an int64 sequence is
+    /// exact over the whole range; anything else is computed in float32.
+    /// Either way nothing is uploaded, which is what lets a mask built
+    /// with `arange` sit inside a captured step.
+    #[staticmethod]
+    #[pyo3(signature = (n, start, step, dtype=0, integral=true))]
+    fn arange(py: Python<'_>, n: usize, start: f64, step: f64, dtype: u32, integral: bool)
+        -> PyResult<PyTensor> {
+        let (dev, dtype) = (device()?, DType::from_code(dtype).map_err(err)?);
+        py.detach(move || {
+            if integral {
+                grilly_core::generic::arange(&dev, n, start as i64, step as i64, dtype)
+            } else {
+                let t = grilly_core::generic::arange_f32(&dev, n, start as f32, step as f32)?;
+                if dtype == DType::F32 { Ok(t) } else { t.cast(dtype) }
+            }
+        })
+        .map(wrap)
+        .map_err(err)
+    }
+
     /// The DType code.
     #[getter]
     fn dtype(&self) -> u32 {

@@ -110,9 +110,21 @@ pub struct Device {
 }
 
 impl Device {
-    /// Open the GPU and register the SPIR-V kernels in `shader_dir`. grilly2's
-    /// own kernels (the `g2-*` generics) are registered too.
-    pub fn open(shader_dir: impl Into<PathBuf>) -> Result<Device> {
+    /// Open the GPU and register grilly2's kernels.
+    pub fn open() -> Result<Device> {
+        Device::open_inner(None)
+    }
+
+    /// Open the GPU, registering `extra` after grilly2's own kernels.
+    ///
+    /// A later name replaces an earlier one, so this both adds kernels and
+    /// overrides them — which is what `GRILLY_SHADER_DIR` is for when a
+    /// kernel is being worked on without a rebuild.
+    pub fn open_with(extra: impl Into<PathBuf>) -> Result<Device> {
+        Device::open_inner(Some(extra.into()))
+    }
+
+    fn open_inner(extra: Option<PathBuf>) -> Result<Device> {
         let mut ctx = ptr::null_mut();
         check(unsafe { sys::gc_create(&mut ctx) })?;
 
@@ -137,8 +149,10 @@ impl Device {
         let device = Device { inner: Arc::new(inner) };
         check(caps_rc)?;
 
-        device.load_kernels(shader_dir.into())?;
         device.load_kernels(PathBuf::from(env!("GRILLY_CORE_SPV_DIR")))?;
+        if let Some(dir) = extra {
+            device.load_kernels(dir)?;
+        }
         Ok(device)
     }
 
@@ -184,16 +198,16 @@ impl Device {
 
     /// The process-wide default device, opened on first use.
     ///
-    /// Kernels are read from `GRILLY_SHADER_DIR` if set, otherwise from the
-    /// `shaders/spv` directory of the v1 checkout grilly was built against.
+    /// Every kernel it needs is grilly2's own, compiled from
+    /// `crates/grilly-core/shaders` at build time. `GRILLY_SHADER_DIR` adds
+    /// a directory on top, which is how a kernel gets replaced without a
+    /// rebuild.
     pub fn default_device() -> Result<Device> {
         static DEFAULT: OnceLock<std::result::Result<Device, Error>> = OnceLock::new();
         DEFAULT
-            .get_or_init(|| {
-                let dir = std::env::var_os("GRILLY_SHADER_DIR")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from(sys::V1_DIR).join("shaders").join("spv"));
-                Device::open(dir)
+            .get_or_init(|| match std::env::var_os("GRILLY_SHADER_DIR") {
+                Some(dir) => Device::open_with(PathBuf::from(dir)),
+                None => Device::open(),
             })
             .clone()
     }

@@ -153,11 +153,10 @@ impl Tensor {
             let word = u32::from_le_bytes(pattern.try_into().unwrap());
             return self.device().record_fill(&self.storage, self.byte_offset(), self.byte_len(), word);
         }
-        // A multi-word element: broadcast one stored element with a strided copy.
-        let one = Tensor::from_bytes(self.device(), &pattern, &[], self.dtype)?;
-        let zero_strides = vec![0; self.dim()];
-        let strides = crate::generic::contiguous_strides(&self.shape);
-        crate::generic::copy_strided(&one, 0, &zero_strides, self, self.offset, &strides, &self.shape)
+        // A multi-word element — int64. Filling it by uploading one and
+        // broadcasting would be a host write, which a capture refuses, so
+        // it goes through the sequence kernel with a zero step instead.
+        crate::generic::fill_int(self, value as i64)
     }
 
     /// A copy of the data in new storage (torch's `clone()`); differentiable.

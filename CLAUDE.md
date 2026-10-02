@@ -47,14 +47,35 @@ comparison with torch.
 
 ## 3. Kept, and rewritten
 
-**Kept, linked, not reimplemented:**
+**Superseded in part (owner, 2026-09-23): grilly2 no longer links grilly v1.**
+This section's plan — link `grilly_core_lib`, use v1's SPIR-V — is what the
+first six weeks were built on, and it worked; the paragraphs below stand as
+the reasoning, not as instructions. What ended it was a measurement: the
+shim only ever named four of v1's classes and grilly2 only ever dispatched
+six of its 273 shaders, so "depends on v1" was 2,629 lines of C++ and 277
+of GLSL. Those are grilly2's own now, in `crates/grilly-sys/vulkan/` and
+`crates/grilly-core/shaders/`, built by `cc` and `glslc` with no CMake and
+no second checkout. `docs/boundary.md` has the full accounting.
 
-- the C++ Vulkan implementation in v1's `cpp/` — `CMakeLists.txt` already builds
-  **`grilly_core_lib` as a STATIC library** separate from the Python module, so a
-  second consumer links it with no restructuring;
-- the **273 compiled SPIR-V modules**. SPIR-V is toolchain-independent. Do not
-  recompile or port shaders;
-- v1's `cpp/python/` binding layer as an **inventory and a seam map** (§4).
+Two rules from this section therefore change and the rest do not:
+
+- **"Do not recompile or port shaders"** applied while v1 supplied them. The
+  six grilly2 uses are compiled from their GLSL like every other `g2-*`
+  kernel; the other 267 were never used and are not coming over.
+- **"This decision reverses if the C++ Vulkan layer does not stay frozen"**
+  is moot rather than answered. The layer is grilly2's, so an edit costs a
+  `cargo build` rather than a trip across a boundary, and the friction
+  argument for C++ no longer applies. Rust stands for the reasons below.
+
+Still true: **v1 is never modified**, and v1's `cpp/python/` binding layer
+remains an inventory and a seam map (§4).
+
+**What was kept, and is now grilly2's:**
+
+- the Vulkan device, buffer pool, pipeline cache and command batch —
+  `crates/grilly-sys/vulkan/`, 2,629 lines, compiled beside the shim;
+- six kernels, as `g2-relu`, `g2-relu-backward`, `g2-add-inplace`,
+  `g2-linear`, `g2-linear-backward`, `g2-residual`.
 
 **Rewritten here:** the framework layer above the GPU code — tensor, autograd,
 dispatch orchestration, `nn`, `optim`, and the torch-compatible surface. In v1
@@ -85,6 +106,10 @@ every change crosses the boundary twice and C++ wins on friction alone.
 
 **Do not vendor dependencies into this repo.** v1 carries ~8M lines under
 `external/` and `third_party/`. That is a large part of what made it unusable.
+The Vulkan layer's one external dependency, VulkanMemoryAllocator, is a
+**submodule** (`crates/grilly-sys/third_party/`, pinned to a release tag) or
+`VMA_INCLUDE_DIR` — not a copied header. Bringing grilly2's own Vulkan code
+in-tree is not vendoring; it is owning it.
 
 ## 4. The module split — the seams already exist
 

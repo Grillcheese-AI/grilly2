@@ -161,13 +161,84 @@ def test_integer_division_matches_torch(op, dtype):
 
 
 def test_integer_division_by_zero_raises_like_torch():
+    """Same error, but grilly's arrives at the next host read.
+
+    The divisor is checked on the device and the fault recorded, because
+    downloading it to look was a host read — and a host read cannot be
+    captured, which put ``cursor % window`` outside every recorded decode
+    step. Same bargain the index bounds checks make; see
+    ``tests/python/test_capture_index.py``."""
+    with pytest.raises(RuntimeError, match="ZeroDivisionError"):
+        torch.tensor([1, 2]) % torch.tensor([1, 0])
+    with pytest.raises(RuntimeError, match="ZeroDivisionError"):
+        torch.tensor([1, 2]) // 0
+    for bad in (lambda: grilly.tensor([1, 2]) % grilly.tensor([1, 0]),
+                lambda: grilly.tensor([1, 2]) // 0):
+        with pytest.raises(RuntimeError, match="ZeroDivisionError"):
+            bad()
+            grilly._C.synchronize()
+    grilly._C.synchronize()          # the record is clear again
+
+
+def test_float_division_by_zero_gives_torchs_nan_rather_than_raising():
+    """Floats do not raise where integers do — the same split torch has,
+    and the reason the two dtypes take different routes. See
+    tests/python/test_float_mod.py for the float side."""
     for lib in (torch, grilly):
-        with pytest.raises(RuntimeError, match="ZeroDivisionError"):
-            lib.tensor([1, 2]) % lib.tensor([1, 0])
-        with pytest.raises(RuntimeError, match="ZeroDivisionError"):
-            lib.tensor([1, 2]) // 0
+        got = (lib.tensor([1.5, -1.5]) % 0.0).numpy()
+        assert np.isnan(got).all()
+    grilly._C.synchronize()          # no integer fault was armed by that
 
 
-def test_float_floor_division_is_not_implemented_yet():
-    with pytest.raises(NotImplementedError):
-        grilly.tensor([1.5]) % 1.0
+# ── reductions over a long axis ──────────────────────────────────────────
+#
+# Reference: torch (case (b)), but integer reductions are exact on both
+# sides, so the bound is 0.0.
+#
+# These lengths are the point. `reduce_int` gave each output one GPU
+# invocation, which is a single serial thread when there is one long row:
+# `any()` over 127996 elements took **7.8 ms**, against 0.016 ms for the
+# same-length float `sum()`. It now splits the row across a workgroup the
+# way the float path does — 0.032 ms, a 244x difference — and this is the
+# correctness half of that change.
+
+
+@pytest.mark.parametrize("n", [1, 255, 256, 257, 4096, 127996, 300_000])
+def test_a_long_bool_row_reduces_like_torch(n):
+    rng = np.random.default_rng(n)
+    a = rng.random(n) > 0.5
+    a[n // 2] = True                       # make sure any/all disagree somewhere
+    g, t = grilly.from_numpy(a.copy()), torch.from_numpy(a.copy())
+    assert bool(g.any().numpy()) == bool(t.any())
+    assert bool(g.all().numpy()) == bool(t.all())
+
+
+@pytest.mark.parametrize("op", ["sum", "amax", "amin"])
+@pytest.mark.parametrize("n", [257, 4096, 127996])
+def test_a_long_int_row_reduces_like_torch(op, n):
+    a = np.random.default_rng(n).integers(-10_000, 10_000, n).astype(np.int64)
+    g, t = grilly.from_numpy(a.copy()), torch.from_numpy(a.copy())
+    assert int(getattr(grilly, op)(g).numpy()) == int(getattr(torch, op)(t))
+
+
+@pytest.mark.parametrize("dim", [0, 1, 2])
+def test_the_split_reduction_still_reduces_the_right_axis(dim):
+    """The fast path only applies when the reduced axis is last, so the
+    other axes have to keep going through the general kernel."""
+    a = np.random.default_rng(7).integers(-99, 99, (3, 5, 4097)).astype(np.int64)
+    g, t = grilly.from_numpy(a.copy()), torch.from_numpy(a.copy())
+    for keepdim in (False, True):
+        assert (grilly.sum(g, dim=dim, keepdim=keepdim).numpy()
+                == torch.sum(t, dim=dim, keepdim=keepdim).numpy()).all()
+        assert (grilly.amax(g, dim=dim, keepdim=keepdim).numpy()
+                == torch.amax(t, dim=dim, keepdim=keepdim).numpy()).all()
+
+
+def test_an_all_false_mask_still_says_false_over_a_long_row():
+    """The identity the split reduction folds in has to be the neutral one
+    for the op, and an all-false row is where a wrong one shows."""
+    n = 127996
+    g = grilly.from_numpy(np.zeros(n, dtype=bool))
+    assert not bool(g.any().numpy())
+    assert not bool(g.all().numpy())
+    assert bool(grilly.logical_not(g).all().numpy())

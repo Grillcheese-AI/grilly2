@@ -11,6 +11,8 @@ Tolerances:
   rounding of each other.
 """
 
+import contextlib
+
 import numpy as np
 import pytest
 import torch
@@ -124,8 +126,6 @@ def test_what_generate_refuses():
     ids = grilly.tensor(PROMPTS)
     with pytest.raises(NotImplementedError, match="beam"):
         model.generate(ids, num_beams=2)
-    with pytest.raises(NotImplementedError, match="padding"):
-        model.generate(ids, attention_mask=grilly.tensor([[0] + [1] * 6, [1] * 7]))
     with pytest.raises(ValueError, match="not used by the model"):
         model.generate(ids, output_attentions=True)
     with pytest.raises(ValueError, match="int64"):
@@ -196,3 +196,195 @@ def test_qwen3_fused_and_composed_agree():
     print(f"qwen3 fused vs composed: {worst:.2e}")
     assert worst <= 1e-5
     assert (fused.argmax(-1) == composed.argmax(-1)).all()
+
+
+# ── left-padded batches ──────────────────────────────────────────────────
+#
+# Reference: transformers' own generate() on the same left-padded batch, and
+# each prompt generated alone. A padded row holds its tokens p positions
+# later than it would alone; rotary scores depend only on the distance
+# between positions, so the shift moves nothing but rounding (cos and sin
+# at other angles), and the logits bound is the one above.
+
+UNEVEN = [[5, 17, 99, 3, 42, 7, 64], [11, 2, 88], [9, 31, 4, 120, 77]]
+
+
+def left_padded(prompts, pad=0):
+    width = max(len(p) for p in prompts)
+    ids = [[pad] * (width - len(p)) + list(p) for p in prompts]
+    mask = [[0] * (width - len(p)) + [1] * len(p) for p in prompts]
+    return ids, mask
+
+
+def alone(model, prompts, **kw):
+    """Each prompt's new tokens, generated on its own and unpadded."""
+    return [model.generate(grilly.tensor([p]), **kw).tolist()[0][len(p):] for p in prompts]
+
+
+def new_tokens(rows, width):
+    return [row[width:] for row in rows]
+
+
+def spy_on_drops(monkeypatch, model):
+    """Record every time generate() drops rows, so a test can check that
+    what it compared really ran with rows dropped."""
+    calls = []
+    original = model._select_rows
+
+    def spy(cache, index, undo):
+        calls.append(index.tolist())
+        original(cache, index, undo)
+
+    monkeypatch.setattr(model, "_select_rows", spy)
+    return calls
+
+
+@pytest.mark.parametrize("grad", [False, True], ids=["fused", "composed"])
+def test_a_left_padded_prompt_gives_each_row_its_own_logits(grad):
+    """Every real position's logits equal that row's own, run unpadded. The
+    padding's are not compared: they are attention over nothing."""
+    _, model = pair(seed=7)
+    ids, mask = left_padded(UNEVEN)
+    width = len(ids[0])
+    worst = 0.0
+    with contextlib.nullcontext() if grad else grilly.no_grad():
+        cache = model.make_cache(len(ids), width, keep=mask)
+        got = model(grilly.tensor(ids), past_key_values=cache).logits.detach().numpy()
+        assert np.isfinite(got).all(), "padding produced a NaN or inf"
+        for r, p in enumerate(UNEVEN):
+            want = model(grilly.tensor([p])).logits.detach().numpy()[0]
+            worst = max(worst, float(np.abs(got[r, width - len(p):] - want).max() / np.abs(want).max()))
+    print(f"padded vs alone ({'composed' if grad else 'fused'}): worst {worst:.2e} of max |logit|")
+    assert worst <= 1e-5
+
+
+@pytest.mark.parametrize("penalty", [1.0, 1.3])
+def test_a_left_padded_batch_generates_what_transformers_generates(penalty):
+    """Under a repetition penalty the pads are part of each row's history,
+    in transformers as here."""
+    ref, model = pair(tie=False, seed=1)
+    ids, mask = left_padded(UNEVEN)
+    with torch.no_grad():
+        want = ref.generate(torch.tensor(ids), attention_mask=torch.tensor(mask), max_new_tokens=16,
+                            do_sample=False, repetition_penalty=penalty, pad_token_id=0).tolist()
+    got = model.generate(grilly.tensor(ids), attention_mask=grilly.tensor(mask), max_new_tokens=16,
+                         do_sample=False, repetition_penalty=penalty).tolist()
+    assert got == want
+    assert all(len(set(row[7:])) > 3 for row in got)  # varied tokens: this compares something
+
+
+def test_each_row_of_a_padded_batch_generates_what_it_generates_alone():
+    _, model = pair(tie=False, seed=8)
+    ids, mask = left_padded(UNEVEN)
+    got = model.generate(grilly.tensor(ids), attention_mask=grilly.tensor(mask), max_new_tokens=16).tolist()
+    assert new_tokens(got, 7) == alone(model, UNEVEN, max_new_tokens=16)
+    assert [row[:7] for row in got] == ids  # the prompts come back as given, padding and all
+
+
+def test_dropping_finished_rows_changes_no_sequence(monkeypatch):
+    """Rows that reach EOS leave the batch; the rest must not move, and the
+    finished ones come back padded after their EOS, as transformers pads."""
+    ref, model = pair(tie=False, seed=2)
+    ids, mask = left_padded(UNEVEN)
+    free = model.generate(grilly.tensor(ids), attention_mask=grilly.tensor(mask), max_new_tokens=12).tolist()
+    eos = free[1][7 + 2]  # row 1's third new token
+    drops = spy_on_drops(monkeypatch, model)
+    got = model.generate(grilly.tensor(ids), attention_mask=grilly.tensor(mask), max_new_tokens=12,
+                         eos_token_id=eos, pad_token_id=0).tolist()
+    with torch.no_grad():
+        want = ref.generate(torch.tensor(ids), attention_mask=torch.tensor(mask), max_new_tokens=12,
+                            do_sample=False, eos_token_id=eos, pad_token_id=0).tolist()
+    assert drops, "no row finished early, so this compared nothing"
+    assert got == want
+    for row, solo in zip(new_tokens(got, 7), alone(model, UNEVEN, max_new_tokens=12, eos_token_id=eos)):
+        assert row == solo + [0] * (len(row) - len(solo))
+
+
+def test_compact_finished_drops_rows_of_an_equal_length_batch(monkeypatch):
+    _, model = pair(seed=2)
+    free = model.generate(grilly.tensor(PROMPTS), max_new_tokens=10).tolist()
+    eos = free[0][7 + 3]
+    plain = model.generate(grilly.tensor(PROMPTS), max_new_tokens=10, eos_token_id=eos, pad_token_id=0).tolist()
+    drops = spy_on_drops(monkeypatch, model)
+    compact = model.generate(grilly.tensor(PROMPTS), max_new_tokens=10, eos_token_id=eos, pad_token_id=0,
+                             compact_finished=True).tolist()
+    assert drops and compact == plain
+
+
+def test_a_quantized_model_pads_through_its_fused_projection():
+    """int8 weights fuse q, k and v into one projection, which the padded
+    path reads by column like the unpadded one."""
+    _, model = pair(tie=False, seed=5)
+    quantize_(model, Int8WeightOnlyConfig())
+    ids, mask = left_padded(UNEVEN)
+    got = model.generate(grilly.tensor(ids), attention_mask=grilly.tensor(mask), max_new_tokens=10).tolist()
+    assert new_tokens(got, 7) == alone(model, UNEVEN, max_new_tokens=10)
+
+
+def test_qwen3_left_padded_generates_what_transformers_generates():
+    ref, model = qwen3_pair(tie=False, seed=3)
+    ids, mask = left_padded(UNEVEN)
+    with torch.no_grad():
+        want = ref.generate(torch.tensor(ids), attention_mask=torch.tensor(mask), max_new_tokens=12,
+                            do_sample=False, top_k=None, top_p=None, temperature=None, pad_token_id=0).tolist()
+    got = model.generate(grilly.tensor(ids), attention_mask=grilly.tensor(mask), max_new_tokens=12).tolist()
+    assert got == want
+
+
+def test_what_padding_generate_refuses():
+    _, model = pair(seed=6)
+    ids = grilly.tensor(PROMPTS)
+    with pytest.raises(ValueError, match="left-padded"):  # right padding
+        model.generate(ids, attention_mask=grilly.tensor([[1] * 6 + [0], [1] * 7]))
+    with pytest.raises(ValueError, match="left-padded"):  # a row of nothing
+        model.generate(ids, attention_mask=grilly.tensor([[0] * 7, [1] * 7]))
+    with pytest.raises(ValueError, match="attention_mask is"):
+        model.generate(ids, attention_mask=grilly.tensor([[1] * 6, [1] * 6]))
+
+    class Unpadded(LlamaForCausalLM):
+        supports_padding = False
+
+    with pytest.raises(NotImplementedError, match="padding"):
+        Unpadded(model.config).generate(ids, attention_mask=grilly.tensor([[0] + [1] * 6, [1] * 7]))
+
+
+def test_a_padded_population_generates_what_each_member_generates_alone(monkeypatch):
+    """ES's shape: members x prompts of different lengths in one left-padded
+    batch, rows dropped as they finish. Each LoRA drops the same rows of its
+    per-row noise, so every surviving row keeps its own member's
+    perturbation — and the noise is whole again afterwards, for the next
+    generation in the same population block."""
+    from grilly.infer.lora import apply_lora_, lora_parameters, population
+    from grilly.learning import EvolutionStrategy
+
+    _, model = pair(tie=False, seed=9)
+    targets = [f"model.layers.{i}.{m}" for i in range(2)
+               for m in ("self_attn.q_proj", "self_attn.v_proj", "mlp.down_proj")]
+    apply_lora_(model, rank=2, alpha=4.0, targets=targets)
+    rng = np.random.default_rng(3)
+    with grilly.no_grad():  # a trained adapter, not peft's zero B
+        for f in lora_parameters(model):
+            f.copy_(grilly.from_numpy((0.1 * rng.standard_normal(tuple(f.shape))).astype(np.float32)))
+    es = EvolutionStrategy(lora_parameters(model), sigma=0.05, lr=0.0, population=4, seed=11)
+    prompts = UNEVEN[:2]
+    ids, mask = left_padded(prompts)
+    k = len(prompts)
+    wide_ids = [ids[j] for _ in range(es.population) for j in range(k)]  # member m owns rows m*k .. m*k+k-1
+    wide_mask = [mask[j] for _ in range(es.population) for j in range(k)]
+
+    with population(model, es, repeat=k):
+        free = model.generate(grilly.tensor(wide_ids), attention_mask=grilly.tensor(wide_mask),
+                              max_new_tokens=10).tolist()
+    eos = free[1][7 + 2]
+    drops = spy_on_drops(monkeypatch, model)
+    with population(model, es, repeat=k) as layers:
+        got = model.generate(grilly.tensor(wide_ids), attention_mask=grilly.tensor(wide_mask),
+                             max_new_tokens=10, eos_token_id=eos, pad_token_id=0).tolist()
+        assert {layer._population["u_a"].shape[0] for layer in layers} == {es.population * k}
+    assert drops, "no row finished early, so this compared nothing"
+    for m in range(es.population):
+        with es.member(m):
+            solos = alone(model, prompts, max_new_tokens=10, eos_token_id=eos)
+        for j, solo in enumerate(solos):
+            row = got[m * k + j][7:]
+            assert row == solo + [0] * (len(row) - len(solo)), f"member {m}, prompt {j}"

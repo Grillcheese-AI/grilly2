@@ -235,7 +235,7 @@ omission as `True` (with a warning), and CubbyLLM always passes `False`.
 
 1. Grad mode, `AutogradMeta`, `Node`, `record`, engine, `AccumulateGrad`;
    backward formulas for `relu`, `add` and `linear` (v1 ships
-   `activation-relu-backward` and `fnn-linear-backward`). Tests: every
+   `g2-relu-backward` and `g2-linear-backward`). Tests: every
    gradient compared against torch's, K-scaled tolerances as for forward; a
    diamond graph (a gradient summed from two paths); a second backward
    through a freed graph; `no_grad`; `detach`; leaf accumulation across two

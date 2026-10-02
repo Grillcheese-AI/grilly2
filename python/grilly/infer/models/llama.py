@@ -41,7 +41,7 @@ import numpy as np
 from ... import Tensor, _C, _not_yet, cat, from_numpy, is_grad_enabled
 from ... import nn
 from ...nn import functional as F
-from ..cache import KVCache
+from ..cache import KVCache, PaddedKVCache
 from ..generation import CausalLMOutput, GenerationMixin
 from ..quantization import QuantizedTensor
 
@@ -108,7 +108,14 @@ def _apply_rotary(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
 def _fused_weight(cache: dict, modules) -> tuple:
     """One int8 weight and bias holding the modules' rows, built once, or
     (None, None) while their weights are float32. Rebuilt if the weights
-    are replaced (a load, or quantization)."""
+    are replaced (a load, or quantization).
+
+    A module that computes anything beyond ``weight @ x + bias`` cannot be
+    fused this way — concatenating the weights would run the base and drop
+    the rest, silently. ``fusable = False`` is how such a module says so;
+    ``grilly.infer.lora.LoRALinear`` is the one that does."""
+    if not all(getattr(m, "fusable", True) for m in modules):
+        return None, None
     weights = [m.weight for m in modules]
     key = tuple(id(w) for w in weights)
     if cache.get("key") != key:
@@ -153,24 +160,12 @@ class LlamaAttention(nn.Module):
         filled = 0 if cache is None else cache.get_seq_length(self.layer_idx)
         if filled and t != 1:
             raise _not_yet("several new tokens against a non-empty KV cache (chunked prefill)")
+        if getattr(cache, "padded", False):
+            return self._padded(x, cos, sin, cache, pos0, filled, fused)
         if not fused:
             return self._composed(x, cos, sin, cache, pos0, filled)
 
-        # Qwen3 normalizes each head of q and k before the rotary embedding,
-        # and the norm wants those columns on their own, so the projections
-        # are not fused there
-        weight, bias = (None, None) if self.qk_norm else _fused_weight(
-            self._qkv, (self.q_proj, self.k_proj, self.v_proj))
-        if weight is not None:
-            qkv = F.linear(x, weight, bias)
-            q_src, q_col = qkv, 0
-            k_src, k_col = qkv, heads * dim
-            v_src, v_col = qkv, (heads + kv_heads) * dim
-        else:
-            q_src, k_src, v_src = self.q_proj(x), self.k_proj(x), self.v_proj(x)
-            q_col = k_col = v_col = 0
-            if self.qk_norm:
-                q_src, k_src = self._head_norm(q_src, self.q_norm), self._head_norm(k_src, self.k_norm)
+        q_src, q_col, k_src, k_col, v_src, v_col = self._projections(x)
         q = Tensor._wrap(_C.rope(q_src._t, q_col, heads, dim, cos._t, sin._t, pos0))
         if filled:  # a decode step: rotate the keys into the cache, copy the values
             cache.append_rotary(self.layer_idx, k_src, k_col, v_src, v_col, cos, sin, pos0)
@@ -183,8 +178,62 @@ class LlamaAttention(nn.Module):
             cache.append(self.layer_idx, k, v)
         return self.o_proj(attn.transpose(1, 2).reshape(b, t, heads * dim))
 
-    def _composed(self, x: Tensor, cos: Tensor, sin: Tensor, cache: KVCache | None, pos0: int, filled: int) -> Tensor:
-        """The same step as plain grilly ops, so gradients flow."""
+    def _projections(self, x: Tensor) -> tuple:
+        """q, k and v as ``(source, first column)`` pairs: one fused int8
+        projection when the weights allow it, three otherwise.
+
+        Qwen3 normalizes each head of q and k before the rotary embedding,
+        and the norm wants those columns on their own, so the projections
+        are not fused there."""
+        heads, kv_heads, dim = self.heads, self.kv_heads, self.head_dim
+        weight, bias = (None, None) if self.qk_norm else _fused_weight(
+            self._qkv, (self.q_proj, self.k_proj, self.v_proj))
+        if weight is not None:
+            qkv = F.linear(x, weight, bias)
+            return qkv, 0, qkv, heads * dim, qkv, (heads + kv_heads) * dim
+        q_src, k_src, v_src = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+        if self.qk_norm:
+            q_src, k_src = self._head_norm(q_src, self.q_norm), self._head_norm(k_src, self.k_norm)
+        return q_src, 0, k_src, 0, v_src, 0
+
+    def _padded(self, x: Tensor, cos: Tensor, sin: Tensor, cache: PaddedKVCache, pos0: int, filled: int,
+                fused: bool) -> Tensor:
+        """Attention for a batch of left-padded rows
+        (:class:`~grilly.infer.cache.PaddedKVCache`), each masked to its own
+        tokens.
+
+        The step's keys and values go into the cache first. At the prompt,
+        attention is causal plus the rows' padding masks. At a decode step
+        the one query reads the layer's whole buffer, masked to the filled
+        positions; the query heads that share a kv head are folded into the
+        query-length axis — ``(b, heads, 1, d)`` is ``(b, kv, group, d)`` in
+        memory — so the keys are read once per kv head rather than copied
+        out to every query head.
+
+        A padding position's query has only padding before it, so every key
+        it could read is masked and attention gives it 0, as torch's does:
+        padding never turns into a NaN that a real position then reads."""
+        b, t, _ = x.shape
+        heads, kv_heads, dim = self.heads, self.kv_heads, self.head_dim
+        if fused:
+            q_src, q_col, k_src, k_col, v_src, v_col = self._projections(x)
+            q = Tensor._wrap(_C.rope(q_src._t, q_col, heads, dim, cos._t, sin._t, pos0))
+            k = Tensor._wrap(_C.rope(k_src._t, k_col, kv_heads, dim, cos._t, sin._t, pos0))
+            v = v_src[..., v_col:v_col + kv_heads * dim].reshape(b, t, kv_heads, dim).transpose(1, 2)
+        else:
+            q, k, v = self._composed_qkv(x, cos, sin, pos0)
+        cache.append(self.layer_idx, k, v)
+        if filled:
+            keys, values = cache.layer(self.layer_idx)
+            grouped = q.reshape(b, kv_heads, heads // kv_heads, dim)
+            out = F.scaled_dot_product_attention(grouped, keys, values, attn_mask=cache.decode_mask(self.layer_idx))
+            return self.o_proj(out.reshape(b, 1, heads * dim))
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=cache.prompt_mask(t), is_causal=True, enable_gqa=True)
+        return self.o_proj(out.transpose(1, 2).reshape(b, t, heads * dim))
+
+    def _composed_qkv(self, x: Tensor, cos: Tensor, sin: Tensor, pos0: int) -> tuple:
+        """Rotated q ``(b, heads, T, d)``, rotated k and v ``(b, kv, T, d)``,
+        as plain grilly ops."""
         b, t, _ = x.shape
         heads, kv_heads, dim = self.heads, self.kv_heads, self.head_dim
         cos, sin = cos.narrow(0, pos0, t), sin.narrow(0, pos0, t)
@@ -194,7 +243,13 @@ class LlamaAttention(nn.Module):
             q, k = self.q_norm(q), self.k_norm(k)
         q, k = q.transpose(1, 2), k.transpose(1, 2)
         v = self.v_proj(x).reshape(b, t, kv_heads, dim).transpose(1, 2)
-        q, k = _apply_rotary(q, cos, sin), _apply_rotary(k, cos, sin)
+        return _apply_rotary(q, cos, sin), _apply_rotary(k, cos, sin), v
+
+    def _composed(self, x: Tensor, cos: Tensor, sin: Tensor, cache: KVCache | None, pos0: int, filled: int) -> Tensor:
+        """The same step as plain grilly ops, so gradients flow."""
+        b, t, _ = x.shape
+        heads, dim = self.heads, self.head_dim
+        q, k, v = self._composed_qkv(x, cos, sin, pos0)
         if filled:
             cache.append(self.layer_idx, k, v)
             out = cache.attend(self.layer_idx, q)
@@ -263,8 +318,15 @@ class LlamaForCausalLM(nn.Module, GenerationMixin):
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
-    def make_cache(self, batch_size: int, max_length: int) -> KVCache:
+    #: ``generate`` may give it left-padded batches: ``make_cache(keep=...)``
+    supports_padding = True
+
+    def make_cache(self, batch_size: int, max_length: int, keep=None):
+        """A :class:`KVCache`, or with ``keep`` (the prompt's attention mask)
+        a :class:`PaddedKVCache` for a left-padded batch."""
         c = self.config
+        if keep is not None:
+            return PaddedKVCache(c.num_hidden_layers, batch_size, c.num_key_value_heads, c.head_dim, max_length, keep)
         return KVCache(c.num_hidden_layers, batch_size, c.num_key_value_heads, c.head_dim, max_length)
 
     def _norm(self, x: Tensor, residual: Tensor | None, norm: nn.RMSNorm):

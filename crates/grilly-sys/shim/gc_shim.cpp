@@ -1,7 +1,7 @@
-// gc_shim.cpp — extern "C" shim over v1's Vulkan primitives.
+// gc_shim.cpp — extern "C" shim over the Vulkan primitives in ../vulkan.
 //
 // Uses GrillyDevice, BufferPool, CommandBatch and PipelineCache::getOrCreate
-// from grilly_core_lib. Descriptor sets are allocated here, not through
+// from the Vulkan layer beside it. Descriptor sets are allocated here, not through
 // PipelineCache::allocDescriptorSet, whose cache key ignores binding offsets
 // (see docs/boundary.md).
 

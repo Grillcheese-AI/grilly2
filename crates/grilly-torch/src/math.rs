@@ -408,13 +408,11 @@ pub fn compare(a: &Tensor, b: &Tensor, op: Binary) -> Result<Tensor> {
 pub fn integer(a: &Tensor, b: &Tensor, op: IntBinary, out: DType) -> Result<Tensor> {
     let (a, b) = (a.cast(DType::I64)?, b.cast(DType::I64)?);
     if matches!(op, IntBinary::FloorDiv | IntBinary::Remainder | IntBinary::TruncDiv) {
-        // torch raises for an integer zero divisor; a GPU cannot, so look first
-        // (one small download, like the index bounds checks)
-        let zero = Tensor::zeros(b.device(), &[])?.cast(DType::I64)?;
-        let hits = k::binary_int(&b, &zero, IntBinary::Eq, true)?;
-        if integer_reduce(&hits, &[], Reduce::Max, false)?.to_bytes()?.iter().any(|&byte| byte != 0) {
-            return Err(Error::Invalid("ZeroDivisionError".into()));
-        }
+        // torch raises for an integer zero divisor and a GPU cannot, so the
+        // check runs on the device and surfaces at the next host read —
+        // the bargain the index bounds checks make, and for the same
+        // reason: a download here made every int64 `%` uncapturable.
+        grilly_core::fault::check_nonzero(&b)?;
     }
     k::binary_int(&a, &b, op, false)?.cast(out)
 }

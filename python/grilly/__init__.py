@@ -446,14 +446,37 @@ class Tensor:
         raise _not_yet("pickling tensors")
 
     # in place
-    def add_(self, other, *, alpha=1) -> "Tensor":
-        if alpha != 1:
-            raise _not_yet("add_ with alpha != 1")
-        other = _require_tensor("other", other)
-        if other.shape != self.shape:
-            raise _not_yet(f"broadcasting in add_ ({list(self.shape)} vs {list(other.shape)})")
-        self._t.add_(other._t)
+    def _write_(self, result: "Tensor") -> "Tensor":
+        """Overwrite this tensor's storage with ``result``'s.
+
+        The route every in-place arithmetic form that has no kernel of its
+        own takes: compute out of place, then copy back. It costs one
+        temporary, which for the counters and ring slots a captured decode
+        step updates is a 4-byte buffer, and it keeps the in-place surface
+        torch's rather than a subset of it.
+        """
+        if result.shape != self.shape:
+            raise RuntimeError(
+                f"output with shape {list(self.shape)} doesn't match the broadcast shape "
+                f"{list(result.shape)}"
+            )
+        self._t.copy_(result._t)
         return self
+
+    def add_(self, other, *, alpha=1) -> "Tensor":
+        if alpha == 1 and isinstance(other, Tensor) and other.shape == self.shape:
+            self._t.add_(other._t)          # the one form with its own kernel
+            return self
+        return self._write_(add(self, other, alpha=alpha))
+
+    def sub_(self, other, *, alpha=1) -> "Tensor":
+        return self._write_(sub(self, other, alpha=alpha))
+
+    def div_(self, other) -> "Tensor":
+        return self._write_(div(self, other))
+
+    subtract_ = sub_
+    divide_ = div_
 
     def fill_(self, value) -> "Tensor":
         self._t.fill_(_builtins.float(value))
@@ -467,10 +490,12 @@ class Tensor:
         return self
 
     def mul_(self, other) -> "Tensor":
-        if not isinstance(other, (_builtins.int, _builtins.float)):
-            raise _not_yet("mul_ by a tensor")
-        self._t.mul_(_builtins.float(other))
-        return self
+        if isinstance(other, (_builtins.int, _builtins.float)):
+            self._t.mul_(_builtins.float(other))
+            return self
+        return self._write_(mul(self, other))
+
+    multiply_ = mul_
 
     def normal_(self, mean=0.0, std=1.0, *, generator=None) -> "Tensor":
         self._t.normal_(_builtins.float(mean), _builtins.float(std), _generator(generator)._g)
@@ -785,7 +810,13 @@ def _parameter_storage(*size, fill=None, device=None) -> Tensor:
 def arange(start=0, end=None, step=1, *, out=None, dtype=None, layout=None, device=None,
            requires_grad=False) -> Tensor:
     """Like ``torch.arange``: int64 when every argument is an int, else float32;
-    float values are ``start + i * step`` computed in float64, as torch does."""
+    float values are ``start + i * step``.
+
+    Computed on the device, not built on the host and sent. A counting
+    sequence is a function of its own index, so the upload was pure loss —
+    and it was a *host write*, which a capture refuses, so a mask written
+    as ``arange(n) < length`` put its whole step outside ``graphed``. That
+    is most masks."""
     if out is not None:
         raise _not_yet("the out= argument")
     _check_factory_args(dtype, device)
@@ -800,11 +831,11 @@ def arange(start=0, end=None, step=1, *, out=None, dtype=None, layout=None, devi
     integral = _builtins.all(isinstance(v, (_builtins.int, _np.integer)) and not isinstance(v, _builtins.bool) for v in args)
     if integral:
         n = _builtins.max(0, -(-(end - start) // step))
-        values = _np.arange(n, dtype=_np.int64) * step + start
     else:
         n = _builtins.max(0, _math.ceil((end - start) / step))
-        values = start + _np.arange(n, dtype=_np.float64) * step
-    t = _from_array(values, dtype or (int64 if integral else float32))
+    out_dtype = dtype or (int64 if integral else float32)
+    t = Tensor._wrap(_C.Tensor.arange(n, _builtins.float(start), _builtins.float(step),
+                                      _code(out_dtype), integral))
     return _leaf(t, requires_grad)
 
 
@@ -921,7 +952,7 @@ from ._ops import (  # noqa: E402,F401
     are_deterministic_algorithms_enabled, gather, index_select, use_deterministic_algorithms,
     argmax, argmin, argsort, sort, topk,
     cumsum, logcumsumexp, scatter,
-    ceil, floor, floor_divide, remainder, round, trunc,
+    ceil, floor, floor_divide, fmod, remainder, round, trunc,
 )
 from ._ops import (  # noqa: E402,F401
     abs, add, allclose, amax, amin, bmm, cat, chunk, clamp, clamp_max, clamp_min, clip,

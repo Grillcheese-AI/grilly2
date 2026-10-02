@@ -31,7 +31,7 @@ from __future__ import annotations
 import builtins as _builtins
 
 import grilly as _g
-from . import Tensor, _require_tensor
+from .. import Tensor, _require_tensor
 
 __all__ = [
     "ewc_penalty", "fisher_info", "fisher_normalize", "natural_gradient",

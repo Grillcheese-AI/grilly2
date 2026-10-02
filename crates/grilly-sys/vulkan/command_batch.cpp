@@ -1,0 +1,260 @@
+#include "grilly/vulkan/vk_command_batch.h"
+
+#include <cstring>
+#include <stdexcept>
+#include <iostream>
+
+namespace grilly {
+
+// ── Helper ──────────────────────────────────────────────────────────────────
+static void vkCheck(VkResult result, const char* msg) {
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error(std::string(msg) +
+                                 " (VkResult=" + std::to_string(result) + ")");
+    }
+}
+
+static constexpr uint64_t kFenceTimeoutNs = 2'000'000'000;  // 2 seconds
+
+// ── Construction / destruction ──────────────────────────────────────────────
+
+CommandBatch::CommandBatch(GrillyDevice& device) : device_(device) {
+    // Create a dedicated command pool with reset-per-buffer capability
+    // (same flags as core.py:343-348)
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.queueFamilyIndex = device_.computeQueueFamily();
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+
+    vkCheck(vkCreateCommandPool(device_.device(), &poolInfo, nullptr, &pool_),
+            "vkCreateCommandPool failed");
+
+    // Allocate one primary command buffer
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = pool_;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+
+    vkCheck(vkAllocateCommandBuffers(device_.device(), &allocInfo, &cmd_),
+            "vkAllocateCommandBuffers failed");
+
+    // Create fence (starts signaled so first wait is a no-op)
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+    vkCheck(vkCreateFence(device_.device(), &fenceInfo, nullptr, &fence_),
+            "vkCreateFence failed");
+}
+
+CommandBatch::~CommandBatch() {
+    VkDevice dev = device_.device();
+    if (dev == VK_NULL_HANDLE)
+        return;
+
+     // CRITICAL: Wait for ALL pending work before destroying resources
+    if (fence_ != VK_NULL_HANDLE) {
+        VkResult result = vkWaitForFences(dev, 1, &fence_, VK_TRUE, UINT64_MAX);
+        if (result != VK_SUCCESS) {
+            // Log warning but continue
+            std::cerr << "[WARN] Fence wait returned " << result << std::endl;
+        }
+    }
+
+    if (fence_ != VK_NULL_HANDLE)
+        vkDestroyFence(dev, fence_, nullptr);
+    if (cmd_ != VK_NULL_HANDLE)
+        vkFreeCommandBuffers(dev, pool_, 1, &cmd_);
+    if (pool_ != VK_NULL_HANDLE)
+        vkDestroyCommandPool(dev, pool_, nullptr);
+}
+
+// ── Recording ───────────────────────────────────────────────────────────────
+
+void CommandBatch::begin() {
+    if (recording_)
+        throw std::runtime_error("CommandBatch::begin() called while already recording");
+
+    // Wait for any prior pending work before reusing the command buffer
+    waitForCompletion();
+
+    vkResetCommandBuffer(cmd_, 0);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    vkCheck(vkBeginCommandBuffer(cmd_, &beginInfo),
+            "vkBeginCommandBuffer failed");
+
+    recording_ = true;
+    dispatchCount_ = 0;
+}
+
+void CommandBatch::ensureRecording() {
+    if (!recording_)
+        begin();
+}
+
+void CommandBatch::dispatch(VkPipeline pipeline, VkPipelineLayout layout,
+                            VkDescriptorSet descSet, uint32_t gx,
+                            uint32_t gy, uint32_t gz,
+                            const void* pushData, uint32_t pushSize) {
+    if (!recording_)
+        throw std::runtime_error("CommandBatch::dispatch() called without begin()");
+
+    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0,
+                            1, &descSet, 0, nullptr);
+
+    if (pushData && pushSize > 0) {
+        vkCmdPushConstants(cmd_, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                           pushSize, pushData);
+    }
+
+    vkCmdDispatch(cmd_, gx, gy, gz);
+    dispatchCount_++;
+}
+
+void CommandBatch::barrier() {
+    if (!recording_)
+        return;
+
+    // COMPUTE → COMPUTE memory barrier (SHADER_WRITE → SHADER_READ)
+    // Same logic as core.py:854-878
+    VkMemoryBarrier memBarrier{};
+    memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    vkCmdPipelineBarrier(cmd_,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,  // src
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,  // dst
+                         0,          // dependency flags
+                         1, &memBarrier,   // memory barriers
+                         0, nullptr,       // buffer memory barriers
+                         0, nullptr);      // image memory barriers
+}
+
+void CommandBatch::transferComputeBarrier() {
+    if (!recording_)
+        return;
+
+    // Bidirectional TRANSFER ↔ COMPUTE barrier. The src/dst access masks
+    // cover both edges (stage-in → compute and compute → stage-out) so the
+    // staging-buffer pattern in linear() can use a single method for both
+    // transitions without tracking direction.
+    VkMemoryBarrier memBarrier{};
+    memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT |
+                               VK_ACCESS_SHADER_WRITE_BIT;
+    memBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT |
+                               VK_ACCESS_SHADER_READ_BIT;
+
+    vkCmdPipelineBarrier(cmd_,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT |
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT |
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0,
+                         1, &memBarrier,
+                         0, nullptr,
+                         0, nullptr);
+}
+
+void CommandBatch::copyBuffer(const GrillyBuffer& src, GrillyBuffer& dst, size_t bytes) {
+    if (!recording_)
+        throw std::runtime_error("CommandBatch::copyBuffer() called without begin()");
+
+    VkBufferCopy region{};
+    region.srcOffset = 0;
+    region.dstOffset = 0;
+    region.size = bytes;
+    vkCmdCopyBuffer(cmd_, src.handle, dst.handle, 1, &region);
+}
+
+void CommandBatch::fillZero(GrillyBuffer& buf, size_t bytes) {
+    if (!recording_)
+        throw std::runtime_error("CommandBatch::fillZero() called without begin()");
+
+    // vkCmdFillBuffer requires the size to be a multiple of 4. Round down;
+    // gradient/activation buffers are fp32 (4-byte) so this is exact.
+    VkDeviceSize fillSize = static_cast<VkDeviceSize>(bytes & ~size_t(3));
+    if (fillSize == 0) return;
+    vkCmdFillBuffer(cmd_, buf.handle, 0, fillSize, 0u);
+}
+
+// ── Submission ──────────────────────────────────────────────────────────────
+
+void CommandBatch::submit() {
+    // Synchronous: submit + wait. Safe default for backward compat.
+    submitDeferred();
+    waitForCompletion();
+}
+
+void CommandBatch::submitDeferred() {
+    if (!recording_)
+        return;
+
+    vkCheck(vkEndCommandBuffer(cmd_), "vkEndCommandBuffer failed");
+    recording_ = false;
+
+    // Wait for any prior submission to complete, then reset fence
+    if (pending_) {
+        vkWaitForFences(device_.device(), 1, &fence_, VK_TRUE, kFenceTimeoutNs);
+        pending_ = false;
+    }
+    vkResetFences(device_.device(), 1, &fence_);
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd_;
+
+    vkCheck(vkQueueSubmit(device_.computeQueue(), 1, &submitInfo, fence_),
+            "vkQueueSubmit failed");
+
+    pending_ = true;
+    // Returns immediately — GPU runs in background
+}
+
+void CommandBatch::waitForCompletion() {
+    if (!pending_)
+        return;
+    vkCheck(
+        vkWaitForFences(device_.device(), 1, &fence_, VK_TRUE, kFenceTimeoutNs),
+        "vkWaitForFences timed out");
+    pending_ = false;
+}
+
+void CommandBatch::submitAsync(VkSemaphore timeline, uint64_t signalValue) {
+    if (!recording_)
+        return;
+
+    vkCheck(vkEndCommandBuffer(cmd_), "vkEndCommandBuffer failed");
+    recording_ = false;
+
+    // Wait for prior work
+    vkWaitForFences(device_.device(), 1, &fence_, VK_TRUE, kFenceTimeoutNs);
+    vkResetFences(device_.device(), 1, &fence_);
+
+    // Timeline semaphore signal info (Vulkan 1.2 / VK_KHR_timeline_semaphore)
+    VkTimelineSemaphoreSubmitInfo timelineInfo{};
+    timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timelineInfo.signalSemaphoreValueCount = 1;
+    timelineInfo.pSignalSemaphoreValues = &signalValue;
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.pNext = &timelineInfo;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd_;
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = &timeline;
+
+    vkCheck(vkQueueSubmit(device_.computeQueue(), 1, &submitInfo, fence_),
+            "vkQueueSubmit (async) failed");
+}
+
+}  // namespace grilly

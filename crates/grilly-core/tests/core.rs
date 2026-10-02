@@ -1,10 +1,10 @@
-//! grilly-core behaviour on a real device. Uses `activation-relu` only as a
+//! grilly-core behaviour on a real device. Uses `g2-relu` only as a
 //! probe of the dispatch path (exact in float32, so comparisons are exact).
 
 use grilly_core::{Arg, Device, Error, Kernel, MemClass, Tensor};
 
 const PROBE: Kernel = Kernel {
-    shader: "activation-relu",
+    shader: "g2-relu",
     bindings: 2,
     push_words: 1,
     local_size: [256, 1, 1],

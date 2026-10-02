@@ -1,17 +1,17 @@
 //! End-to-end checks of the shim on a real Vulkan device.
 //!
-//! These exercise the dispatch path, not an op: `activation-relu` is used
-//! because it is exact in float32, so every comparison is bit-for-bit
-//! (tolerance 0). Shaders come from `GRILLY_SHADER_DIR`, else the
-//! `shaders/spv` directory of the v1 checkout the crate was built against.
+//! These exercise the dispatch path, not an op, so the kernel they
+//! dispatch is a relu the shim compiles for them — exact in float32, so
+//! every comparison is bit-for-bit (tolerance 0), and no shader directory
+//! has to exist for the crate to be testable.
 
 use grilly_sys::*;
 use std::ffi::{c_void, CString};
-use std::path::PathBuf;
 use std::ptr;
 
-const RELU: &str = "activation-relu";
-const WG: u32 = 256; // activation-relu local_size_x
+const RELU: &str = "probe-relu";
+const TANH: &str = "probe-tanh";
+const WG: u32 = 256; // the probe's local_size_x
 
 macro_rules! ok {
     ($e:expr) => {{
@@ -21,19 +21,49 @@ macro_rules! ok {
     }};
 }
 
+/// The probe kernel, compiled by the shim itself.
+///
+/// These tests are about the dispatch path, not about an op, so borrowing
+/// a kernel from a shader directory only ever added a thing to find.
+/// `gc_compile_shader` is already here for fused kernels; two elementwise
+/// one-liners through it leave the crate with no shader files at all and
+/// exercise the JIT on the way past. Both are exact in float32, so every
+/// comparison below is bit-for-bit.
+const PROBE_SRC: &str = r#"#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer I { float src[]; };
+layout(std430, binding = 1) writeonly buffer O { float dst[]; };
+layout(push_constant) uniform P { uint n; } p;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < p.n) dst[i] = max(src[i], 0.0);
+}
+"#;
+
+const PROBE2_SRC: &str = r#"#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer I { float src[]; };
+layout(std430, binding = 1) writeonly buffer O { float dst[]; };
+layout(push_constant) uniform P { uint n; } p;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < p.n) dst[i] = tanh(src[i]);
+}
+"#;
+
+fn compile(ctx: *mut gc_ctx, name: &str, src: &str) {
+    let n = CString::new(name).unwrap();
+    ok!(gc_compile_shader(ctx, n.as_ptr(), src.as_ptr().cast(), src.len() as u64));
+}
+
 struct Ctx(*mut gc_ctx);
 
 impl Ctx {
     fn new() -> Ctx {
         let mut p = ptr::null_mut();
         ok!(gc_create(&mut p));
-        let dir = std::env::var("GRILLY_SHADER_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(V1_DIR).join("shaders/spv"));
-        let dir = CString::new(dir.to_str().unwrap()).unwrap();
-        let mut n = 0u32;
-        ok!(gc_load_shader_dir(p, dir.as_ptr(), &mut n));
-        assert!(n > 0, "no shaders found");
+        compile(p, RELU, PROBE_SRC);
+        compile(p, TANH, PROBE2_SRC);
         Ctx(p)
     }
 

@@ -382,6 +382,20 @@ fn scatter_(py: Python<'_>, x: &PyTensor, dim: usize, index: &PyTensor, src: &Py
 }
 
 #[pyfunction]
+fn index_copy_(py: Python<'_>, x: &PyTensor, dim: usize, index: &PyTensor, src: &PyTensor) -> PyResult<PyTensor> {
+    let (x, i, s) = (x.inner.clone(), index.inner.clone(), src.inner.clone());
+    run(py, move || shape::index_copy_(&x, dim, &i, &s))
+}
+
+/// Fill `x` in place with normals from the counter-based stream
+/// `(key, stream)`. Nothing is uploaded, so it works inside a capture.
+#[pyfunction]
+fn philox_normal_(py: Python<'_>, x: &PyTensor, key: u64, stream: u64, std: f32) -> PyResult<()> {
+    let x = x.inner.clone();
+    py.detach(move || grilly_core::generic::philox_normal(&x, key, stream, std)).map_err(err)
+}
+
+#[pyfunction]
 fn cumsum(py: Python<'_>, x: &PyTensor, dim: usize) -> PyResult<PyTensor> {
     let x = x.inner.clone();
     run(py, move || math::cumsum(&x, dim))
@@ -581,6 +595,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(synchronize, m)?)?;
     m.add_function(wrap_pyfunction!(scatter, m)?)?;
     m.add_function(wrap_pyfunction!(scatter_, m)?)?;
+    m.add_function(wrap_pyfunction!(index_copy_, m)?)?;
+    m.add_function(wrap_pyfunction!(philox_normal_, m)?)?;
     m.add_function(wrap_pyfunction!(cumsum, m)?)?;
     m.add_function(wrap_pyfunction!(logcumsumexp, m)?)?;
     m.add_function(wrap_pyfunction!(argmax, m)?)?;

@@ -180,3 +180,53 @@ def test_a_captured_step_can_look_up_an_embedding():
     assert g.replays >= 1
     for a, b in zip(want, got):
         assert (a == b).all()
+
+
+def test_a_captured_step_can_build_a_mask_with_arange():
+    """The other op that kept a decode step out of a graph.
+
+    ``arange`` used to build its values on the host and upload them, which
+    is a host write — refused inside a capture. Almost every mask is
+    written ``arange(n) < length``, so a ring buffer, a validity mask and a
+    fixed-capacity store were all outside ``graphed`` for want of a
+    counting sequence. It is a device op now."""
+    ring = grilly.from_numpy(np.arange(32, dtype=np.float32).reshape(8, 4))
+    pos = grilly.zeros(())
+
+    def masked(pos):
+        live = grilly.arange(8, dtype=grilly.float32) < grilly.clamp(pos + 1.0, max=8.0)
+        return grilly.where(live.reshape(8, 1), ring, grilly.zeros((8, 4)))
+
+    g = grilly.graphed(masked)
+    with grilly.no_grad():
+        want, got = [], []
+        for p in (0.0, 1.0, 3.0, 7.0):
+            pos.fill_(p)
+            want.append(masked(pos).numpy().copy())
+            got.append(g(pos).numpy().copy())
+    assert g.replays >= 2, "nothing replayed, so the comparison proved nothing"
+    for a, b in zip(want, got):
+        assert (a == b).all()
+
+
+def test_a_replayed_ring_slot_follows_the_position_counter():
+    """``pos % window`` chosen on the device, written in place, replayed —
+    the shape a windowed KV cache and an episodic store both take."""
+    ring = grilly.zeros((4, 2))
+    pos = grilly.zeros(())
+    value = grilly.ones((1, 2))
+
+    def write(pos, value):
+        slot = grilly.remainder(pos, 4.0).long().reshape(1)
+        ring.index_copy_(0, slot, value)
+        return ring
+
+    g = grilly.graphed(write)
+    with grilly.no_grad():
+        for step in range(6):
+            pos.fill_(float(step))
+            value.fill_(float(step + 1))
+            g(pos, value)
+    assert g.replays >= 3
+    # steps 4 and 5 wrapped onto slots 0 and 1
+    assert (ring.numpy()[:, 0] == [5.0, 6.0, 3.0, 4.0]).all()

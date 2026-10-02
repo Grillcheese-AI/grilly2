@@ -12,13 +12,20 @@ import json
 from pathlib import Path
 
 from .. import _not_yet
-from ..infer.models import LlamaConfig, LlamaForCausalLM
+from ..infer.models import Lfm2Config, Lfm2ForCausalLM, LlamaConfig, LlamaForCausalLM
 
 __all__ = ["AutoConfig", "config_from_dict", "model_class_for"]
 
-# model_type -> the grilly model that runs it. Both families are the same
-# decoder; Qwen2 differs only in having q/k/v biases.
-_FAMILIES = {"llama": LlamaForCausalLM, "qwen2": LlamaForCausalLM, "qwen3": LlamaForCausalLM}
+# model_type -> the grilly model that runs it. The Llama families are one
+# decoder; Qwen2 differs only in having q/k/v biases, Qwen3 in its per-head
+# q/k norms. LFM2 is a different shape — mostly short convolutions — so it
+# has its own model.
+_FAMILIES = {
+    "llama": LlamaForCausalLM,
+    "qwen2": LlamaForCausalLM,
+    "qwen3": LlamaForCausalLM,
+    "lfm2": Lfm2ForCausalLM,
+}
 
 # fields grilly's decoder does not implement, and what they would change
 _UNSUPPORTED = {
@@ -52,12 +59,64 @@ def _refuse_unsupported(c: dict) -> None:
             raise _not_yet(f"{c.get('model_type', 'this model')}: {key}={value!r} ({what})")
 
 
-def config_from_dict(c: dict) -> LlamaConfig:
+def _lfm2_layer_types(c: dict) -> tuple:
+    """Which layers convolve and which attend.
+
+    ``layer_types`` says so directly. Older LFM2 configs instead list the
+    attention layers in ``full_attn_idxs``, so that is read as a fallback —
+    getting it wrong would not raise, it would silently build the wrong
+    model, which is the kind of thing that shows up as a wrong token
+    hundreds of steps later.
+    """
+    from ..infer.models.lfm2 import ATTENTION, CONV
+
+    types = c.get("layer_types")
+    if types:
+        return tuple(types)
+    layers = int(c["num_hidden_layers"])
+    idxs = c.get("full_attn_idxs")
+    if idxs is None:
+        raise _not_yet(
+            "an LFM2 config with neither layer_types nor full_attn_idxs "
+            "(there is no way to tell which layers attend)"
+        )
+    attention = set(int(i) for i in idxs)
+    return tuple(ATTENTION if i in attention else CONV for i in range(layers))
+
+
+def _lfm2_config(c: dict) -> Lfm2Config:
+    # LFM2 carries conv_dim and block_dim beside hidden_size; the released
+    # checkpoints set all three equal and the block is written assuming it,
+    # so a config that disagrees is refused rather than silently reshaped.
+    for key in ("conv_dim", "block_dim"):
+        width = c.get(key)
+        if width is not None and int(width) != int(c["hidden_size"]):
+            raise _not_yet(f"lfm2 with {key}={width} != hidden_size={c['hidden_size']}")
+    return Lfm2Config(
+        vocab_size=c["vocab_size"],
+        hidden_size=c["hidden_size"],
+        intermediate_size=c["intermediate_size"],
+        num_hidden_layers=c["num_hidden_layers"],
+        num_attention_heads=c.get("num_attention_heads", c.get("num_heads")),
+        layer_types=_lfm2_layer_types(c),
+        num_key_value_heads=c.get("num_key_value_heads"),
+        head_dim=c.get("head_dim"),
+        conv_L_cache=c.get("conv_L_cache", 3),
+        conv_bias=c.get("conv_bias", False),
+        norm_eps=c.get("norm_eps", c.get("rms_norm_eps", 1e-5)),
+        rope_theta=_rope_theta(c),
+        tie_word_embeddings=c.get("tie_word_embeddings", False),
+    )
+
+
+def config_from_dict(c: dict):
     """A parsed ``config.json`` as a grilly config."""
     model_type = c.get("model_type")
     if model_type not in _FAMILIES:
         raise _not_yet(f"model_type={model_type!r} (grilly has {', '.join(sorted(_FAMILIES))})")
     _refuse_unsupported(c)
+    if model_type == "lfm2":
+        return _lfm2_config(c)
     qwen2 = model_type == "qwen2"
     bias = c.get("attention_bias", False)
     return LlamaConfig(
@@ -86,6 +145,8 @@ def model_class_for(c: dict):
     for name in c.get("architectures") or []:
         if name in ("LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM"):
             return LlamaForCausalLM
+        if name == "Lfm2ForCausalLM":
+            return Lfm2ForCausalLM
         if name.endswith(("ForSequenceClassification", "ForTokenClassification", "ForQuestionAnswering")):
             raise _not_yet(f"architecture {name} (grilly.huggingface loads causal language models)")
     model_type = c.get("model_type")
@@ -98,7 +159,7 @@ class AutoConfig:
     """``transformers.AutoConfig``, for the configs grilly can run."""
 
     @staticmethod
-    def from_pretrained(pretrained_model_name_or_path, **kwargs) -> LlamaConfig:
+    def from_pretrained(pretrained_model_name_or_path, **kwargs):
         from .loading import repo_files
 
         files = repo_files(pretrained_model_name_or_path, ("config.json",), **kwargs)

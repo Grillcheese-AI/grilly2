@@ -8,10 +8,10 @@ use crate::kernel::{Arg, Kernel};
 use crate::tensor::Tensor;
 
 /// `out[i] = a[i] + b[i]`. Bindings: a, b, out. Push: {n}.
-pub const ADD: Kernel = Kernel { shader: "fnn-residual", bindings: 3, push_words: 1, local_size: [256, 1, 1] };
+pub const ADD: Kernel = Kernel { shader: "g2-residual", bindings: 3, push_words: 1, local_size: [256, 1, 1] };
 
 /// `a[i] += b[i]`. Bindings: a (read-write), b. Push: {n}.
-pub const ADD_INPLACE: Kernel = Kernel { shader: "elementwise-add", bindings: 2, push_words: 1, local_size: [256, 1, 1] };
+pub const ADD_INPLACE: Kernel = Kernel { shader: "g2-add-inplace", bindings: 2, push_words: 1, local_size: [256, 1, 1] };
 
 pub const ALL: &[Kernel] = &[ADD, ADD_INPLACE];
 

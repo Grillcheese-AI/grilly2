@@ -234,7 +234,15 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         // NOT `linear(a, b^T)`: transposing b materializes a copy of the
         // whole matrix, which costs more than the matmul reads. The kernel
         // takes b as it is (measured: faster than linear even before the
-        // copy is counted, and bit-identical).
+        // copy is counted).
+        //
+        // It used to be bit-identical to `linear` as well, because both
+        // accumulated K products in the same order. That stopped being
+        // true when `linear` gained `g2-gemv` for one or two rows, which
+        // sums a strided slice per thread and then a tree: the two now
+        // differ by 1.2e-6 relative, and gemv is the *more* accurate of
+        // the pair (0.001 of a dot product's error bound against bmm's
+        // 0.025). See tests/python/test_transposed_matmul.py.
         _ => bmm(a, b, false),
     }
 }
@@ -514,6 +522,49 @@ pub fn scatter(input: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Resu
         };
         let grad_src = if needs[1] { Some(scatter_src_grad(g, dim, &index, &src_shape)?) } else { None };
         Ok(vec![grad_input, grad_src])
+    })?;
+    Ok(out)
+}
+
+/// `dst.index_copy_(dim, index, src)`, written into `dst`'s storage.
+///
+/// The same write `scatter_` does with a broadcast index, in one dispatch
+/// instead of three: a 1-D index needs no expanding, it needs the kernel
+/// to read it by the `dim` coordinate. A ring buffer's write, so a decode
+/// step makes several a layer.
+pub fn index_copy_(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Result<Tensor> {
+    dst.check_inplace(&[])?;
+    let index = as_index(index, "index_copy_")?;
+    if index.dim() != 1 {
+        return Err(Error::Invalid(format!(
+            "index_copy_(): Index is supposed to be a vector, got {}D",
+            index.dim()
+        )));
+    }
+    if src.dim() != dst.dim() {
+        return Err(Error::Invalid(format!(
+            "index_copy_(): Source/destination tensor must have same number of dimensions, got {} and {}",
+            src.dim(),
+            dst.dim()
+        )));
+    }
+    if src.shape()[dim] != index.numel() {
+        return Err(Error::Invalid(format!(
+            "index_copy_(): Number of indices ({}) should be equal to source.shape[{dim}] ({})",
+            index.numel(),
+            src.shape()[dim]
+        )));
+    }
+    if src.dtype() != dst.dtype() {
+        return Err(Error::Invalid("index_copy_(): self and source must have the same dtype".into()));
+    }
+    check_bounds(&index, dst.shape()[dim], false, IndexOp::Scatter, dim)?;
+    let index = index.detach();
+    k::index_copy(dst, dim, &index, src)?;
+    let mut out = dst.detach();
+    let src_shape = src.shape().to_vec();
+    record("IndexCopyBackward0", &[src], &mut out, &[], false, move |g, _, _| {
+        Ok(vec![Some(indexed(g, dim, &index, IndexMode::Select, "index_copy_")?.reshape(&src_shape)?)])
     })?;
     Ok(out)
 }

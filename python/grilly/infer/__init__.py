@@ -2,6 +2,7 @@
 
 - ``grilly.infer.safetensors`` loads checkpoints;
 - ``grilly.infer.quantization`` quantizes linear weights to int8;
+- ``grilly.infer.lora`` puts low-rank factors beside a frozen weight;
 - ``grilly.infer.sampling`` picks next tokens on the GPU;
 - ``grilly.infer.cache`` holds keys and values on the GPU for decoding;
 - ``grilly.infer.generation`` is the decode loop, with HF's ``generate()``;

@@ -64,13 +64,53 @@ def test_a_matmul_consumes_the_transpose_without_building_it():
     assert tuple(out.shape) == (4, 64)
 
 
-def test_it_is_bit_identical_to_linear_and_to_a_real_transpose():
-    for rows in (1, 4, 33):
+def test_it_is_bit_identical_to_linear():
+    """The contract that matters: writing ``x @ w.t()`` is writing
+    ``linear(x, w)``, exactly, at every shape. This is case (a) at its
+    strictest — same kernel, same inputs, same order — so ``==``."""
+    for rows in (1, 2, 4, 33):
         x = grilly.randn(rows, 32, generator=gen(4))
         w = grilly.randn(64, 32, generator=gen(5))
-        lazy = (x @ w.t()).numpy()
-        assert (lazy == F.linear(x, w).numpy()).all(), f"rows={rows}: vs linear"
-        assert (lazy == (x @ real_transpose(w)).numpy()).all(), f"rows={rows}: vs a real transpose"
+        assert ((x @ w.t()).numpy() == F.linear(x, w).numpy()).all(), f"rows={rows}"
+
+
+def test_it_agrees_with_a_real_transpose_to_the_accuracy_of_a_dot_product():
+    """It used to be **bit**-identical to a materialised transpose too, and
+    deliberately is not any more.
+
+    That equality was a coincidence: ``x @ real_transpose(w)`` goes to
+    ``g2-bmm`` and ``x @ w.t()`` to ``linear``, and those two happened to
+    accumulate K products in the same order. At one or two rows ``linear``
+    now uses ``g2-gemv``, which sums a strided slice per thread and then a
+    tree — a *different order*, so the bits differ.
+
+    The gap is 1.2e-6 relative, past case (a)'s 1e-7, and the honest
+    reading is not that gemv is looser. Measured against a float64
+    reference under a length-K dot product's bound, **gemv sits at 0.001 of
+    that bound and bmm at 0.025**: pairwise summation is more accurate than
+    a sequential fma chain, so most of the gap is bmm's error, and its size
+    is what ``sqrt(K) * eps`` predicts for a K-term float32 sum.
+
+    So this asserts the thing that is actually required — both paths are
+    correct matmuls — and prints the worst ratio, which is what says
+    whether either regressed.
+    """
+    worst = {"x @ w.t()": 0.0, "x @ real_transpose(w)": 0.0}
+    for rows in (1, 2, 4, 33):
+        for k, n in ((32, 64), (512, 512)):
+            x = grilly.randn(rows, k, generator=gen(40 + k))
+            w = grilly.randn(n, k, generator=gen(50 + n))
+            xn, wn = x.numpy().astype(np.float64), w.numpy().astype(np.float64)
+            reference = xn @ wn.T
+            bound = k * 2.0 ** -24 * (np.abs(xn) @ np.abs(wn).T)
+            for name, got in (("x @ w.t()", (x @ w.t()).numpy()),
+                              ("x @ real_transpose(w)", (x @ real_transpose(w)).numpy())):
+                ratio = float((np.abs(got - reference) / np.maximum(bound, 1e-300)).max())
+                worst[name] = max(worst[name], ratio)
+    print("  worst |err| / (K*eps*|x|@|w|): "
+          + ", ".join(f"{k} {v:.3f}" for k, v in worst.items()))
+    for name, ratio in worst.items():
+        assert ratio <= 1.0, f"{name} is {ratio:.3f} of its error bound"
 
 
 def test_a_one_dimensional_query_still_works():

@@ -1,14 +1,22 @@
 # grilly2's own kernels
 
-**Decision (owner, 2026-09-19):** v1's 273 SPIR-V modules cover
+**Decision (owner, 2026-09-19):** v1's 273 SPIR-V modules covered
 neural-network-level ops (activations, layernorm, softmax, attention,
 cross-entropy, embedding, Adam) but no general arithmetic: no elementwise
 multiply, subtract, divide or pow, no scalar operands, no broadcasting, no
 elementwise exp/log/sqrt/clamp, and one reduction. grilly2 therefore owns a
 small set of generic kernels. They live in `crates/grilly-core/shaders/`, are
 compiled at build time with `glslc` from the Vulkan SDK, and never committed
-as SPIR-V. v1 is untouched; CLAUDE.md's "do not recompile or port shaders"
-applies to v1's modules.
+as SPIR-V.
+
+**Update (owner, 2026-09-23): there is no longer a second set.** grilly2
+dispatched exactly six of v1's 273, and when the link to v1 was cut those
+six came over as `g2-relu`, `g2-relu-backward`, `g2-add-inplace`,
+`g2-linear`, `g2-linear-backward` and `g2-residual`, compiled from their
+GLSL by the same `build.rs`. v1 compiled them at `--target-env=vulkan1.0`
+without `-O` and grilly2 compiles them at `vulkan1.2` with `-O`; the op
+tests against torch are unchanged, so the optimizer moved nothing. v1 is
+untouched.
 
 | kernel | does | covers |
 |---|---|---|
@@ -96,3 +104,45 @@ fixed two-sum tree across the workgroup: deterministic, and within
 made last-dim reductions uncoalesced (softmax over (8,8,512,512): 25.6 ms,
 now 9.5) and put a whole-tensor sum on one thread (16M elements ran past the
 fence timeout; now 0.1 ms).
+
+Integer reductions took the same wrong turn and kept it longer.
+`g2-reduce-int` gave each output one invocation, which is a single serial
+thread whenever there is one long row: `any()` over a 127996-element mask
+ran in **7.8 ms**, against 0.016 ms for the same-length float `sum()`, at
+61 ns per element. `g2-reduce-int-rows` splits a contiguous row across a
+workgroup the way the float path does — **0.032 ms**, 244x — and integer
+partials are exact, so it needs none of the float version's compensated
+pair. The columns kernel still takes every other axis.
+
+## What is exact, and what is two ULP
+
+grilly2's arithmetic is not uniformly correctly rounded, and the split is
+worth knowing before writing `==` in a test. Measured against numpy over
+200000 random float32 pairs on an RX 6750 XT:
+
+| op | max ULP from numpy |
+|---|---:|
+| add, subtract, multiply | **0** (bit-exact) |
+| divide | **2** |
+| reciprocal, sqrt | **1** |
+
+This is the hardware behaving to spec, not a kernel bug: Vulkan requires
+`OpFDiv` to be within 2.5 ULP and `OpSqrt` within 3.0, and only add,
+subtract and multiply are required to be correctly rounded. CUDA's `/` is
+correctly rounded by default, so **an expression containing a divide will
+not match torch bit for bit, and one built only from + - * will.**
+
+Two consequences:
+
+- a grilly-against-torch test (CLAUDE.md §9 case (b)) over anything with a
+  divide in it cannot assert `0`, and the reason is this table rather than
+  "float32";
+- a grilly-against-grilly test (case (a)) is unaffected — the same kernel
+  on the same hardware gives the same answer every time, whatever that
+  answer's last bit is. Capture and replay stay bit-exact.
+
+Where an exact result matters and the value is a function of a small
+integer, compute the table on the host and gather from it. CubbyLLM's
+repetition penalty does this: `penalty ** count` from a numpy-built table
+indexed by the count, rather than a device `pow`, because the argmax over
+128k logits can see an ulp.

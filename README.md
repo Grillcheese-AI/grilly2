@@ -10,27 +10,29 @@ Requirements:
 
 - Rust (stable, MSVC target on Windows);
 - the LunarG Vulkan SDK, with `VULKAN_SDK` set;
-- CMake and a C++17 compiler;
-- a checkout of [grilly](https://github.com/Grillcheese-AI/grilly) (v1) beside
-  this one, or `GRILLY_V1_DIR` pointing at one. grilly2 links v1's compiled
-  Vulkan layer and uses its SPIR-V shaders; it does not modify v1.
+- a C++17 compiler.
 
 ```
+git clone --recursive https://github.com/Grillcheese-AI/grilly2
 cargo test
 ```
 
-The first build compiles v1's `grilly_core_lib` with v1's own CMake project
-(a couple of minutes). Useful variables:
+`--recursive` fetches VulkanMemoryAllocator, the one external dependency of
+the Vulkan layer; `git submodule update --init --recursive` does it after
+the fact. Nothing else is needed — no CMake, no second project, and **no
+grilly v1 checkout**: the Vulkan device, buffer pool, pipeline cache and
+command batch live in `crates/grilly-sys/vulkan/`, and every kernel is
+compiled from `crates/grilly-core/shaders/` at build time.
+
+Useful variables:
 
 | variable | effect |
 |---|---|
-| `GRILLY_V1_DIR` | v1 checkout to build against |
-| `GRILLY_CORE_LIB_DIR` | directory with an already-built `grilly_core_lib`; skips the CMake build |
-| `GRILLY_SHADER_DIR` | SPIR-V kernel directory for the default device; default is v1's `shaders/spv` |
+| `VMA_INCLUDE_DIR` | VulkanMemoryAllocator include directory; default is the submodule |
+| `GRILLY_SHADER_DIR` | an extra SPIR-V directory, loaded after grilly2's own, so a kernel can be replaced without a rebuild |
 | `GRILLY_PYTHON` | interpreter with torch and numpy, used by the op tests as the reference; default `python` |
-| `GRILLY_VERBOSE` | set to 1 to print v1's device bring-up log |
+| `GRILLY_VERBOSE` | set to 1 to print the device bring-up log |
 | `GRILLY_LAUNCH_BLOCKING` | set to 1 to submit and wait after every kernel launch (as `CUDA_LAUNCH_BLOCKING`), for diagnosis |
-| `CMAKE_GENERATOR` | CMake generator, e.g. `Visual Studio 17 2022` when a newer Visual Studio is installed without its C++ tools |
 
 The GPU tests need a Vulkan 1.2 device. The op tests compare every op against
 torch on CPU, so they also need torch installed for `GRILLY_PYTHON`.

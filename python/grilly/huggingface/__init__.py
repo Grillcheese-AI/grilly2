@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from .configuration import AutoConfig, config_from_dict, model_class_for
 from .modeling import AutoModel, AutoModelForCausalLM, from_pretrained
+from .peft import load_lora_adapter
 from .tokenization import AutoTokenizer
 
 __all__ = [
@@ -38,5 +39,6 @@ __all__ = [
     "AutoTokenizer",
     "config_from_dict",
     "from_pretrained",
+    "load_lora_adapter",
     "model_class_for",
 ]

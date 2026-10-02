@@ -1,13 +1,13 @@
 //! `MemClass::Persistent`: device memory of exactly the requested size,
 //! destroyed when released and never pooled (docs/inference.md). One test
 //! function, in its own binary, so the device-wide counters it reads are not
-//! moved by other tests running in parallel. `activation-relu` is the probe
+//! moved by other tests running in parallel. `g2-relu` is the probe
 //! kernel (exact in float32).
 
 use grilly_core::{Arg, DType, Device, Kernel, MemClass, Tensor};
 
 const PROBE: Kernel = Kernel {
-    shader: "activation-relu",
+    shader: "g2-relu",
     bindings: 2,
     push_words: 1,
     local_size: [256, 1, 1],

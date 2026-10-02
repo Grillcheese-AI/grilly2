@@ -112,6 +112,3 @@ pub fn last_error() -> String {
         .to_string_lossy()
         .into_owned()
 }
-
-/// Root of the grilly v1 checkout this crate was built against.
-pub const V1_DIR: &str = env!("GRILLY_SYS_V1_DIR");

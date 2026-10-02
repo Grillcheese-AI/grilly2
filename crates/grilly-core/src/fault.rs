@@ -27,7 +27,7 @@ use crate::{Arg, DType, Device, Error, Kernel, Result, Tensor};
 
 /// Bindings: index, record. Push: elements, index offset, size,
 /// allow_negative, kind, dim.
-const CHECK: Kernel = Kernel { shader: "g2-index-fault", bindings: 2, push_words: 6, local_size: [256, 1, 1] };
+const CHECK: Kernel = Kernel { shader: "g2-index-fault", bindings: 2, push_words: 7, local_size: [256, 1, 1] };
 
 pub const KERNELS: &[Kernel] = &[CHECK];
 
@@ -41,6 +41,10 @@ pub enum IndexOp {
     Index = 3,
     Embedding = 4,
     Scatter = 5,
+    /// Not an index at all: an integer divisor that was zero. It shares
+    /// this record because it shares the reason — torch raises, a GPU
+    /// cannot, and asking the host makes the op uncapturable.
+    ZeroDivision = 6,
 }
 
 impl IndexOp {
@@ -50,6 +54,7 @@ impl IndexOp {
             2 => IndexOp::IndexSelect,
             4 => IndexOp::Embedding,
             5 => IndexOp::Scatter,
+            6 => IndexOp::ZeroDivision,
             _ => IndexOp::Index,
         }
     }
@@ -61,6 +66,7 @@ impl IndexOp {
             IndexOp::Index => "indexing with a tensor",
             IndexOp::Embedding => "embedding",
             IndexOp::Scatter => "scatter",
+            IndexOp::ZeroDivision => "integer division",
         }
     }
 
@@ -86,6 +92,7 @@ impl IndexOp {
             IndexOp::Gather | IndexOp::Scatter => Error::Invalid(format!(
                 "index {value} is out of bounds for dimension {dim} with size {size}{where_from}"
             )),
+            IndexOp::ZeroDivision => Error::Invalid(format!("ZeroDivisionError{where_from}")),
         }
     }
 }
@@ -142,7 +149,31 @@ pub fn check_indices(
             u32::from(allow_negative),
             op as u32,
             u32::try_from(dim).unwrap_or(0),
+            0,
         ],
+    )
+}
+
+/// Record a fault if any element of `divisor` is zero.
+///
+/// torch raises `ZeroDivisionError` for an integer zero divisor and a GPU
+/// cannot, so this used to be a download. A download is a host read, which
+/// a capture refuses, so `x % window` on an int64 cursor — the arithmetic
+/// every ring buffer does — could not be recorded. Same bargain as the
+/// index bounds check: one dispatch, and the error arrives at the next
+/// host read.
+pub fn check_nonzero(divisor: &Tensor) -> Result<()> {
+    if divisor.dtype() != DType::I64 || divisor.numel() == 0 {
+        return Ok(());
+    }
+    let device = divisor.device();
+    let record = record(device)?;
+    ARMED.store(true, Ordering::Release);
+    CHECK.launch_flat(
+        device,
+        &[Arg::Storage(divisor), Arg::Tensor(&record)],
+        divisor.numel(),
+        &[divisor.numel() as u32, divisor.offset() as u32, 0, 0, IndexOp::ZeroDivision as u32, 0, 1],
     )
 }
 

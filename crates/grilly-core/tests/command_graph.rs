@@ -16,7 +16,7 @@
 use grilly_core::rng::Generator;
 use grilly_core::{graph, Arg, Device, Kernel, Tensor};
 
-const RELU: Kernel = Kernel { shader: "activation-relu", bindings: 2, push_words: 1, local_size: [256, 1, 1] };
+const RELU: Kernel = Kernel { shader: "g2-relu", bindings: 2, push_words: 1, local_size: [256, 1, 1] };
 
 /// Serializes every test here. Capture is a property of the device, which
 /// is one process-wide singleton, so a second test running in parallel has

@@ -1,0 +1,3 @@
+[submodule "crates/grilly-sys/third_party/VulkanMemoryAllocator"]
+	path = crates/grilly-sys/third_party/VulkanMemoryAllocator
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git

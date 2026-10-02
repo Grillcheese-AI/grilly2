@@ -5,7 +5,7 @@ use grilly_core::Kernel;
 
 /// `out[i] = max(0, x[i])`. Bindings: x, out. Push: {n}.
 pub const RELU: Kernel = Kernel {
-    shader: "activation-relu",
+    shader: "g2-relu",
     bindings: 2,
     push_words: 1,
     local_size: [256, 1, 1],
@@ -14,7 +14,7 @@ pub const RELU: Kernel = Kernel {
 /// `grad_in[i] = grad_out[i] * (x[i] > 0)`. Bindings: grad_out, x, grad_in.
 /// Push: {n}.
 pub const RELU_BACKWARD: Kernel = Kernel {
-    shader: "activation-relu-backward",
+    shader: "g2-relu-backward",
     bindings: 3,
     push_words: 1,
     local_size: [256, 1, 1],
@@ -24,11 +24,44 @@ pub const RELU_BACKWARD: Kernel = Kernel {
 /// Bindings: x, W, b, out. Push: {rows, in, out, has_bias}.
 /// Threads: x = output feature, y = row.
 pub const LINEAR: Kernel = Kernel {
-    shader: "fnn-linear",
+    shader: "g2-linear",
     bindings: 4,
     push_words: 4,
     local_size: [16, 16, 1],
 };
+
+/// `out = x @ W^T (+ b)` for at most [`GEMV_MAX_ROWS`] rows — the decode
+/// shape. One workgroup per output feature, so the weight row is read once
+/// and shared across every input row.
+/// Bindings: x, W, b, out. Push: {rows, in, out, has_bias}.
+/// Threads: one workgroup of 64 per output feature.
+pub const GEMV: Kernel = Kernel {
+    shader: "g2-gemv",
+    bindings: 4,
+    push_words: 4,
+    local_size: [64, 1, 1],
+};
+
+/// Rows at or below which [`GEMV`] beats the tiled kernel.
+///
+/// **Two, measured, not the shader's MAX_M of 8.** A first guess of 8 was
+/// wrong: the tiled kernel's cost is flat in M up to a full tile, while
+/// this one's grows with it, so they cross early. Speedup over the tiled
+/// kernel on an RX 6750 XT:
+///
+/// | shape | M=1 | M=2 | M=4 | M=8 |
+/// |---|---|---|---|---|
+/// | (512,512) | 1.33x | ~1.00x | 0.80x | 0.64x |
+/// | (2048,512) | 1.25x | 1.16x | 0.82x | — |
+/// | (4096,1024) | 2.44x | 2.09x | 1.21x | 0.68x |
+/// | (127996,512) | 1.69x | 1.40x | 1.11x | 0.79x |
+///
+/// Two never loses; four loses at small `out_features` and wins at large,
+/// which would need a second condition on shape to exploit and is worth
+/// nothing to decode — decode is M=1 everywhere. The shader still serves 8
+/// so that raising this needs no shader change if a batched-decode shape
+/// ever makes the large-N column worth taking.
+pub const GEMV_MAX_ROWS: usize = 2;
 
 /// Linear backward, one pass per push `pass`; each pass writes only its own
 /// output, without atomics.
@@ -38,13 +71,13 @@ pub const LINEAR: Kernel = Kernel {
 /// - pass 1: grad_W = grad_out^T @ x; threads (in, out)
 /// - pass 2: grad_b = sum over rows of grad_out; threads (out, 1)
 pub const LINEAR_BACKWARD: Kernel = Kernel {
-    shader: "fnn-linear-backward",
+    shader: "g2-linear-backward",
     bindings: 6,
     push_words: 4,
     local_size: [16, 16, 1],
 };
 
-pub const ALL: &[Kernel] = &[RELU, RELU_BACKWARD, LINEAR, LINEAR_BACKWARD];
+pub const ALL: &[Kernel] = &[RELU, RELU_BACKWARD, LINEAR, GEMV, LINEAR_BACKWARD];
 
 /// Block-sparse attention forward (g2-flash-fwd.glsl). Bindings: q, k, v,
 /// bits, kv_count, kv_list, out, lse. Push: {B, H, L, S, D, Dv, scale, mb,

@@ -20,7 +20,7 @@ use grilly_core::rng::Generator;
 use grilly_core::{Arg, DType, Device, Kernel, MemClass, Tensor};
 
 /// `y = max(x, 0)`, a v1 kernel: enough to observe what a dispatch read.
-const PROBE: Kernel = Kernel { shader: "activation-relu", bindings: 2, push_words: 1, local_size: [256, 1, 1] };
+const PROBE: Kernel = Kernel { shader: "g2-relu", bindings: 2, push_words: 1, local_size: [256, 1, 1] };
 
 /// Serializes these tests: the counters they read belong to the device.
 static COUNTERS: std::sync::Mutex<()> = std::sync::Mutex::new(());

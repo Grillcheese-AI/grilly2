@@ -16,10 +16,11 @@
 
 use grilly_sys::*;
 use std::ffi::{c_void, CString};
-use std::path::PathBuf;
 use std::ptr;
 use std::time::Instant;
 
+const RELU: &str = "probe-relu";
+const TANH: &str = "probe-tanh";
 const DISPATCHES: usize = 1000; // under the device's 1024-launch batch bound
 const OUTPUTS: usize = 16;
 const REPEATS: usize = 7;
@@ -32,18 +33,49 @@ macro_rules! ok {
     }};
 }
 
+/// The probe kernel, compiled by the shim itself.
+///
+/// These tests are about the dispatch path, not about an op, so borrowing
+/// a kernel from a shader directory only ever added a thing to find.
+/// `gc_compile_shader` is already here for fused kernels; two elementwise
+/// one-liners through it leave the crate with no shader files at all and
+/// exercise the JIT on the way past. Both are exact in float32, so every
+/// comparison below is bit-for-bit.
+const PROBE_SRC: &str = r#"#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer I { float src[]; };
+layout(std430, binding = 1) writeonly buffer O { float dst[]; };
+layout(push_constant) uniform P { uint n; } p;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < p.n) dst[i] = max(src[i], 0.0);
+}
+"#;
+
+const PROBE2_SRC: &str = r#"#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer I { float src[]; };
+layout(std430, binding = 1) writeonly buffer O { float dst[]; };
+layout(push_constant) uniform P { uint n; } p;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < p.n) dst[i] = tanh(src[i]);
+}
+"#;
+
+fn compile(ctx: *mut gc_ctx, name: &str, src: &str) {
+    let n = CString::new(name).unwrap();
+    ok!(gc_compile_shader(ctx, n.as_ptr(), src.as_ptr().cast(), src.len() as u64));
+}
+
 struct Ctx(*mut gc_ctx);
 
 impl Ctx {
     fn new() -> Ctx {
         let mut p = ptr::null_mut();
         ok!(gc_create(&mut p));
-        let dir = std::env::var("GRILLY_SHADER_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(V1_DIR).join("shaders/spv"));
-        let dir = CString::new(dir.to_str().unwrap()).unwrap();
-        let mut n = 0u32;
-        ok!(gc_load_shader_dir(p, dir.as_ptr(), &mut n));
+        compile(p, RELU, PROBE_SRC);
+        compile(p, TANH, PROBE2_SRC);
         Ctx(p)
     }
 
@@ -76,7 +108,7 @@ struct Config {
 
 /// (median GPU us per dispatch, median host us per dispatch)
 fn measure(ctx: &Ctx, cfg: Config) -> (f64, f64) {
-    let names = [CString::new("activation-relu").unwrap(), CString::new("activation-tanh").unwrap()];
+    let names = [CString::new(RELU).unwrap(), CString::new(TANH).unwrap()];
     let bytes = cfg.n as usize * 4;
     let input = ctx.buffer(bytes);
     let outs: Vec<gc_buf> = (0..OUTPUTS).map(|_| ctx.buffer(bytes)).collect();

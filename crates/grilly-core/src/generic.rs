@@ -20,9 +20,17 @@ pub const REDUCE_ROWS: Kernel = Kernel { shader: "g2-reduce-rows", bindings: 2, 
 pub const COPY: Kernel = Kernel { shader: "g2-copy", bindings: 2, push_words: 4 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 
 pub const CAST: Kernel = Kernel { shader: "g2-cast", bindings: 2, push_words: 5, local_size: [256, 1, 1] };
+/// Push: n, dtype, start (2 words), step (2 words), dst offset.
+pub const ARANGE: Kernel = Kernel { shader: "g2-arange", bindings: 1, push_words: 7, local_size: [256, 1, 1] };
+/// Push: n, out offset, key (2 words), stream (2 words), std bits.
+pub const PHILOX_NORMAL: Kernel =
+    Kernel { shader: "g2-philox-normal", bindings: 1, push_words: 7, local_size: [256, 1, 1] };
 pub const BINARY_INT: Kernel = Kernel { shader: "g2-binary-int", bindings: 3, push_words: 7 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 pub const WHERE: Kernel = Kernel { shader: "g2-where", bindings: 4, push_words: 7 + 4 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 pub const REDUCE_INT: Kernel = Kernel { shader: "g2-reduce-int", bindings: 2, push_words: 6, local_size: [256, 1, 1] };
+/// Contiguous int64 rows, a workgroup each. Push: rows, len, chunk, chunks, op, in_off, out_off.
+pub const REDUCE_INT_ROWS: Kernel =
+    Kernel { shader: "g2-reduce-int-rows", bindings: 2, push_words: 7, local_size: [256, 1, 1] };
 
 pub const INDEX: Kernel = Kernel { shader: "g2-index", bindings: 3, push_words: 9 + 2 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 pub const INDEX_ADD: Kernel = Kernel { shader: "g2-index-add", bindings: 3, push_words: 9 + 2 * MAX_DIMS as u32, local_size: [256, 1, 1] };
@@ -34,6 +42,9 @@ pub const ARG_REDUCE_ROWS: Kernel = Kernel { shader: "g2-argreduce-rows", bindin
 pub const SORT_INIT: Kernel = Kernel { shader: "g2-sort-init", bindings: 3, push_words: 5, local_size: [256, 1, 1] };
 pub const SORT_STEP: Kernel = Kernel { shader: "g2-sort-step", bindings: 2, push_words: 7, local_size: [256, 1, 1] };
 pub const SORT_TAKE: Kernel = Kernel { shader: "g2-sort-take", bindings: 2, push_words: 3, local_size: [256, 1, 1] };
+/// Small-k top-k, a workgroup per (row, chunk). Push: rows, n, k, chunk,
+/// chunks, in_off, descending, merging.
+pub const TOPK: Kernel = Kernel { shader: "g2-topk", bindings: 4, push_words: 8, local_size: [64, 1, 1] };
 
 pub const SCATTER: Kernel = Kernel { shader: "g2-scatter", bindings: 3, push_words: 8 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
 pub const SCAN: Kernel = Kernel { shader: "g2-scan", bindings: 2, push_words: 8, local_size: [256, 1, 1] };
@@ -47,8 +58,8 @@ pub const LAYER_NORM_BACKWARD: Kernel =
     Kernel { shader: "g2-layer-norm-backward", bindings: 6, push_words: 7, local_size: [256, 1, 1] };
 
 pub const ALL: &[Kernel] = &[
-    UNARY, BINARY, REDUCE, COPY, CAST, BINARY_INT, WHERE, REDUCE_INT, INDEX, INDEX_ADD, INDEX_ADD_ATOMIC,
-    ARG_REDUCE, ARG_REDUCE_ROWS, RMS_NORM, SORT_INIT, SORT_STEP, SORT_TAKE, SCATTER, SCAN, BMM, REDUCE_ROWS, LAYER_NORM,
+    UNARY, BINARY, REDUCE, COPY, CAST, ARANGE, PHILOX_NORMAL, BINARY_INT, WHERE, REDUCE_INT, INDEX, INDEX_ADD, INDEX_ADD_ATOMIC,
+    REDUCE_INT_ROWS, ARG_REDUCE, ARG_REDUCE_ROWS, RMS_NORM, SORT_INIT, SORT_STEP, SORT_TAKE, TOPK, SCATTER, SCAN, BMM, REDUCE_ROWS, LAYER_NORM,
     LAYER_NORM_BACKWARD,
 ];
 
@@ -477,6 +488,102 @@ pub fn cast(x: &Tensor, dtype: DType) -> Result<Tensor> {
     Ok(out)
 }
 
+/// `start + i * step` for `n` elements, computed on the device.
+///
+/// A counting sequence is a function of its own index, so sending one is
+/// pure loss — and it is a *host write*, which a capture refuses. Every
+/// `arange(n) < length` mask in a decode step went through that, so the
+/// step could not be recorded. Integer starts and steps travel as two
+/// words so the whole int64 range survives the push constant.
+pub fn arange(device: &crate::Device, n: usize, start: i64, step: i64, dtype: DType) -> Result<Tensor> {
+    let out = Tensor::empty_typed(device, &[n], dtype)?;
+    if n == 0 {
+        return Ok(out);
+    }
+    let (start_lo, start_hi, step_lo, step_hi) = match dtype {
+        DType::F32 => ((start as f32).to_bits(), 0, (step as f32).to_bits(), 0),
+        DType::I64 | DType::I32 => (
+            start as u64 as u32,
+            (start as u64 >> 32) as u32,
+            step as u64 as u32,
+            (step as u64 >> 32) as u32,
+        ),
+        _ => return Err(Error::Invalid(format!("arange: no {} sequence", dtype.name()))),
+    };
+    let push = [u32_of(n, "numel")?, dtype.code(), start_lo, start_hi, step_lo, step_hi, 0];
+    ARANGE.launch_flat(device, &[Arg::Storage(&out)], n, &push)?;
+    Ok(out)
+}
+
+/// Fill `x` with `std`-scaled standard normals from the counter-based
+/// stream `(key, stream)`, on the device.
+///
+/// Element `i` is a function of `(key, stream, i)` and nothing else, so
+/// the same three numbers give the same value on any machine and at any
+/// later time. That is what lets evolution strategies regenerate a
+/// population's perturbations for the update instead of storing them.
+///
+/// Not the same values as `Generator::normal`, and deliberately: that one
+/// rounds Box-Muller from f64, this does it in f32 because f64 on RDNA2
+/// runs at 1/16 rate. `randn` is unaffected.
+pub fn philox_normal(x: &Tensor, key: u64, stream: u64, std: f32) -> Result<()> {
+    require_float("philox_normal", x.dtype())?;
+    let n = x.numel();
+    if n == 0 {
+        return Ok(());
+    }
+    let push = [
+        u32_of(n, "numel")?,
+        u32_of(x.offset(), "offset")?,
+        key as u32,
+        (key >> 32) as u32,
+        stream as u32,
+        (stream >> 32) as u32,
+        std.to_bits(),
+    ];
+    PHILOX_NORMAL.launch_flat(x.device(), &[Arg::Storage(x)], n, &push)?;
+    x.bump_version();
+    Ok(())
+}
+
+/// Write the integer `value` to every element of `x`, on the device.
+///
+/// `vkCmdFillBuffer` takes a 4-byte pattern, so an int64 fill had to
+/// upload one element and broadcast it with a strided copy — a **host
+/// write**, which a capture refuses. That is why `torch.tensor(1)`,
+/// `zeros(n, dtype=int64)` and even `x % 512` on an int64 tensor were all
+/// uncapturable. `g2-arange` with a zero step is the same write with no
+/// host in it.
+pub fn fill_int(x: &Tensor, value: i64) -> Result<()> {
+    let n = x.numel();
+    if n == 0 {
+        return Ok(());
+    }
+    let push = [
+        u32_of(n, "numel")?,
+        x.dtype().code(),
+        value as u64 as u32,
+        (value as u64 >> 32) as u32,
+        0,
+        0,
+        u32_of(x.offset(), "offset")?,
+    ];
+    ARANGE.launch_flat(x.device(), &[Arg::Storage(x)], n, &push)
+}
+
+/// `start + i * step` in float32, for starts and steps that are not whole
+/// numbers. Separate from [`arange`] because the integer form has to keep
+/// 64 bits and this one has to keep a fraction.
+pub fn arange_f32(device: &crate::Device, n: usize, start: f32, step: f32) -> Result<Tensor> {
+    let out = Tensor::empty_typed(device, &[n], DType::F32)?;
+    if n == 0 {
+        return Ok(out);
+    }
+    let push = [u32_of(n, "numel")?, DType::F32.code(), start.to_bits(), 0, step.to_bits(), 0, 0];
+    ARANGE.launch_flat(device, &[Arg::Storage(&out)], n, &push)?;
+    Ok(out)
+}
+
 fn require(dtype: DType, want: DType, what: &str) -> Result<()> {
     if dtype == want {
         Ok(())
@@ -558,9 +665,57 @@ pub fn reduce_int(x: &Tensor, dim: usize, op: Reduce, keepdim: bool) -> Result<T
         out_shape.remove(dim);
     }
     let out = Tensor::empty_typed(x.device(), &out_shape, DType::I64)?;
+    if inner == 1 {
+        // the reduced axis is the last one, so each output owns a
+        // contiguous run and a workgroup can split it
+        reduce_int_rows(x, x.offset(), outer, len, op, &out)?;
+        return Ok(out);
+    }
     let push = [u32_of(outer, "outer")?, u32_of(len, "len")?, u32_of(inner, "inner")?, op as u32, u32_of(x.offset(), "offset")?, 0];
     REDUCE_INT.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], outer * inner, &push)?;
     Ok(out)
+}
+
+/// Reduce `rows` contiguous int64 rows of `len` elements into `out`.
+///
+/// The integer twin of [`reduce_rows`], and it exists for the same reason
+/// the float one does: one invocation per output is right when there are
+/// many outputs and is a single serial thread when there is one long row.
+/// `any()` over a 127996-element mask took 7.8 ms that way. Partials are
+/// exact here, so there is no compensated pair to carry and the second
+/// pass is this kernel again over plain int64.
+fn reduce_int_rows(x: &Tensor, offset: usize, rows: usize, len: usize, op: Reduce, out: &Tensor) -> Result<()> {
+    let wanted = if rows >= TARGET_GROUPS { 1 } else { (TARGET_GROUPS / rows).min(len.div_ceil(2048)).max(1) };
+    let chunk = len.div_ceil(wanted).max(1);
+    let chunks = len.div_ceil(chunk).max(1);
+    let groups = rows * chunks;
+    let gx = groups.min(65_535);
+    let threads = [u32_of(gx * 256, "workgroups")?, u32_of(groups.div_ceil(gx), "workgroups")?, 1];
+    let (rows32, len32) = (u32_of(rows, "rows")?, u32_of(len, "len")?);
+    let (off, out_off) = (u32_of(offset, "offset")?, u32_of(out.offset(), "offset")?);
+    if chunks == 1 {
+        return REDUCE_INT_ROWS.launch(
+            x.device(),
+            &[Arg::Storage(x), Arg::Storage(out)],
+            threads,
+            &[rows32, len32, len32, 1, op as u32, off, out_off],
+        );
+    }
+    let partial = Tensor::empty_typed(x.device(), &[groups], DType::I64)?;
+    let (chunk32, chunks32) = (u32_of(chunk, "chunk")?, u32_of(chunks, "chunks")?);
+    REDUCE_INT_ROWS.launch(
+        x.device(),
+        &[Arg::Storage(x), Arg::Storage(&partial)],
+        threads,
+        &[rows32, len32, chunk32, chunks32, op as u32, off, 0],
+    )?;
+    let threads2 = [u32_of(rows.min(65_535) * 256, "workgroups")?, u32_of(rows.div_ceil(65_535), "workgroups")?, 1];
+    REDUCE_INT_ROWS.launch(
+        x.device(),
+        &[Arg::Storage(&partial), Arg::Storage(out)],
+        threads2,
+        &[rows32, chunks32, chunks32, 1, op as u32, 0, out_off],
+    )
 }
 
 /// How an index tensor addresses the gathered dimension.
@@ -717,6 +872,9 @@ pub fn arg_reduce(x: &Tensor, dim: usize, max: bool) -> Result<Tensor> {
 /// original order; NaN is largest, as in torch), so the result is
 /// deterministic.
 pub fn sort_positions(x: &Tensor, descending: bool, take: usize) -> Result<Tensor> {
+    if let Some(out) = topk_positions(x, descending, take)? {
+        return Ok(out);
+    }
     let words = match x.dtype() {
         DType::F32 => 1u32,
         DType::I64 => 2,
@@ -758,28 +916,140 @@ pub fn sort_positions(x: &Tensor, descending: bool, take: usize) -> Result<Tenso
     Ok(out)
 }
 
+/// Largest k a single `g2-topk` list holds. Above this the bitonic sort
+/// wins anyway: it is `log2(n)*(log2(n)+1)/2` dispatches whatever k is,
+/// while this is `O(n*k)` comparisons.
+pub const TOPK_MAX_K: usize = 64;
+
+/// `Some(positions)` when `g2-topk` can answer, `None` to fall through.
+///
+/// The fast path takes float32 rows and `k <= TOPK_MAX_K`. int64 keys fall
+/// through because the shared lists hold one word per entry and widening
+/// them would halve the k that fits, for a case nothing asks for — torch's
+/// `topk` on this backend is called on logits and on similarity scores.
+///
+/// One dispatch when a row fits one chunk, two otherwise. The chunk count
+/// is chosen so every chunk has at least `take` elements, which is what
+/// lets the merge assume each list can fill.
+fn topk_positions(x: &Tensor, descending: bool, take: usize) -> Result<Option<Tensor>> {
+    let Some((&n, lead)) = x.shape().split_last() else { return Ok(None) };
+    let rows: usize = lead.iter().product();
+    if x.dtype() != DType::F32 || take == 0 || take > TOPK_MAX_K || take > n || rows == 0 {
+        return Ok(None);
+    }
+    let mut out_shape = lead.to_vec();
+    out_shape.push(take);
+    let out = Tensor::empty_typed(x.device(), &out_shape, DType::I64)?;
+
+    // Three bounds, and the middle one is the one that bites. Pass two
+    // merges `chunks * take` candidates in a SINGLE workgroup, so a fine
+    // split moves the whole problem into that workgroup: at k=64 an
+    // earlier version cut 16384 into 256 chunks and pass two then had the
+    // original row back, 3.2 ms against the bitonic path's 1.0.
+    let by_size = n.div_ceil(TOPK_CHUNK).max(1);        // ~TOPK_CHUNK elements each
+    let by_merge = (TOPK_MERGE / take).max(1);          // pass two's input
+    let chunks = if rows >= TOPK_GROUPS { 1 } else { by_size.min(by_merge).min(n / take).max(1) };
+    let chunk = n.div_ceil(chunks);
+    let chunks = n.div_ceil(chunk);
+    let dev = x.device();
+    let (rows32, n32, k32) = (u32_of(rows, "rows")?, u32_of(n, "sort length")?, take as u32);
+    let in_off = u32_of(x.offset(), "offset")?;
+    let desc = u32::from(descending);
+
+    let launch = |groups: usize, args: &[Arg], push: [u32; 8]| -> Result<()> {
+        let gx = groups.min(65_535);
+        let threads = [u32_of(gx * 64, "workgroups")?, u32_of(groups.div_ceil(gx), "workgroups")?, 1];
+        TOPK.launch(dev, args, threads, &push)
+    };
+
+    if chunks == 1 {
+        let values = Tensor::empty_typed(dev, &out_shape, DType::F32)?;
+        return launch(
+            rows,
+            &[Arg::Storage(x), Arg::Storage(&out), Arg::Storage(&values), Arg::Storage(&out)],
+            [rows32, n32, k32, n32, 1, in_off, desc, 0],
+        )
+        .map(|()| Some(out));
+    }
+
+    // pass one: every chunk's own top-k, values and original positions
+    let part_val = Tensor::empty_typed(dev, &[rows * chunks * take], DType::F32)?;
+    let part_idx = Tensor::empty_typed(dev, &[rows * chunks * take], DType::I64)?;
+    launch(
+        rows * chunks,
+        &[Arg::Storage(x), Arg::Storage(&part_idx), Arg::Storage(&part_val), Arg::Storage(&part_idx)],
+        [rows32, n32, k32, u32_of(chunk, "chunk")?, u32_of(chunks, "chunks")?, in_off, desc, 0],
+    )?;
+
+    // pass two: merge the chunks, reading the positions pass one recorded
+    let merged = u32_of(chunks * take, "merged")?;
+    let values = Tensor::empty_typed(dev, &out_shape, DType::F32)?;
+    launch(
+        rows,
+        &[Arg::Storage(&part_val), Arg::Storage(&part_idx), Arg::Storage(&values), Arg::Storage(&out)],
+        [rows32, merged, k32, merged, 1, 0, desc, 1],
+    )?;
+    Ok(Some(out))
+}
+
+/// Rows above which a top-k already has enough workgroups to fill the
+/// device and needs no chunking.
+const TOPK_GROUPS: usize = 64;
+/// Elements a chunk aims to hold, so a workgroup has real work to do.
+///
+/// Both of these were swept against the bitonic path over
+/// (16384, 128000) x k in (8, 32, 40, 64): 1024 and 2048 win or tie every
+/// cell, and the fast path is then 1.7x to 8.0x whatever k is. They pull
+/// against each other — a finer split is more parallel in pass one and
+/// more work for pass two, which is a single workgroup.
+const TOPK_CHUNK: usize = 1024;
+/// Candidates pass two may be handed, since it runs in one workgroup.
+const TOPK_MERGE: usize = 2048;
+
 /// torch's scatter, in place: `dst[c with c[dim] := index[c]] = src[c]`
 /// for every position `c` of `index` (int64, bounds-checked by the caller,
 /// non-negative). `src` has `dst`'s dtype and is at least `index`'s size in
 /// every dim; `dst` is at least `index`'s size in every dim but `dim`.
 /// Bumps `dst`'s version.
 pub fn scatter(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Result<()> {
+    scatter_inner(dst, dim, index, src, index.shape(), false)
+}
+
+/// `dst[index[i], ...] = src[i, ...]` along `dim` — torch's `index_copy_`.
+///
+/// The same kernel as [`scatter`] with the index read by the `dim`
+/// coordinate alone, which is what a 1-D index means. Expanding it into a
+/// full-shaped index first cost a reshape, an expand and then the scatter:
+/// three dispatches to write one row of a ring buffer, and a decode step
+/// writes six a layer.
+pub fn index_copy(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Result<()> {
+    if index.dim() != 1 {
+        return Err(Error::Invalid(format!(
+            "index_copy_(): Index is supposed to be a vector, got {}D",
+            index.dim()
+        )));
+    }
+    scatter_inner(dst, dim, index, src, src.shape(), true)
+}
+
+fn scatter_inner(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor, shape: &[usize], select: bool) -> Result<()> {
     require(index.dtype(), DType::I64, "scatter index")?;
     require(src.dtype(), dst.dtype(), "scatter source")?;
+    let n: usize = shape.iter().product();
     let mut push = vec![
-        u32_of(index.numel(), "numel")?,
-        index.dim() as u32,
+        u32_of(n, "numel")?,
+        shape.len() as u32,
         dim as u32,
         dst.dtype().words() as u32,
         u32_of(src.offset(), "offset")?,
         u32_of(index.offset(), "offset")?,
         u32_of(dst.offset(), "offset")?,
-        0,
+        u32::from(select),
     ];
-    push.extend(padded(index.shape(), "scatter")?);
+    push.extend(padded(shape, "scatter")?);
     push.extend(padded(&contiguous_strides(src.shape()), "scatter")?);
     push.extend(padded(&contiguous_strides(dst.shape()), "scatter")?);
-    SCATTER.launch_flat(dst.device(), &[Arg::Storage(src), Arg::Storage(index), Arg::Storage(dst)], index.numel(), &push)?;
+    SCATTER.launch_flat(dst.device(), &[Arg::Storage(src), Arg::Storage(index), Arg::Storage(dst)], n, &push)?;
     dst.bump_version();
     Ok(())
 }
