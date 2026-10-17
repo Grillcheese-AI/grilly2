@@ -29,6 +29,18 @@ running mean rather than a mean of the whole prompt, and the adapter's
 order of contraction. The model here is tiny with a window of 8, so a
 40-token prompt and 30 decode steps cross the window and wrap the ring
 several times.
+
+Every test runs twice: on the 450M's shape (no memory) and with the
+episodic memory on every second layer (``recall/read.py``'s forward,
+transcribed into the reference: cosine top-3 over the tokens *more than
+the window* back, a scaled dot-product softmax over them). Its decode
+path has a store of 16 rows, so the 36-token decode also wraps the store
+and reads only the last 16 aged tokens — the reference models that as a
+lower bound on the candidates (``capacity``). What the memory adds that a
+shape test would miss: the token exactly ``window`` back is attended, not
+remembered; the one ``window + 1`` back is remembered, not attended; a
+position with nothing beyond the window reads exactly zero; and the read
+at a step sees the store *before* that step's token ages into it.
 """
 
 from __future__ import annotations
@@ -44,22 +56,29 @@ F = torch.nn.functional
 
 EPS32 = 2.0 ** -24
 HIDDEN, HEADS, LAYERS, VOCAB, WINDOW = 32, 4, 5, 97, 8
+MEM_EVERY, MEM_KEY, MEM_TOPK, MEM_CAP = 2, 8, 3, 16
 
 
-def config():
+def config(memory=False):
+    mem = dict(mem_every=MEM_EVERY, mem_key=MEM_KEY, mem_topk=MEM_TOPK, mem_capacity=MEM_CAP) if memory else {}
     return CubbyConfig(vocab_size=VOCAB, hidden_size=HIDDEN, num_hidden_layers=LAYERS,
                        num_attention_heads=HEADS, window=WINDOW, attn_every=3, ctx_dim=8,
                        n_slots=4, router_hidden=16, gen_hidden=16, gen_basis=4, gen_rank=2,
-                       gen_layers=LAYERS, vocab_real=VOCAB - 2)
+                       gen_layers=LAYERS, vocab_real=VOCAB - 2, **mem)
 
 
-@pytest.fixture(scope="module")
-def pair():
+def has_memory(weights) -> bool:
+    return "model.layers.0.memory.q.weight" in weights
+
+
+@pytest.fixture(scope="module", params=["plain", "memory"])
+def pair(request):
     """A grilly model with random weights, and the same weights as float64
     numpy arrays for the reference. Every parameter is non-trivial: the
-    adapter's B bases start at zero in CubbyLLM, which would hide it."""
+    adapter's B bases start at zero in CubbyLLM, which would hide it, and
+    so does the memory's exit ``o`` at growth."""
     rng = np.random.default_rng(7)
-    model = CubbyForCausalLM(config())
+    model = CubbyForCausalLM(config(memory=request.param == "memory"))
     weights = {}
     with grilly.no_grad():
         for name, param in model.named_parameters():
@@ -80,14 +99,17 @@ def pair():
 
 # ── the reference ─────────────────────────────────────────────────────────
 
-def reference(weights, ids, dtype, recurrence):
+def reference(weights, ids, dtype, recurrence, capacity=None):
     """CubbyLLM's forward over ``ids`` (batch, T) from position 0.
 
     ``recurrence='scan'`` is the log-domain scan its training forward runs;
     ``'loop'`` is ``h = a*h + x`` a position at a time, which is what its
     decode step computes. Attention is the windowed causal mask over the
-    whole sequence, which the step's ring reproduces."""
-    c = config()
+    whole sequence, which the step's ring reproduces. The memory read is
+    ``MemoryRead.forward`` over the tokens beyond the window; ``capacity``
+    keeps only the last that many of them, which is what the decode step's
+    store holds once it has wrapped (``EpisodicStore`` at that capacity)."""
+    c = config(memory=has_memory(weights))
     W = {k: torch.tensor(v, dtype=dtype) for k, v in weights.items()}
     ids = torch.tensor(ids)
     x = W["model.embed_tokens.weight"][ids]
@@ -143,6 +165,26 @@ def reference(weights, ids, dtype, recurrence):
                     out.append(h)
                 y = torch.stack(out, dim=1)
         x = x + y
+        if c.is_memory(i):
+            m = pre + "memory."
+            hm = rms(x, W[pre + "memory_norm.weight"])
+            q, k, v = (F.linear(hm, W[m + f"{p}.weight"]) for p in "qkv")
+            sim = torch.einsum("bik,bjk->bij", F.normalize(q, dim=-1), F.normalize(k, dim=-1))
+            j = torch.arange(t)
+            back = j[:, None] - j[None, :]
+            allowed = back > c.window
+            if capacity is not None:
+                allowed &= back <= c.window + capacity
+            sim = sim.masked_fill(~allowed[None], float("-inf"))
+            kk = min(c.mem_topk, t)
+            topv, topi = sim.topk(kk, dim=-1)
+            dk = k.shape[-1]
+            k_set = torch.gather(k.unsqueeze(1).expand(b, t, t, dk), 2, topi.unsqueeze(-1).expand(b, t, kk, dk))
+            v_set = torch.gather(v.unsqueeze(1).expand(b, t, t, d), 2, topi.unsqueeze(-1).expand(b, t, kk, d))
+            valid = ~torch.isinf(topv)
+            s = ((q.unsqueeze(2) * k_set).sum(-1) * dk ** -0.5).masked_fill(~valid, -1e9)
+            r = F.linear((torch.softmax(s, dim=-1).unsqueeze(-1) * v_set).sum(2), W[m + "o.weight"])
+            x = x + torch.where(~valid.any(-1, keepdim=True), torch.zeros_like(r), r)
         z = rms(x, W[pre + "ffn_norm.weight"])
         x = x + F.linear(F.silu(F.linear(z, W[pre + "ffn.gate_proj.weight"])) *
                          F.linear(z, W[pre + "ffn.up_proj.weight"]), W[pre + "ffn.down_proj.weight"])
@@ -175,7 +217,7 @@ def max_err(got, exact):
 def test_the_parameter_names_are_the_export_contract(pair):
     """CubbyLLM exports to these names; renaming one here breaks every
     exported checkpoint, so the set is spelled out."""
-    model, _ = pair
+    model, weights = pair
     names = {n for n, _ in model.named_parameters()}
     per_attention = {"mixer_norm.weight", "mixer.qkv.weight", "mixer.o_proj.weight"}
     per_recurrent = {"mixer_norm.weight"} | {f"mixer.{p}.{k}" for p in ("gate", "value", "decay")
@@ -187,17 +229,22 @@ def test_the_parameter_names_are_the_export_contract(pair):
     expected |= {f"model.adapter.{p}" for p in (
         "ctx_proj.weight", "ctx_proj.bias", "ctx_norm.weight", "ctx_norm.bias", "layer_emb",
         "mix_in.weight", "mix_in.bias", "mix_out.weight", "mix_out.bias", "A_basis", "B_basis")}
+    memory = {"memory_norm.weight"} | {f"memory.{p}.weight" for p in "qkvo"}
     for i in range(LAYERS):
         local = (per_attention if i % 3 == 0 else per_recurrent) | ffn
+        if has_memory(weights) and i % MEM_EVERY == 0:
+            local |= memory
         expected |= {f"model.layers.{i}.{p}" for p in local}
     assert names == expected, sorted(names ^ expected)
 
 
-@pytest.mark.parametrize("length", [1, 7, 8, 9, 40])
+@pytest.mark.parametrize("length", [1, 7, 8, 9, 10, 40])
 def test_a_prompt_matches_cubbyllm(pair, length):
     """Lengths either side of the window (8): below it the mask is plain
-    causal, at 9 the first key drops out, at 40 most do. Batch of two, so a
-    row's context mean cannot borrow from the other row."""
+    causal, at 9 the first key drops out (and the memory still has nothing:
+    it reads zero), at 10 the memory's first candidate appears, at 40 most
+    keys are out and every memory read picks 3 of up to 31. Batch of two,
+    so a row's context mean cannot borrow from the other row."""
     model, weights = pair
     rng = np.random.default_rng(length)
     ids = rng.integers(0, VOCAB, size=(2, length)).tolist()
@@ -224,23 +271,36 @@ def decode(model, prompt, count):
     return np.stack(out, 1).astype(np.float64), state
 
 
-def test_decode_matches_cubbyllms_step(pair):
-    """Five prompt tokens, then 30 steps: the ring (8 slots) wraps three
-    times and every recurrent vector carries 35 tokens. Each step's
-    logits against the float64 recurrence at that position."""
+@pytest.mark.parametrize("count", [31, 12])
+def test_decode_matches_cubbyllms_step(pair, count):
+    """36 tokens: five from the prompt and 31 steps, so the ring (8 slots)
+    wraps three times, every recurrent vector carries 35 tokens, and the
+    memory's store (16 rows) fills at step 24 and wraps for the last 12;
+    or 24 from the prompt and 12 steps, so the prompt itself has to leave
+    the store full (tokens 0-15, the next step overwrites row 0) and the
+    ring holding the last 8. Each step's logits against the float64
+    recurrence at that position.
+
+    Not tested, because it is not the step's behaviour: a prompt longer
+    than ``window + capacity`` reads its whole beyond-window past during
+    the prefill, as CubbyLLM's training forward does, and only the steps
+    after it see a store capped at the last ``capacity`` aged tokens."""
     model, weights = pair
     rng = np.random.default_rng(11)
     ids = rng.integers(0, VOCAB, size=(2, 36)).tolist()
-    count = 31
     mine, _ = decode(model, ids, count)
     tail = slice(len(ids[0]) - count - 1, len(ids[0]) - 1)
-    exact = reference(weights, ids, torch.float64, "loop")[:, tail]
-    theirs = reference(weights, ids, torch.float32, "loop")[:, tail]
+    exact = reference(weights, ids, torch.float64, "loop", capacity=MEM_CAP)[:, tail]
+    theirs = reference(weights, ids, torch.float32, "loop", capacity=MEM_CAP)[:, tail]
     bound = 2 * HIDDEN * EPS32 * np.abs(exact).max()
     print(f"decode: grilly {max_err(mine, exact) / bound:.2f} of the bound, "
           f"torch float32 {max_err(theirs, exact) / bound:.2f}")
     assert max_err(theirs, exact) <= bound, "torch float32 itself is outside the bound"
     assert max_err(mine, exact) <= bound, f"grilly is {max_err(mine, exact) / bound:.2f} of the bound"
+    if has_memory(weights) and count == 31:
+        # the wrap is real: the whole beyond-window past gives different logits at the end
+        unbounded = reference(weights, ids, torch.float64, "loop")[:, tail]
+        assert max_err(unbounded, exact) > bound
 
 
 def test_greedy_tokens_are_identical_to_cubbyllm(pair):
@@ -251,7 +311,7 @@ def test_greedy_tokens_are_identical_to_cubbyllm(pair):
     got = model.generate(grilly.tensor([prompt]), max_new_tokens=count).tolist()[0][len(prompt):]
     ids = list(prompt)
     for _ in range(count):
-        ids.append(int(np.argmax(reference(weights, [ids], torch.float64, "loop")[0, -1])))
+        ids.append(int(np.argmax(reference(weights, [ids], torch.float64, "loop", capacity=MEM_CAP)[0, -1])))
     want = ids[len(prompt):]
     if got != want:
         at = next(i for i, (a, b) in enumerate(zip(got, want)) if a != b)
@@ -260,28 +320,36 @@ def test_greedy_tokens_are_identical_to_cubbyllm(pair):
 
 def test_the_state_is_the_same_size_at_any_length(pair):
     """The inference claim: a stream costs the same after 3 tokens as after
-    40. Buffers are written in place, never replaced."""
+    40. Buffers are written in place, never replaced. With memory the
+    store is sized by the stream's known length (``max_length - window``
+    rows, ``mem_capacity`` at most) and then never grows either."""
     model, _ = pair
     c = model.config
     with grilly.no_grad():
         state = model.make_cache(1, 0)
         model(grilly.tensor([[1, 2, 3]]), past_key_values=state)
         size = state.nbytes
-        buffers = [id(t) for t in [state.ctx_sum, *state.recurrent, *state.keys, *state.values]]
+        buffers = [id(t) for t in state.buffers()]
         for token in range(37):
             model(grilly.tensor([[token % VOCAB]]), past_key_values=state)
     assert state.position == 40
     assert state.nbytes == size
-    assert [id(t) for t in [state.ctx_sum, *state.recurrent, *state.keys, *state.values]] == buffers
+    assert [id(t) for t in state.buffers()] == buffers
     per_stream = 4 * (HIDDEN * (1 + len(c.recurrent_layers)) + 2 * len(c.attention_layers) * WINDOW * HIDDEN)
+    per_stream += 4 * len(c.memory_layers) * ((2 * MEM_KEY + HIDDEN) * MEM_CAP + (MEM_KEY + HIDDEN) * WINDOW)
     assert size == per_stream
+    if c.memory_layers:
+        assert model.make_cache(1, 20).capacity == 20 - WINDOW
+        assert model.make_cache(1, 9).capacity == MEM_TOPK          # never fewer rows than the read gathers
+        assert model.make_cache(1, 100).capacity == MEM_CAP
 
 
 def test_selected_rows_continue_as_they_would_have(pair):
     """Dropping a finished stream must keep every buffer's rows aligned: the
-    recurrent vectors, both rings and the context sum. A misaligned row
-    continues someone else's stream, an O(1) error; so the kept rows are
-    held to the decode bound against the float64 reference of their own
+    recurrent vectors, both rings, the context sum and the memory's stores
+    and rings (four tokens are in the store twelve tokens in). A misaligned
+    row continues someone else's stream, an O(1) error; so the kept rows
+    are held to the decode bound against the float64 reference of their own
     streams, rows 2 and 0 of three, twelve tokens in (past the window).
 
     Not compared to the unselected batch at rtol 1e-7: the same step at a

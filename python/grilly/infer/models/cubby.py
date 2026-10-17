@@ -29,6 +29,18 @@ The computation follows CubbyLLM's own torch code op for op (its
   ``ctx``. The ``d x d`` matrix is never built: both contractions run
   against the stacked bases.
 - **head**: a plain linear projection to the (padded) vocabulary.
+- **episodic memory** (``mem_every > 0``; the grown bases, not the 450M):
+  on layers ``i % mem_every == 0``, between the mixer and the FFN,
+  ``x += memory(rms(x))`` reads the past *beyond* the window — the
+  ``mem_topk`` stored keys nearest the query by cosine, then a softmax over
+  their scaled dot products pools the stored values (CubbyLLM's
+  ``recall/read.py`` and ``recall/store.py``). Over a prompt every position
+  selects from the whole beyond-window past; at one token the selection is
+  one matmul against a per-stream store of ``mem_capacity`` rows, into
+  which a token is aged the moment it falls off the back of the window.
+  The store is the one buffer here that is not the window's size: a
+  stream of at most ``max_length`` tokens needs ``max_length - window``
+  rows, which is what :meth:`CubbyForCausalLM.make_cache` allocates.
 
 The parameter names are this file's, not CubbyLLM's pickle layout: a
 checkpoint is exported to safetensors under these names on the CubbyLLM
@@ -44,7 +56,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ... import Tensor, _not_yet, arange, cat, float32, full, int64, tensor, zeros
+from ... import (Tensor, _not_yet, arange, cat, float32, full, int64, isfinite, logical_not,
+                 masked_fill, tensor, topk, where, zeros, zeros_like)
+from ... import any as _any
 from ... import nn
 from ...nn import functional as F
 from ..generation import CausalLMOutput, GenerationMixin
@@ -80,6 +94,15 @@ class CubbyConfig:
     layer_norm_eps: float = 1e-5
     #: token ids below this are real; the head's rows above it are padding
     vocab_real: int | None = None
+    #: episodic memory on layers ``i % mem_every == 0``; 0 (the 450M bases)
+    #: builds none
+    mem_every: int = 0
+    mem_topk: int = 8
+    mem_key: int = 64
+    #: beyond-window tokens a stream keeps per memory layer before the
+    #: oldest is overwritten; ``make_cache`` allocates fewer when the
+    #: stream's length is known
+    mem_capacity: int = 16384
 
     def __post_init__(self) -> None:
         if self.vocab_real is None:
@@ -91,6 +114,10 @@ class CubbyConfig:
             raise ValueError(f"head dim {self.head_dim} must be even for the rotary embedding")
         if self.attn_every < 1 or self.window < 1:
             raise ValueError("attn_every and window must be at least 1")
+        if self.mem_every < 0:
+            raise ValueError("mem_every must be 0 (no memory) or positive")
+        if self.mem_every and (self.mem_key < 1 or self.mem_topk < 1 or self.mem_capacity < self.mem_topk):
+            raise ValueError("a memory needs mem_key >= 1 and mem_capacity >= mem_topk >= 1")
 
     @property
     def head_dim(self) -> int:
@@ -99,6 +126,9 @@ class CubbyConfig:
     def is_attention(self, layer: int) -> bool:
         return layer % self.attn_every == 0
 
+    def is_memory(self, layer: int) -> bool:
+        return self.mem_every > 0 and layer % self.mem_every == 0
+
     @property
     def attention_layers(self) -> tuple:
         return tuple(i for i in range(self.num_hidden_layers) if self.is_attention(i))
@@ -106,6 +136,10 @@ class CubbyConfig:
     @property
     def recurrent_layers(self) -> tuple:
         return tuple(i for i in range(self.num_hidden_layers) if not self.is_attention(i))
+
+    @property
+    def memory_layers(self) -> tuple:
+        return tuple(i for i in range(self.num_hidden_layers) if self.is_memory(i))
 
 
 class CubbyState:
@@ -121,18 +155,40 @@ class CubbyState:
     a softmax over keys and a sum over values weighted by it, so the order
     only changes the order the sum runs in. ``live`` is 0 on a written slot
     and -inf on one not yet written, one mask for every attention layer.
+
+    Per memory layer, a store of ``capacity`` rows — the memory key, the
+    same key normalised (selection is cosine, so one matmul against these),
+    and the value — plus a ring of the last ``window`` memory keys and
+    values waiting to age into it: token ``p`` goes into the store at row
+    ``(p - window) % capacity`` at the step that takes token ``p + window``.
+    ``mem_live`` is the store's mask, one for every memory layer, since all
+    of them age the same token at the same step. Every row of the batch has
+    its own store, so sampled batches read their own pasts.
     """
 
-    def __init__(self, config: CubbyConfig, batch_size: int) -> None:
+    def __init__(self, config: CubbyConfig, batch_size: int, capacity: int | None = None) -> None:
         c = config
         self.window = c.window
+        self.capacity = c.mem_capacity if capacity is None else max(int(capacity), c.mem_topk)
         ring = (batch_size, c.num_attention_heads, c.window, c.head_dim)
         self.ctx_sum = zeros((batch_size, c.hidden_size))
         self.recurrent = [zeros((batch_size, c.hidden_size)) for _ in c.recurrent_layers]
         self.keys = [zeros(ring) for _ in c.attention_layers]
         self.values = [zeros(ring) for _ in c.attention_layers]
         self.live = full((1, 1, 1, c.window), float("-inf"))
+        mem = c.memory_layers
+        self.mem_keys = [zeros((batch_size, self.capacity, c.mem_key)) for _ in mem]
+        self.mem_keys_n = [zeros((batch_size, self.capacity, c.mem_key)) for _ in mem]
+        self.mem_values = [zeros((batch_size, self.capacity, c.hidden_size)) for _ in mem]
+        self.mem_k_ring = [zeros((batch_size, c.window, c.mem_key)) for _ in mem]
+        self.mem_v_ring = [zeros((batch_size, c.window, c.hidden_size)) for _ in mem]
+        self.mem_live = full((1, 1, self.capacity), float("-inf"))
         self.position = 0
+
+    def buffers(self) -> list:
+        """Every per-stream tensor, the ones ``nbytes`` counts."""
+        return [self.ctx_sum, *self.recurrent, *self.keys, *self.values, *self.mem_keys,
+                *self.mem_keys_n, *self.mem_values, *self.mem_k_ring, *self.mem_v_ring]
 
     def get_seq_length(self, layer: int = 0) -> int:
         """Tokens this state has taken in (Hugging Face's name)."""
@@ -140,9 +196,10 @@ class CubbyState:
 
     def reset(self) -> None:
         """Forget every token; the buffers stay allocated."""
-        for t in [self.ctx_sum, *self.recurrent, *self.keys, *self.values]:
+        for t in self.buffers():
             t.zero_()
         self.live.fill_(float("-inf"))
+        self.mem_live.fill_(float("-inf"))
         self.position = 0
 
     def select_rows(self, index) -> None:
@@ -152,6 +209,8 @@ class CubbyState:
         self.recurrent = [h.index_select(0, index) for h in self.recurrent]
         self.keys = [k.index_select(0, index) for k in self.keys]
         self.values = [v.index_select(0, index) for v in self.values]
+        for name in ("mem_keys", "mem_keys_n", "mem_values", "mem_k_ring", "mem_v_ring"):
+            setattr(self, name, [t.index_select(0, index) for t in getattr(self, name)])
 
     @property
     def batch_size(self) -> int:
@@ -159,7 +218,7 @@ class CubbyState:
 
     @property
     def nbytes(self) -> int:
-        return 4 * sum(t.numel() for t in [self.ctx_sum, *self.recurrent, *self.keys, *self.values])
+        return 4 * sum(t.numel() for t in self.buffers())
 
 
 class CubbyRouter(nn.Module):
@@ -280,23 +339,126 @@ class CubbyMLP(nn.Module):
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
-class CubbyLayer(nn.Module):
-    def __init__(self, config: CubbyConfig, layer: int, slot: int) -> None:
+def _aged(t: int, window: int, capacity: int) -> tuple:
+    """Of a prompt's ``t`` tokens, the ones beyond the window at its end are
+    ``0 .. t-window-1``; the store keeps the last ``capacity`` of them.
+    Returns the first token kept and how many."""
+    beyond = max(t - window, 0)
+    n = min(beyond, capacity)
+    return beyond - n, n
+
+
+class CubbyMemory(nn.Module):
+    """``o(sum_j w_j v_j)`` over the ``topk`` stored tokens ``j`` nearest
+    the query by cosine, ``w = softmax(q . k_j / sqrt(mem_key))`` — the
+    selection on normalised keys, the weighting on the keys as projected
+    (CubbyLLM's ``MemoryRead``). Only tokens beyond the window are
+    candidates, so a position with none reads exactly zero. No biases."""
+
+    def __init__(self, config: CubbyConfig, slot: int) -> None:
         super().__init__()
-        self.is_attention = config.is_attention(layer)
+        self.slot = slot  # which store in CubbyState
+        self.topk, self.window = config.mem_topk, config.window
+        self.scale = float(config.mem_key) ** -0.5
+        d, dk = config.hidden_size, config.mem_key
+        self.q = nn.Linear(d, dk, bias=False)
+        self.k = nn.Linear(d, dk, bias=False)
+        self.v = nn.Linear(d, d, bias=False)
+        self.o = nn.Linear(d, d, bias=False)
+
+    def read(self, q: Tensor, k_set: Tensor, v_set: Tensor, valid: Tensor) -> Tensor:
+        """``q`` (b, t, dk) against each position's candidates ``k_set``
+        (b, t, K, dk), ``v_set`` (b, t, K, d); ``valid`` (b, t, K) marks the
+        real ones. Rows with none read zero."""
+        sim = masked_fill((q.unsqueeze(2) * k_set).sum(-1) * self.scale, logical_not(valid), -1e9)
+        r = self.o((F.softmax(sim, -1).unsqueeze(-1) * v_set).sum(2))
+        none = logical_not(_any(valid, -1, keepdim=True))
+        return where(none.expand(*r.shape), zeros_like(r), r)
+
+    @staticmethod
+    def _gather(rows: Tensor, index: Tensor) -> Tensor:
+        """``rows`` (b, n, w) at ``index`` (b, ..., K) per batch row ->
+        (b, ..., K, w), through a flat index into the stacked rows."""
+        b, n, w = rows.shape
+        flat = (index + (arange(b, dtype=int64) * n).reshape(b, *([1] * (index.dim() - 1)))).reshape(-1)
+        return rows.reshape(b * n, w).index_select(0, flat).reshape(*index.shape, w)
+
+    def forward(self, x: Tensor, state: CubbyState | None) -> Tensor:
+        """A whole sequence from position 0: every position selects from
+        the tokens more than ``window`` before it. With ``state``, the
+        beyond-window tokens go into the store and the last ``window`` into
+        the ring, as the step would have left them."""
+        b, t, d = x.shape
+        q, k, v = self.q(x), self.k(x), self.v(x)
+        sim = F.normalize(q, dim=-1).matmul(F.normalize(k, dim=-1).transpose(1, 2))
+        i = arange(t).unsqueeze(1)
+        j = arange(t).unsqueeze(0)
+        beyond = (i - j) > self.window
+        sim = masked_fill(sim, logical_not(beyond).unsqueeze(0).expand(b, t, t), float("-inf"))
+        top = topk(sim, min(self.topk, t), -1)
+        r = self.read(q, self._gather(k, top.indices), self._gather(v, top.indices), isfinite(top.values))
+        if state is not None:
+            keys, keys_n, values = state.mem_keys[self.slot], state.mem_keys_n[self.slot], state.mem_values[self.slot]
+            first, n = _aged(t, self.window, state.capacity)
+            if n:
+                rows = tensor([p % state.capacity for p in range(first, first + n)], dtype=int64)
+                aged = k.narrow(1, first, n).contiguous()
+                keys.index_copy_(1, rows, aged)
+                keys_n.index_copy_(1, rows, F.normalize(aged, dim=-1))
+                values.index_copy_(1, rows, v.narrow(1, first, n).contiguous())
+            m = min(t, self.window)
+            slots = tensor([p % self.window for p in range(t - m, t)], dtype=int64)
+            state.mem_k_ring[self.slot].index_copy_(1, slots, k.narrow(1, t - m, m).contiguous())
+            state.mem_v_ring[self.slot].index_copy_(1, slots, v.narrow(1, t - m, m).contiguous())
+        return r
+
+    def step(self, x: Tensor, state: CubbyState, slot: Tensor) -> Tensor:
+        """One token at ``state.position``: read the store, then age the
+        token the ring slot holds (``position - window``) into it, then
+        take the slot. The read comes first because the store must hold
+        exactly the tokens before ``position - window``, as the mask does."""
+        b, _, d = x.shape
+        q, k, v = self.q(x), self.k(x), self.v(x)
+        keys, keys_n, values = state.mem_keys[self.slot], state.mem_keys_n[self.slot], state.mem_values[self.slot]
+        cap = state.capacity
+        top = topk(F.normalize(q, dim=-1).matmul(keys_n.transpose(1, 2)) + state.mem_live, min(self.topk, cap), -1)
+        r = self.read(q, self._gather(keys, top.indices), self._gather(values, top.indices), isfinite(top.values))
+        k_ring, v_ring = state.mem_k_ring[self.slot], state.mem_v_ring[self.slot]
+        if state.position >= self.window:
+            row = tensor([(state.position - self.window) % cap], dtype=int64)
+            aged = k_ring.index_select(1, slot)
+            keys.index_copy_(1, row, aged)
+            keys_n.index_copy_(1, row, F.normalize(aged, dim=-1))
+            values.index_copy_(1, row, v_ring.index_select(1, slot))
+        k_ring.index_copy_(1, slot, k.contiguous())
+        v_ring.index_copy_(1, slot, v.contiguous())
+        return r
+
+
+class CubbyLayer(nn.Module):
+    def __init__(self, config: CubbyConfig, layer: int, slot: int, mem_slot: int) -> None:
+        super().__init__()
+        self.is_attention, self.is_memory = config.is_attention(layer), config.is_memory(layer)
         self.mixer_norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mixer = CubbyAttention(config, slot) if self.is_attention else MinGRU(config, slot)
+        if self.is_memory:
+            self.memory_norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.memory = CubbyMemory(config, mem_slot)
         self.ffn_norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn = CubbyMLP(config)
 
     def forward(self, x: Tensor, cos: Tensor, sin: Tensor, state: CubbyState | None) -> Tensor:
         y = self.mixer_norm(x)
         x = x + (self.mixer(y, cos, sin, state) if self.is_attention else self.mixer(y, state))
+        if self.is_memory:
+            x = x + self.memory(self.memory_norm(x), state)
         return x + self.ffn(self.ffn_norm(x))
 
     def step(self, x: Tensor, cos: Tensor, sin: Tensor, state: CubbyState, slot: Tensor) -> Tensor:
         y = self.mixer_norm(x)
         x = x + (self.mixer.step(y, cos, sin, state, slot) if self.is_attention else self.mixer.step(y, state))
+        if self.is_memory:
+            x = x + self.memory.step(self.memory_norm(x), state, slot)
         return x + self.ffn(self.ffn_norm(x))
 
 
@@ -347,7 +509,8 @@ class CubbyModel(nn.Module):
         layers = []
         for i in range(config.num_hidden_layers):
             kind = config.is_attention(i)
-            layers.append(CubbyLayer(config, i, slots[kind]))
+            mem_slot = config.memory_layers.index(i) if config.is_memory(i) else 0
+            layers.append(CubbyLayer(config, i, slots[kind], mem_slot))
             slots[kind] += 1
         self.layers = nn.ModuleList(layers)
         self.adapter = CubbyAdapter(config)
@@ -365,11 +528,16 @@ class CubbyForCausalLM(nn.Module, GenerationMixin):
         self._rotary = _Rotary(config.head_dim, config.rope_theta)
 
     def make_cache(self, batch_size: int, max_length: int, keep=None) -> CubbyState:
-        """A :class:`CubbyState`. ``max_length`` changes nothing: the state
-        is the same size at any length."""
+        """A :class:`CubbyState`. Without memory layers ``max_length``
+        changes nothing: the state is the same size at any length. With
+        them, a stream of at most ``max_length`` tokens ages at most
+        ``max_length - window`` of them, so the store is that many rows
+        (``mem_capacity`` at most, and when ``max_length`` is 0)."""
         if keep is not None:
             raise _not_yet("left-padded batches for CubbyForCausalLM")
-        return CubbyState(self.config, batch_size)
+        c = self.config
+        capacity = min(c.mem_capacity, max_length - c.window) if max_length > 0 else None
+        return CubbyState(c, batch_size, capacity)
 
     def context(self, embeddings: Tensor, state: CubbyState | None) -> Tensor:
         """``ctx`` at every position of ``embeddings`` (batch, T, hidden):
@@ -398,18 +566,25 @@ class CubbyForCausalLM(nn.Module, GenerationMixin):
         x = self.model.embed_tokens(input_ids)
         ctx = self.context(x, state)
         layers = self.model.layers
+        window = self.config.window
         if start:
-            slot = tensor([start % self.config.window], dtype=int64)
+            slot = tensor([start % window], dtype=int64)
             state.live.index_fill_(3, slot, 0.0)
             for layer in layers:
                 x = layer.step(x, cos, sin, state, slot)
+            if state.mem_keys and start >= window:          # the token aged this step is now readable
+                state.mem_live.index_fill_(2, tensor([(start - window) % state.capacity], dtype=int64), 0.0)
         else:
             if state is not None:
-                m = min(t, self.config.window)
-                state.live.index_fill_(3, tensor([p % self.config.window for p in range(t - m, t)],
-                                                 dtype=int64), 0.0)
+                m = min(t, window)
+                state.live.index_fill_(3, tensor([p % window for p in range(t - m, t)], dtype=int64), 0.0)
             for layer in layers:
                 x = layer(x, cos, sin, state)
+            if state is not None and state.mem_keys:
+                first, n = _aged(t, window, state.capacity)
+                if n:
+                    state.mem_live.index_fill_(2, tensor([p % state.capacity for p in range(first, first + n)],
+                                                         dtype=int64), 0.0)
         if state is not None:
             state.position = start + t
         x = self.model.adapter(x, ctx)
