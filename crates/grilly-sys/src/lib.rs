@@ -68,6 +68,8 @@ extern "C" {
     pub fn gc_caps_get(ctx: *mut gc_ctx, out: *mut gc_caps) -> i32;
 
     pub fn gc_load_shader(ctx: *mut gc_ctx, name: *const c_char, spv_path: *const c_char) -> i32;
+    pub fn gc_load_shader_bytes(ctx: *mut gc_ctx, name: *const c_char, spv: *const u8, len: u64)
+        -> i32;
     pub fn gc_load_shader_dir(ctx: *mut gc_ctx, dir: *const c_char, loaded: *mut u32) -> i32;
     pub fn gc_submit_stats_get(ctx: *mut gc_ctx, out: *mut gc_submit_stats) -> i32;
     pub fn gc_persistent_peak_reset(ctx: *mut gc_ctx) -> i32;

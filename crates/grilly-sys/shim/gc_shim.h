@@ -82,6 +82,12 @@ void gc_destroy(gc_ctx* ctx);
 int32_t gc_caps_get(gc_ctx* ctx, gc_caps* out);
 
 int32_t gc_load_shader(gc_ctx* ctx, const char* name, const char* spv_path);
+/* Register SPIR-V held in memory. This is how grilly2's own kernels are
+   loaded: build.rs bakes them into the binary with include_bytes!, so a
+   built extension carries no path to a build directory and works wherever
+   it is installed. Storage only — the pipeline is still created on first
+   use. */
+int32_t gc_load_shader_bytes(gc_ctx* ctx, const char* name, const uint8_t* spv, uint64_t len);
 /* Compile a GLSL compute shader with the shaderc linked into v1 (the same
    settings as the build's glslc: -O, Vulkan 1.2) and register it under
    `name` in v1's PipelineCache. For generated (fused) kernels. */

@@ -422,6 +422,16 @@ int32_t gc_load_shader(gc_ctx* ctx, const char* name, const char* spv_path) {
     });
 }
 
+int32_t gc_load_shader_bytes(gc_ctx* ctx, const char* name, const uint8_t* spv, uint64_t len) {
+    return guarded([&] {
+        requireCtx(ctx);
+        require(name && spv, "null shader name or bytes");
+        require(len > 0 && len % 4 == 0, "SPIR-V length must be a non-zero multiple of 4");
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        ctx->cache.loadSPIRV(name, std::vector<uint8_t>(spv, spv + len));
+    });
+}
+
 int32_t gc_compile_shader(gc_ctx* ctx, const char* name, const char* glsl, uint64_t len) {
     return guarded([&] {
         requireCtx(ctx);

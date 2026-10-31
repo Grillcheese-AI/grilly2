@@ -3,12 +3,54 @@ requires = ["maturin>=1.5,<2"]
 build-backend = "maturin"
 
 [project]
-name = "grilly"
+# `grilly2` on PyPI, `import grilly` in code. The two differ on purpose:
+# `grilly` is taken by v1 (1.0.0, "GPU-accelerated neural network operations
+# using Vulkan compute shaders"), and the import name has to stay `grilly`
+# because the whole proposition is `import grilly as torch`.
+#
+# The cost of that split is a real footgun: v1 also installs a top-level
+# `grilly` package, so pip will happily install both and let the second one
+# overwrite the first's files without a word. `grilly/__init__.py` checks for
+# it only when the import has already failed — so a working install pays
+# nothing — and `python -m grilly.doctor` reports it either way.
+name = "grilly2"
 version = "0.1.0"
-description = "The torch API on Vulkan, for GPUs torch will not train on"
+description = "The torch API on Vulkan, for the GPUs torch will not train on"
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [{ name = "Grill cheese" }]
+keywords = ["pytorch", "vulkan", "gpu", "amd", "intel", "inference", "autograd"]
 dependencies = ["numpy"]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Environment :: GPU",
+]
+
+[project.urls]
+Homepage = "https://github.com/Grillcheese-AI/grilly2"
+Source = "https://github.com/Grillcheese-AI/grilly2"
+Issues = "https://github.com/Grillcheese-AI/grilly2/issues"
+
+[project.optional-dependencies]
+# the reference the op tests compare against; never needed to *use* grilly
+test = ["pytest", "torch"]
+# `from grilly.huggingface import AutoTokenizer` needs a real tokenizer.
+# CLAUDE.md §11: depend on it, do not write one.
+huggingface = ["tokenizers", "safetensors"]
+
+[project.scripts]
+# so a broken install can be diagnosed without knowing any Python
+grilly-doctor = "grilly.doctor:main"
 
 [tool.maturin]
 manifest-path = "crates/grilly-py/Cargo.toml"

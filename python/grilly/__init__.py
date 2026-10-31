@@ -12,7 +12,41 @@ import math as _math
 
 import numpy as _np
 
-from . import _C
+try:
+    from . import _C
+except ImportError as _exc:                   # pragma: no cover - a broken install
+    # Only on the failure path, so a working import pays nothing for this.
+    # Two things produce an ImportError here and they need opposite advice,
+    # so guessing between them is worse than checking:
+    #
+    #   * grilly v1 is installed too. Both distributions own this package
+    #     directory, pip does not model that, and whichever was installed
+    #     last overwrote the other — leaving a `grilly` whose `_C` is gone
+    #     or is the wrong one. No message from pip, ever.
+    #   * no Vulkan loader. `vulkan-1.dll` / `libvulkan.so.1` comes with the
+    #     GPU driver, so the extension itself fails to load.
+    def _diagnose() -> str:
+        from importlib import metadata
+
+        try:
+            v1 = metadata.distribution("grilly").version
+        except Exception:                     # noqa: BLE001 - diagnosing, not working
+            v1 = None
+        if v1 is not None:
+            return (
+                f"\n\ngrilly {v1} (v1) is installed alongside grilly2. They are "
+                f"different distributions that both own the `grilly` package, so "
+                f"installing one over the other overwrites it without warning.\n"
+                f"Fix: pip uninstall -y grilly grilly2 && pip install grilly2"
+            )
+        return (
+            "\n\nThe compiled extension did not load. The usual cause is a missing "
+            "Vulkan loader, which ships with your GPU driver — install or update "
+            "the driver for your card (on Linux also `libvulkan1` / `vulkan-loader`)."
+            "\nRun `grilly-doctor` for the full picture."
+        )
+
+    raise ImportError(str(_exc) + _diagnose()) from _exc
 
 __all__ = [
     "Generator", "Size", "Tensor", "add", "arange", "compile", "default_generator", "device",

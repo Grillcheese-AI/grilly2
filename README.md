@@ -4,7 +4,35 @@ The torch API on Vulkan, for the GPUs torch will not train on — consumer AMD a
 Intel cards, and Windows. Early work; see `CLAUDE.md` for the plan and
 `docs/boundary.md` for how the core talks to the GPU.
 
-## Building
+## Installing
+
+```
+pip install grilly2
+```
+
+Nothing else. No Rust, no C++ compiler, no Vulkan SDK — those are build
+dependencies and they are spent on a CI runner, not on your machine. What you
+need at runtime is a GPU driver with a Vulkan 1.2 device, which your driver
+already installs.
+
+**The package is `grilly2`; the import is `grilly`.** `grilly` on PyPI is v1,
+a different project. The two both own a top-level `grilly` package, so pip
+will let you install both and silently let one overwrite the other — if v1 is
+there, `pip uninstall grilly` first.
+
+If anything is wrong:
+
+```
+grilly-doctor          # or: python -m grilly.doctor
+```
+
+It prints which interpreter, which install and which device, then runs a real
+kernel. Paste all of it into a bug report. It never raises — a diagnostic that
+crashes on a broken install has diagnosed nothing.
+
+## Building from source
+
+Only needed to work on grilly2 itself.
 
 Requirements:
 
@@ -22,14 +50,16 @@ the Vulkan layer; `git submodule update --init --recursive` does it after
 the fact. Nothing else is needed — no CMake, no second project, and **no
 grilly v1 checkout**: the Vulkan device, buffer pool, pipeline cache and
 command batch live in `crates/grilly-sys/vulkan/`, and every kernel is
-compiled from `crates/grilly-core/shaders/` at build time.
+compiled from `crates/grilly-core/shaders/` at build time and **baked into
+the binary** — 173 blobs, 973 KB, so a built extension carries no path to the
+machine that built it and works wherever it is installed.
 
 Useful variables:
 
 | variable | effect |
 |---|---|
 | `VMA_INCLUDE_DIR` | VulkanMemoryAllocator include directory; default is the submodule |
-| `GRILLY_SHADER_DIR` | an extra SPIR-V directory, loaded after grilly2's own, so a kernel can be replaced without a rebuild |
+| `GRILLY_SHADER_DIR` | an extra SPIR-V directory, loaded after the kernels baked into the binary, so a kernel can be replaced without a rebuild |
 | `GRILLY_PYTHON` | interpreter with torch and numpy, used by the op tests as the reference; default `python` |
 | `GRILLY_VERBOSE` | set to 1 to print the device bring-up log |
 | `GRILLY_LAUNCH_BLOCKING` | set to 1 to submit and wait after every kernel launch (as `CUDA_LAUNCH_BLOCKING`), for diagnosis |
@@ -123,9 +153,15 @@ dtypes and do not accept each other's vectors.
 
 ## Coming from grilly v1
 
-grilly2 replaces v1 in place: same distribution, same import name. v1's
-import paths still work, through aliases that keep v1's signatures and name
-where each thing moved to. v1's *parallel framework* — its own autograd,
+grilly2 replaces v1 under the **same import name, a different distribution**:
+`pip install grilly2`, `import grilly`. v1 holds the `grilly` name on PyPI, so
+the two are separate packages that own the same top-level directory — pip does
+not model that and will let the second install overwrite the first in silence.
+**`pip uninstall grilly` before installing grilly2**, and if something is
+already confused, `grilly-doctor` detects it and says so.
+
+v1's import paths still work, through aliases that keep v1's signatures and
+name where each thing moved to. v1's *parallel framework* — its own autograd,
 `nn` and optimizers — is not reimplemented, because the torch API is the
 replacement; those names raise and say what to use. `docs/v1-migration.md`
 is the table.

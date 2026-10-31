@@ -9,6 +9,11 @@ use grilly_sys as sys;
 use crate::error::{Error, Result};
 use crate::graph::{Command, Recorder};
 
+// `EMBEDDED_KERNELS: &[(&str, &[u8])]`, written by build.rs. The blobs are
+// in the binary, not on disk, which is what makes a built extension
+// relocatable and a wheel possible at all.
+include!(concat!(env!("OUT_DIR"), "/kernels.rs"));
+
 /// Flush the open batch after this many launches, to bound the command
 /// buffer and descriptor usage of a long run with no host reads.
 const MAX_LAUNCHES_PER_BATCH: u32 = 1024;
@@ -149,7 +154,7 @@ impl Device {
         let device = Device { inner: Arc::new(inner) };
         check(caps_rc)?;
 
-        device.load_kernels(PathBuf::from(env!("GRILLY_CORE_SPV_DIR")))?;
+        device.load_embedded_kernels()?;
         if let Some(dir) = extra {
             device.load_kernels(dir)?;
         }
@@ -180,6 +185,35 @@ impl Device {
     /// its scalar values, changed since the last call is what this answers.
     pub fn generated_kernel_count(&self) -> usize {
         self.inner.generated.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Register every kernel baked into the binary by build.rs.
+    ///
+    /// Why baked and not read from a directory: the directory would be
+    /// `OUT_DIR`, an absolute path that exists only on the machine the
+    /// crate was built on. Reading it made the built extension
+    /// unrelocatable — moving the repo broke it — and would have made a
+    /// published wheel fail at import on every machine but the CI
+    /// runner's. `include_bytes!` stores the contents, so nothing in the
+    /// shipped binary refers to where it was built.
+    ///
+    /// Storage only: the pipeline for a kernel is still created the first
+    /// time it is dispatched, so this costs one copy of 973 KB and no
+    /// Vulkan work.
+    pub fn load_embedded_kernels(&self) -> Result<u32> {
+        let _state = self.lock();
+        for (name, spv) in EMBEDDED_KERNELS {
+            let name_c = cstring(name)?;
+            check(unsafe {
+                sys::gc_load_shader_bytes(
+                    self.inner.ctx,
+                    name_c.as_ptr(),
+                    spv.as_ptr(),
+                    spv.len() as u64,
+                )
+            })?;
+        }
+        Ok(EMBEDDED_KERNELS.len() as u32)
     }
 
     /// Register every `.spv` in `dir`; a later name replaces an earlier one.

@@ -1,0 +1,124 @@
+# Wheels, and the PyPI release.
+#
+# The point of this file is that a user installs grilly2 with pip and needs
+# none of what building it needs. Building needs Rust, a C++17 compiler and
+# the ~1 GB LunarG SDK; running needs a GPU driver, which the user already
+# has. All of the first list happens here, once, on a runner.
+#
+# `grilly2` on PyPI, `import grilly` in code — see pyproject.toml for why.
+#
+# Two things are deliberate and easy to "fix" wrongly:
+#
+#   * auditwheel does NOT bundle libvulkan. The Vulkan loader must be the
+#     one the user's GPU driver installed, because it is what dispatches to
+#     that driver; a copy baked into the wheel would find no devices. This
+#     is the same reason torch and cupy skip repair for their GPU runtime
+#     libraries, and it is why the Linux leg forces the manylinux tag
+#     instead of letting auditwheel earn it.
+#
+#   * the sdist is published, but building from it still needs the SDK.
+#     pip falls back to it on any platform without a wheel, so build.rs's
+#     error message is a user-facing string, not a developer note.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "publish to PyPI (otherwise wheels are attached to the run only)"
+        type: boolean
+        default: false
+
+env:
+  VULKAN_SDK_VERSION: 1.3.280.0
+
+jobs:
+  windows:
+    # the headline platform: CLAUDE.md §2's position is consumer AMD and
+    # Intel cards under Windows, which is precisely where torch will not train
+    name: wheel (windows x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: ${{ env.VULKAN_SDK_VERSION }}
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang, SPIRV-Tools, Shaderc
+          vulkan-use-cache: true
+      - name: build
+        run: |
+          python -m pip install --upgrade pip maturin
+          maturin build --release --out dist --interpreter 3.10 3.11 3.12 3.13
+      - name: the wheel must not reference this runner
+        shell: bash
+        run: python .github/scripts/check_relocatable.py dist
+      - uses: actions/upload-artifact@v4
+        with: { name: wheels-windows, path: dist/*.whl }
+
+  linux:
+    # UNVERIFIED until this first runs: shaderc is not packaged for
+    # manylinux, so `before-script-linux` builds it. Expect this leg to need
+    # a round of iteration; the Windows leg above does not depend on it.
+    name: wheel (manylinux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          manylinux: "2_28"
+          # auditwheel repair would vendor libvulkan.so.1 into the wheel and
+          # break dispatch to the real driver; see the header
+          args: --release --out dist --auditwheel skip --interpreter 3.10 3.11 3.12 3.13
+          before-script-linux: |
+            dnf install -y epel-release
+            dnf install -y vulkan-headers vulkan-loader-devel cmake python3 git ninja-build
+            git clone --depth 1 https://github.com/google/shaderc /tmp/shaderc
+            cd /tmp/shaderc && ./utils/git-sync-deps
+            cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+              -DSHADERC_SKIP_TESTS=ON -DSHADERC_SKIP_EXAMPLES=ON \
+              -DCMAKE_INSTALL_PREFIX=/usr/local
+            cmake --build build --target install
+            echo "VULKAN_SDK=/usr/local" >> $GITHUB_ENV
+      - name: the wheel must not reference this runner
+        run: python .github/scripts/check_relocatable.py dist
+      - uses: actions/upload-artifact@v4
+        with: { name: wheels-linux, path: dist/*.whl }
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - uses: PyO3/maturin-action@v1
+        with: { command: sdist, args: --out dist }
+      - uses: actions/upload-artifact@v4
+        with: { name: sdist, path: dist/*.tar.gz }
+
+  publish:
+    name: publish to PyPI
+    # the Linux leg is new; a failure there must not block the platform the
+    # project is actually for
+    needs: [windows, sdist]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write          # trusted publishing: no API token to leak
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # a re-run must not fail on files already uploaded
+          skip-existing: true
