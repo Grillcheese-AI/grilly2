@@ -447,19 +447,30 @@ class CubbyLayer(nn.Module):
         self.ffn_norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn = CubbyMLP(config)
 
-    def forward(self, x: Tensor, cos: Tensor, sin: Tensor, state: CubbyState | None) -> Tensor:
+    def forward(self, x: Tensor, cos: Tensor, sin: Tensor, state: CubbyState | None, read=None) -> Tensor:
         y = self.mixer_norm(x)
         x = x + (self.mixer(y, cos, sin, state) if self.is_attention else self.mixer(y, state))
         if self.is_memory:
             x = x + self.memory(self.memory_norm(x), state)
+        x = _read(x, read)
         return x + self.ffn(self.ffn_norm(x))
 
-    def step(self, x: Tensor, cos: Tensor, sin: Tensor, state: CubbyState, slot: Tensor) -> Tensor:
+    def step(self, x: Tensor, cos: Tensor, sin: Tensor, state: CubbyState, slot: Tensor, read=None) -> Tensor:
         y = self.mixer_norm(x)
         x = x + (self.mixer.step(y, cos, sin, state, slot) if self.is_attention else self.mixer.step(y, state))
         if self.is_memory:
             x = x + self.memory.step(self.memory_norm(x), state, slot)
+        x = _read(x, read)
         return x + self.ffn(self.ffn_norm(x))
+
+
+def _read(x: Tensor, read) -> Tensor:
+    """``x + read(x)`` between the mixer (and memory) and the FFN: a spatial link's read at its layer (CubbyLLM's
+    ``backbone/hybrid.py``). ``read`` returns None when it has nothing to add, and the stream is left untouched."""
+    if read is None:
+        return x
+    r = read(x)
+    return x if r is None else x + r
 
 
 class CubbyAdapter(nn.Module):
@@ -554,9 +565,14 @@ class CubbyForCausalLM(nn.Module, GenerationMixin):
         return self.model.router(mean)
 
     def forward(self, input_ids: Tensor, past_key_values: CubbyState | None = None,
-                logits_to_keep: int = 0) -> CausalLMOutput:
+                logits_to_keep: int = 0, spatial=None) -> CausalLMOutput:
         """Logits for ``input_ids`` (batch, T). A fresh ``past_key_values``
-        is filled from the whole prompt; a filled one takes one token."""
+        is filled from the whole prompt; a filled one takes one token.
+
+        ``spatial``: CubbyLLM's spatial link for this call (``cubbyllm/ops/grilly_spatial.py``), which holds its
+        own per-stream state and this call's places and roles. It binds the writing tokens' inputs (after the
+        context, which reads them unbound), adds its read at layer ``spatial.at`` and mixes its copy into the
+        logits. None (the default): the trunk alone, unchanged."""
         state = past_key_values
         b, t = input_ids.shape
         start = 0 if state is None else state.position
@@ -565,21 +581,24 @@ class CubbyForCausalLM(nn.Module, GenerationMixin):
         cos, sin = self._rotary.tables(start + t)
         x = self.model.embed_tokens(input_ids)
         ctx = self.context(x, state)
+        if spatial is not None:
+            x = spatial.input(x)
         layers = self.model.layers
+        reads = [spatial.read if spatial is not None and i == spatial.at else None for i in range(len(layers))]
         window = self.config.window
         if start:
             slot = tensor([start % window], dtype=int64)
             state.live.index_fill_(3, slot, 0.0)
-            for layer in layers:
-                x = layer.step(x, cos, sin, state, slot)
+            for layer, read in zip(layers, reads):
+                x = layer.step(x, cos, sin, state, slot, read)
             if state.mem_keys and start >= window:          # the token aged this step is now readable
                 state.mem_live.index_fill_(2, tensor([(start - window) % state.capacity], dtype=int64), 0.0)
         else:
             if state is not None:
                 m = min(t, window)
                 state.live.index_fill_(3, tensor([p % window for p in range(t - m, t)], dtype=int64), 0.0)
-            for layer in layers:
-                x = layer(x, cos, sin, state)
+            for layer, read in zip(layers, reads):
+                x = layer(x, cos, sin, state, read)
             if state is not None and state.mem_keys:
                 first, n = _aged(t, window, state.capacity)
                 if n:
@@ -590,4 +609,7 @@ class CubbyForCausalLM(nn.Module, GenerationMixin):
         x = self.model.adapter(x, ctx)
         if logits_to_keep:
             x = x.narrow(1, t - logits_to_keep, logits_to_keep)
-        return CausalLMOutput(logits=self.lm_head(x), past_key_values=state)
+        logits = self.lm_head(x)
+        if spatial is not None:
+            logits = spatial.output(logits, x, logits_to_keep)
+        return CausalLMOutput(logits=logits, past_key_values=state)
