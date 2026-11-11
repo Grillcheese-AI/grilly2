@@ -1766,7 +1766,7 @@ pub fn layer_norm(
     eps: f32,
 ) -> Result<(Tensor, Tensor)> {
     require_float("layer_norm", x.dtype())?;
-    let rows = if n == 0 { 0 } else { x.numel() / n };
+    let rows = x.numel().checked_div(n).unwrap_or(0);
     let y = Tensor::empty(x.device(), x.shape())?;
     let stats = Tensor::empty(x.device(), &[rows, 2])?;
     if rows == 0 {

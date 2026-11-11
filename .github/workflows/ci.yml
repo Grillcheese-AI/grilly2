@@ -40,8 +40,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { submodules: recursive }   # VulkanMemoryAllocator
-      - uses: dtolnay/rust-toolchain@stable
-        with: { components: "clippy, rustfmt" }
+      # Pinned, unlike the builds: every Rust release adds clippy lints, and
+      # under -D warnings that turns CI red with no change to the code (1.99
+      # did, the week this job first ran). Bump this deliberately, fixing
+      # what the new lints find in the same commit.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+          components: "clippy, rustfmt"
       - name: fmt
         run: cargo fmt --all --check
       # clippy runs the build scripts, which compile the C++ layer and the
