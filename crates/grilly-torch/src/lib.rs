@@ -52,10 +52,17 @@ pub fn relu(input: &Tensor) -> Result<Tensor> {
     let mut out = Tensor::empty(input.device(), input.shape())?;
     let n = u32_dim(input.numel(), "numel")?;
     if n > 0 {
-        kernels::RELU.launch(input.device(), &[Arg::Tensor(input), Arg::Tensor(&out)], [n, 1, 1], &[n])?;
+        kernels::RELU.launch(
+            input.device(),
+            &[Arg::Tensor(input), Arg::Tensor(&out)],
+            [n, 1, 1],
+            &[n],
+        )?;
     }
     autograd::record("ReluBackward0", &[input], &mut [&mut out], |outs| {
-        Ok(ReluBackward { result: SavedTensor::save(outs[0])? })
+        Ok(ReluBackward {
+            result: SavedTensor::save(outs[0])?,
+        })
     })?;
     Ok(out)
 }
@@ -70,7 +77,14 @@ struct LinearBackward {
 }
 
 impl LinearBackward {
-    fn pass(x: &Tensor, w: &Tensor, pass: u32, g: &Tensor, out: &Tensor, threads: [u32; 2]) -> Result<()> {
+    fn pass(
+        x: &Tensor,
+        w: &Tensor,
+        pass: u32,
+        g: &Tensor,
+        out: &Tensor,
+        threads: [u32; 2],
+    ) -> Result<()> {
         let (in_f, out_f) = (w.shape()[1], w.shape()[0]);
         // From the leading dims, not numel / in_f: that is 0 when in_f is 0.
         let rows: usize = x.shape()[..x.dim() - 1].iter().product();
@@ -78,9 +92,21 @@ impl LinearBackward {
         // to that same tensor and never touched.
         kernels::LINEAR_BACKWARD.launch(
             g.device(),
-            &[Arg::Tensor(g), Arg::Tensor(x), Arg::Tensor(w), Arg::Tensor(out), Arg::Tensor(out), Arg::Tensor(out)],
+            &[
+                Arg::Tensor(g),
+                Arg::Tensor(x),
+                Arg::Tensor(w),
+                Arg::Tensor(out),
+                Arg::Tensor(out),
+                Arg::Tensor(out),
+            ],
             [threads[0], threads[1], 1],
-            &[u32_dim(rows, "rows")?, u32_dim(in_f, "in_features")?, u32_dim(out_f, "out_features")?, pass],
+            &[
+                u32_dim(rows, "rows")?,
+                u32_dim(in_f, "in_features")?,
+                u32_dim(out_f, "out_features")?,
+                pass,
+            ],
         )
     }
 }
@@ -94,7 +120,11 @@ impl Backward for LinearBackward {
         let rows: usize = x.shape()[..x.dim() - 1].iter().product();
         // An empty reduction contributes zero, as in torch.
         let empty_sum = |shape: &[usize], reduced: usize| -> Result<Option<Tensor>> {
-            if reduced == 0 { Tensor::zeros(dev, shape).map(Some) } else { Ok(None) }
+            if reduced == 0 {
+                Tensor::zeros(dev, shape).map(Some)
+            } else {
+                Ok(None)
+            }
         };
 
         let mut result = vec![None; needs.len()];
@@ -104,7 +134,14 @@ impl Backward for LinearBackward {
                 None => {
                     let gx = Tensor::empty(dev, x.shape())?;
                     if gx.numel() > 0 {
-                        Self::pass(&x, &w, 0, g, &gx, [u32_dim(in_f, "in")?, u32_dim(rows, "rows")?])?;
+                        Self::pass(
+                            &x,
+                            &w,
+                            0,
+                            g,
+                            &gx,
+                            [u32_dim(in_f, "in")?, u32_dim(rows, "rows")?],
+                        )?;
                     }
                     gx
                 }
@@ -116,7 +153,14 @@ impl Backward for LinearBackward {
                 None => {
                     let gw = Tensor::empty(dev, w.shape())?;
                     if gw.numel() > 0 {
-                        Self::pass(&x, &w, 1, g, &gw, [u32_dim(in_f, "in")?, u32_dim(out_f, "out")?])?;
+                        Self::pass(
+                            &x,
+                            &w,
+                            1,
+                            g,
+                            &gw,
+                            [u32_dim(in_f, "in")?, u32_dim(out_f, "out")?],
+                        )?;
                     }
                     gw
                 }
@@ -195,10 +239,19 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<
         } else {
             let out = Tensor::empty(input.device(), &out_shape)?;
             let group_count = rows;
-            let (rows, k, n) = (u32_dim(rows, "rows")?, u32_dim(in_features, "in_features")?, u32_dim(out_features, "out_features")?);
+            let (rows, k, n) = (
+                u32_dim(rows, "rows")?,
+                u32_dim(in_features, "in_features")?,
+                u32_dim(out_features, "out_features")?,
+            );
             // With no bias the shader never reads binding 2; bind the weight there.
             let bias_arg = Arg::Tensor(bias.unwrap_or(weight));
-            let args = [Arg::Tensor(input), Arg::Tensor(weight), bias_arg, Arg::Tensor(&out)];
+            let args = [
+                Arg::Tensor(input),
+                Arg::Tensor(weight),
+                bias_arg,
+                Arg::Tensor(&out),
+            ];
             let push = [rows, k, n, bias.is_some() as u32];
             if group_count <= kernels::GEMV_MAX_ROWS {
                 // Few rows: the tiled kernel would leave most of every tile
@@ -207,7 +260,11 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<
                 // workgroups a dimension allows.
                 let groups = out_features;
                 let gx = groups.min(65_535);
-                let threads = [u32_dim(gx * 64, "workgroups")?, u32_dim(groups.div_ceil(gx), "workgroups")?, 1];
+                let threads = [
+                    u32_dim(gx * 64, "workgroups")?,
+                    u32_dim(groups.div_ceil(gx), "workgroups")?,
+                    1,
+                ];
                 kernels::GEMV.launch(input.device(), &args, threads, &push)?;
             } else {
                 kernels::LINEAR.launch(input.device(), &args, [n, rows, 1], &push)?;
@@ -219,7 +276,10 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<
     let mut inputs = vec![input, weight];
     inputs.extend(bias);
     autograd::record("LinearBackward0", &inputs, &mut [&mut out], |_| {
-        Ok(LinearBackward { input: SavedTensor::save(input)?, weight: SavedTensor::save(weight)? })
+        Ok(LinearBackward {
+            input: SavedTensor::save(input)?,
+            weight: SavedTensor::save(weight)?,
+        })
     })?;
     Ok(out)
 }

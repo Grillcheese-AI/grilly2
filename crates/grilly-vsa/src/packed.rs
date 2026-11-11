@@ -23,11 +23,26 @@
 use grilly_core::{Arg, DType, Error, Kernel, Result, Tensor};
 
 /// Bindings: query, codebook, distances. Push: entries, words, two offsets.
-const HAMMING: Kernel = Kernel { shader: "g2-hdc-hamming", bindings: 3, push_words: 4, local_size: [256, 1, 1] };
+const HAMMING: Kernel = Kernel {
+    shader: "g2-hdc-hamming",
+    bindings: 3,
+    push_words: 4,
+    local_size: [256, 1, 1],
+};
 /// Bindings: vectors, out. Push: vectors, words, offset.
-const BUNDLE: Kernel = Kernel { shader: "g2-hdc-bundle", bindings: 2, push_words: 3, local_size: [256, 1, 1] };
+const BUNDLE: Kernel = Kernel {
+    shader: "g2-hdc-bundle",
+    bindings: 2,
+    push_words: 3,
+    local_size: [256, 1, 1],
+};
 /// Bindings: source, out. Push: words out, words per vector, dim, shift, offset.
-const PERMUTE: Kernel = Kernel { shader: "g2-hdc-permute", bindings: 2, push_words: 5, local_size: [256, 1, 1] };
+const PERMUTE: Kernel = Kernel {
+    shader: "g2-hdc-permute",
+    bindings: 2,
+    push_words: 5,
+    local_size: [256, 1, 1],
+};
 
 pub const KERNELS: &[Kernel] = &[HAMMING, BUNDLE, PERMUTE];
 
@@ -57,9 +72,18 @@ pub fn hamming(query: &Tensor, codebook: &Tensor) -> Result<Tensor> {
     let out = Tensor::empty_typed(query.device(), &[n], DType::I32)?;
     HAMMING.launch_flat(
         query.device(),
-        &[Arg::Storage(query), Arg::Storage(codebook), Arg::Storage(&out)],
+        &[
+            Arg::Storage(query),
+            Arg::Storage(codebook),
+            Arg::Storage(&out),
+        ],
         n,
-        &[n as u32, words as u32, query.offset() as u32, codebook.offset() as u32],
+        &[
+            n as u32,
+            words as u32,
+            query.offset() as u32,
+            codebook.offset() as u32,
+        ],
     )?;
     Ok(out)
 }
@@ -102,7 +126,13 @@ pub fn permute(x: &Tensor, dim: usize, shift: i64) -> Result<Tensor> {
         x.device(),
         &[Arg::Storage(x), Arg::Storage(&out)],
         x.numel(),
-        &[x.numel() as u32, words as u32, dim as u32, shift, x.offset() as u32],
+        &[
+            x.numel() as u32,
+            words as u32,
+            dim as u32,
+            shift,
+            x.offset() as u32,
+        ],
     )?;
     Ok(out)
 }

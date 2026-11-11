@@ -16,14 +16,34 @@ use grilly_core::generic::{self, copy_strided, Reduce};
 use grilly_core::{require_float, Arg, DType, Error, Kernel, MemClass, Result, Tensor};
 
 /// Bindings: w, q, scale. Push: rows, k, words, w_off.
-const QUANTIZE: Kernel = Kernel { shader: "g2-quantize-q8", bindings: 3, push_words: 4, local_size: [256, 1, 1] };
+const QUANTIZE: Kernel = Kernel {
+    shader: "g2-quantize-q8",
+    bindings: 3,
+    push_words: 4,
+    local_size: [256, 1, 1],
+};
 /// Bindings: x, q, scale, bias, y. Push: m, k, n, vecs, x_off, b_off, has_bias, x_vec4.
-const LINEAR: Kernel = Kernel { shader: "g2-linear-q8", bindings: 5, push_words: 8, local_size: [256, 1, 1] };
+const LINEAR: Kernel = Kernel {
+    shader: "g2-linear-q8",
+    bindings: 5,
+    push_words: 8,
+    local_size: [256, 1, 1],
+};
 /// Bindings: x, q, scale, bias, y. Push: m, k, n, vecs, x_off, b_off, has_bias, pad.
 /// The same result as LINEAR, for many rows: a 64x64 output tile per workgroup.
-const LINEAR_TILED: Kernel = Kernel { shader: "g2-linear-q8-tiled", bindings: 5, push_words: 8, local_size: [256, 1, 1] };
+const LINEAR_TILED: Kernel = Kernel {
+    shader: "g2-linear-q8-tiled",
+    bindings: 5,
+    push_words: 8,
+    local_size: [256, 1, 1],
+};
 /// Bindings: q, scale, w. Push: rows, k, words.
-const DEQUANTIZE: Kernel = Kernel { shader: "g2-dequantize-q8", bindings: 3, push_words: 3, local_size: [256, 1, 1] };
+const DEQUANTIZE: Kernel = Kernel {
+    shader: "g2-dequantize-q8",
+    bindings: 3,
+    push_words: 3,
+    local_size: [256, 1, 1],
+};
 
 /// Rows of x per workgroup of the linear kernel (ROWS in g2-linear-q8.glsl).
 const LINEAR_ROWS: usize = 8;
@@ -55,7 +75,10 @@ fn u32_of(v: usize, what: &str) -> Result<u32> {
 /// Workgroups covering `groups` along x (and y beyond 65535), as threads.
 fn grid(groups: usize, local: u32) -> Result<[u32; 2]> {
     let gx = groups.clamp(1, 65_535);
-    Ok([u32_of(gx, "groups")? * local, u32_of(groups.div_ceil(gx), "groups")?])
+    Ok([
+        u32_of(gx, "groups")? * local,
+        u32_of(groups.div_ceil(gx), "groups")?,
+    ])
 }
 
 /// A linear layer's weight, int8 per output row with a float32 scale, in
@@ -75,22 +98,46 @@ impl Int8Weight {
     pub fn quantize(weight: &Tensor) -> Result<Int8Weight> {
         require_float("int8 weight-only quantization", weight.dtype())?;
         let &[out_features, in_features] = weight.shape() else {
-            return Err(Error::Shape(format!("expected a 2-D weight (out_features, in_features), got {:?}", weight.shape())));
+            return Err(Error::Shape(format!(
+                "expected a 2-D weight (out_features, in_features), got {:?}",
+                weight.shape()
+            )));
         };
         if in_features == 0 {
-            return Err(Error::Shape("cannot quantize a weight with no input features".into()));
+            return Err(Error::Shape(
+                "cannot quantize a weight with no input features".into(),
+            ));
         }
         let words = in_features.div_ceil(16) * 4;
         let dev = weight.device();
-        let q = Tensor::empty_in(dev, &[out_features, words], DType::I32, MemClass::Persistent)?;
+        let q = Tensor::empty_in(
+            dev,
+            &[out_features, words],
+            DType::I32,
+            MemClass::Persistent,
+        )?;
         let scale = Tensor::empty_in(dev, &[out_features], DType::F32, MemClass::Persistent)?;
         if out_features > 0 {
             let [gx, gy] = grid(out_features, 256)?;
-            let push =
-                [u32_of(out_features, "out_features")?, u32_of(in_features, "in_features")?, u32_of(words, "words")?, u32_of(weight.offset(), "offset")?];
-            QUANTIZE.launch(dev, &[Arg::Storage(weight), Arg::Tensor(&q), Arg::Tensor(&scale)], [gx, gy, 1], &push)?;
+            let push = [
+                u32_of(out_features, "out_features")?,
+                u32_of(in_features, "in_features")?,
+                u32_of(words, "words")?,
+                u32_of(weight.offset(), "offset")?,
+            ];
+            QUANTIZE.launch(
+                dev,
+                &[Arg::Storage(weight), Arg::Tensor(&q), Arg::Tensor(&scale)],
+                [gx, gy, 1],
+                &push,
+            )?;
         }
-        Ok(Int8Weight { q, scale, out_features, in_features })
+        Ok(Int8Weight {
+            q,
+            scale,
+            out_features,
+            in_features,
+        })
     }
 
     /// `(out_features, in_features)`.
@@ -112,7 +159,13 @@ impl Int8Weight {
     pub fn qdata(&self) -> Result<Vec<i8>> {
         let bytes = self.q.to_bytes()?;
         let row = self.q.shape()[1] * 4;
-        Ok((0..self.out_features).flat_map(|r| bytes[r * row..r * row + self.in_features].iter().map(|&b| b as i8)).collect())
+        Ok((0..self.out_features)
+            .flat_map(|r| {
+                bytes[r * row..r * row + self.in_features]
+                    .iter()
+                    .map(|&b| b as i8)
+            })
+            .collect())
     }
 
     /// One weight holding `parts`' rows in order: a fused q/k/v or gate/up
@@ -132,15 +185,41 @@ impl Int8Weight {
         let words = first.q.shape()[1];
         let out_features: usize = parts.iter().map(|p| p.out_features).sum();
         let dev = first.q.device();
-        let q = Tensor::empty_in(dev, &[out_features, words], DType::I32, MemClass::Persistent)?;
+        let q = Tensor::empty_in(
+            dev,
+            &[out_features, words],
+            DType::I32,
+            MemClass::Persistent,
+        )?;
         let scale = Tensor::empty_in(dev, &[out_features], DType::F32, MemClass::Persistent)?;
         let mut row = 0;
         for p in parts {
-            copy_strided(&p.q, p.q.offset(), &[words, 1], &q, row * words, &[words, 1], &[p.out_features, words])?;
-            copy_strided(&p.scale, p.scale.offset(), &[1], &scale, row, &[1], &[p.out_features])?;
+            copy_strided(
+                &p.q,
+                p.q.offset(),
+                &[words, 1],
+                &q,
+                row * words,
+                &[words, 1],
+                &[p.out_features, words],
+            )?;
+            copy_strided(
+                &p.scale,
+                p.scale.offset(),
+                &[1],
+                &scale,
+                row,
+                &[1],
+                &[p.out_features],
+            )?;
             row += p.out_features;
         }
-        Ok(Int8Weight { q, scale, out_features, in_features })
+        Ok(Int8Weight {
+            q,
+            scale,
+            out_features,
+            in_features,
+        })
     }
 
     /// The weight as float32: `q * scale` per row (torchao's dequantize).
@@ -155,12 +234,18 @@ impl Int8Weight {
         require_float("linear", input.dtype())?;
         let (n, k) = (self.out_features, self.in_features);
         if input.shape().last() != Some(&k) {
-            return Err(Error::Shape(format!("linear: input {:?} does not end in in_features = {k}", input.shape())));
+            return Err(Error::Shape(format!(
+                "linear: input {:?} does not end in in_features = {k}",
+                input.shape()
+            )));
         }
         if let Some(b) = bias {
             require_float("linear", b.dtype())?;
             if b.shape() != [n] {
-                return Err(Error::Shape(format!("linear: bias must be ({n},), got {:?}", b.shape())));
+                return Err(Error::Shape(format!(
+                    "linear: bias must be ({n},), got {:?}",
+                    b.shape()
+                )));
             }
         }
         let mut out_shape = input.shape().to_vec();
@@ -171,7 +256,13 @@ impl Int8Weight {
         let mut inputs = vec![input];
         inputs.extend(bias);
         autograd::record("LinearInt8Backward0", &inputs, &mut [&mut y], |_| {
-            Ok(LinearInt8Backward { q: self.q.clone(), scale: self.scale.clone(), n, k, input_shape: input.shape().to_vec() })
+            Ok(LinearInt8Backward {
+                q: self.q.clone(),
+                scale: self.scale.clone(),
+                n,
+                k,
+                input_shape: input.shape().to_vec(),
+            })
         })?;
         if m == 0 || n == 0 {
             return Ok(y);
@@ -189,10 +280,20 @@ impl Int8Weight {
         ];
         // With no bias the kernel never reads binding 3; bind the scales there.
         let b = bias.map_or(Arg::Tensor(&self.scale), Arg::Storage);
-        let args = [Arg::Storage(input), Arg::Tensor(&self.q), Arg::Tensor(&self.scale), b, Arg::Tensor(&y)];
+        let args = [
+            Arg::Storage(input),
+            Arg::Tensor(&self.q),
+            Arg::Tensor(&self.scale),
+            b,
+            Arg::Tensor(&y),
+        ];
         if tiled {
             push[7] = 0;
-            let groups = [u32_of(n.div_ceil(TILE) * 256, "out_features")?, u32_of(m.div_ceil(TILE), "rows")?, 1];
+            let groups = [
+                u32_of(n.div_ceil(TILE) * 256, "out_features")?,
+                u32_of(m.div_ceil(TILE), "rows")?,
+                1,
+            ];
             LINEAR_TILED.launch(dev, &args, groups, &push)?;
         } else {
             let [gx, gy] = grid(n.div_ceil(LINEAR_COLS), 256)?;
@@ -206,8 +307,17 @@ impl Int8Weight {
 fn dequantize(q: &Tensor, scale: &Tensor, n: usize, k: usize) -> Result<Tensor> {
     let dev = q.device();
     let w = Tensor::empty(dev, &[n, k])?;
-    let push = [u32_of(n, "out_features")?, u32_of(k, "in_features")?, u32_of(q.shape()[1], "words")?];
-    DEQUANTIZE.launch_flat(dev, &[Arg::Tensor(q), Arg::Tensor(scale), Arg::Tensor(&w)], w.numel(), &push)?;
+    let push = [
+        u32_of(n, "out_features")?,
+        u32_of(k, "in_features")?,
+        u32_of(q.shape()[1], "words")?,
+    ];
+    DEQUANTIZE.launch_flat(
+        dev,
+        &[Arg::Tensor(q), Arg::Tensor(scale), Arg::Tensor(&w)],
+        w.numel(),
+        &push,
+    )?;
     Ok(w)
 }
 

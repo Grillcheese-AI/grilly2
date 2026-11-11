@@ -32,9 +32,16 @@ impl Tiles {
     /// (g2-flash-tiles): no download, so a mask made per forward is cheap.
     pub fn from_mask(mask: &Tensor) -> Result<Tiles> {
         if mask.dtype() != DType::Bool || mask.dim() != 4 {
-            return Err(Error::Invalid("attention tiles: expected a 4-D bool mask".into()));
+            return Err(Error::Invalid(
+                "attention tiles: expected a 4-D bool mask".into(),
+            ));
         }
-        let (mb, mh, l, s) = (mask.shape()[0], mask.shape()[1], mask.shape()[2], mask.shape()[3]);
+        let (mb, mh, l, s) = (
+            mask.shape()[0],
+            mask.shape()[1],
+            mask.shape()[2],
+            mask.shape()[3],
+        );
         let (nq, nk, planes) = (l.div_ceil(TILE), s.div_ceil(TILE), mb * mh);
         let dev = mask.device();
         let int = |shape: &[usize]| Tensor::empty_typed(dev, shape, DType::I32);
@@ -61,9 +68,20 @@ impl Tiles {
             Arg::Tensor(&tiles.q_count),
             Arg::Tensor(&tiles.q_list),
         ];
-        let dims = [u32_of(planes, "planes")?, u32_of(l, "L")?, u32_of(s, "S")?, u32_of(nq, "nq")?, u32_of(nk, "nk")?];
+        let dims = [
+            u32_of(planes, "planes")?,
+            u32_of(l, "L")?,
+            u32_of(s, "S")?,
+            u32_of(nq, "nq")?,
+            u32_of(nk, "nk")?,
+        ];
         let off = u32_of(mask.offset(), "offset")?;
-        for (stage, threads) in [(0u32, planes * l * nk), (1, planes * nq * nk), (2, planes * nq), (3, planes * nk)] {
+        for (stage, threads) in [
+            (0u32, planes * l * nk),
+            (1, planes * nq * nk),
+            (2, planes * nq),
+            (3, planes * nk),
+        ] {
             let push = [stage, dims[0], dims[1], dims[2], dims[3], dims[4], off];
             FLASH_TILES.launch_flat(dev, &args, threads, &push)?;
         }
@@ -80,7 +98,9 @@ fn dims(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<[usize; 6]> {
     for t in [q, k, v] {
         require_float("flex_attention", t.dtype())?;
         if t.dim() != 4 {
-            return Err(Error::Shape("flex_attention: query, key and value must be 4-D".into()));
+            return Err(Error::Shape(
+                "flex_attention: query, key and value must be 4-D".into(),
+            ));
         }
     }
     let (b, h, l, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
@@ -94,7 +114,9 @@ fn dims(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<[usize; 6]> {
         )));
     }
     if d > MAX_HEAD_DIM || dv > MAX_HEAD_DIM {
-        return Err(Error::NotImplemented(format!("fused attention with head dim > {MAX_HEAD_DIM}")));
+        return Err(Error::NotImplemented(format!(
+            "fused attention with head dim > {MAX_HEAD_DIM}"
+        )));
     }
     Ok([b, h, l, s, d, dv])
 }
@@ -124,12 +146,26 @@ fn push(dims: [usize; 6], tiles: &Tiles, scale: f32, offsets: &[usize]) -> Resul
 /// `softmax(q k^T * scale, masked) @ v` for q (B, H, L, D), k (B, H, S, D),
 /// v (B, H, S, Dv): the output (B, H, L, Dv) and the log-sum-exp (B, H, L).
 /// Not recorded for autograd; see [`flex_attention`].
-pub fn flash_forward(q: &Tensor, k: &Tensor, v: &Tensor, tiles: &Tiles, scale: f32) -> Result<(Tensor, Tensor)> {
+pub fn flash_forward(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    tiles: &Tiles,
+    scale: f32,
+) -> Result<(Tensor, Tensor)> {
     let dims = dims(q, k, v)?;
     let [b, h, l, _, _, dv] = dims;
-    for t in [&tiles.bits, &tiles.kv_count, &tiles.kv_list, &tiles.q_count, &tiles.q_list] {
+    for t in [
+        &tiles.bits,
+        &tiles.kv_count,
+        &tiles.kv_list,
+        &tiles.q_count,
+        &tiles.q_list,
+    ] {
         if t.dtype() != DType::I32 {
-            return Err(Error::Invalid("flex_attention: tile lists must be int32".into()));
+            return Err(Error::Invalid(
+                "flex_attention: tile lists must be int32".into(),
+            ));
         }
     }
     let out = Tensor::empty(q.device(), &[b, h, l, dv])?;
@@ -148,7 +184,11 @@ pub fn flash_forward(q: &Tensor, k: &Tensor, v: &Tensor, tiles: &Tiles, scale: f
         Arg::Storage(&out),
         Arg::Storage(&lse),
     ];
-    let threads = [u32_of(l.div_ceil(TILE) * 256, "query tiles")?, u32_of(h, "heads")?, u32_of(b, "batch")?];
+    let threads = [
+        u32_of(l.div_ceil(TILE) * 256, "query tiles")?,
+        u32_of(h, "heads")?,
+        u32_of(b, "batch")?,
+    ];
     FLASH_FWD.launch(q.device(), &args, threads, &push)?;
     Ok((out, lse))
 }
@@ -176,8 +216,20 @@ pub fn flash_backward(
     }
     // Drow = rowsum(dO * O), (B, H, L)
     let drow = k::reduce(&k::binary(dout, out, Binary::Mul)?, 3, Reduce::Sum, false)?;
-    let push = push(dims, tiles, scale, &[q.offset(), k.offset(), v.offset(), dout.offset()])?;
-    let common = [Arg::Storage(q), Arg::Storage(k), Arg::Storage(v), Arg::Storage(dout), Arg::Tensor(lse), Arg::Tensor(&drow)];
+    let push = push(
+        dims,
+        tiles,
+        scale,
+        &[q.offset(), k.offset(), v.offset(), dout.offset()],
+    )?;
+    let common = [
+        Arg::Storage(q),
+        Arg::Storage(k),
+        Arg::Storage(v),
+        Arg::Storage(dout),
+        Arg::Tensor(lse),
+        Arg::Tensor(&drow),
+    ];
     let mut kv_args = common.to_vec();
     kv_args.extend([
         Arg::Tensor(&tiles.bits),
@@ -186,11 +238,24 @@ pub fn flash_backward(
         Arg::Storage(&dk),
         Arg::Storage(&dvv),
     ]);
-    let kv_threads = [u32_of(s.div_ceil(TILE) * 256, "key tiles")?, u32_of(h, "heads")?, u32_of(b, "batch")?];
+    let kv_threads = [
+        u32_of(s.div_ceil(TILE) * 256, "key tiles")?,
+        u32_of(h, "heads")?,
+        u32_of(b, "batch")?,
+    ];
     FLASH_BWD_KV.launch(q.device(), &kv_args, kv_threads, &push)?;
     let mut q_args = common.to_vec();
-    q_args.extend([Arg::Tensor(&tiles.bits), Arg::Tensor(&tiles.kv_count), Arg::Tensor(&tiles.kv_list), Arg::Storage(&dq)]);
-    let q_threads = [u32_of(l.div_ceil(TILE) * 256, "query tiles")?, u32_of(h, "heads")?, u32_of(b, "batch")?];
+    q_args.extend([
+        Arg::Tensor(&tiles.bits),
+        Arg::Tensor(&tiles.kv_count),
+        Arg::Tensor(&tiles.kv_list),
+        Arg::Storage(&dq),
+    ]);
+    let q_threads = [
+        u32_of(l.div_ceil(TILE) * 256, "query tiles")?,
+        u32_of(h, "heads")?,
+        u32_of(b, "batch")?,
+    ];
     FLASH_BWD_Q.launch(q.device(), &q_args, q_threads, &push)?;
     Ok((dq, dk, dvv))
 }
@@ -198,13 +263,30 @@ pub fn flash_backward(
 /// flex_attention's fused path with autograd: (out, lse). The gradient
 /// flows through `out` (FlexAttentionBackward0); `lse` is not
 /// differentiable here.
-pub fn flex_attention(q: &Tensor, k: &Tensor, v: &Tensor, tiles: &Tiles, scale: f32) -> Result<(Tensor, Tensor)> {
+pub fn flex_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    tiles: &Tiles,
+    scale: f32,
+) -> Result<(Tensor, Tensor)> {
     let (mut out, lse) = flash_forward(q, k, v, tiles, scale)?;
     let tiles = tiles.clone();
     // saved: q, k, v, lse, then out (save_out)
-    record("FlexAttentionBackward0", &[q, k, v], &mut out, &[q, k, v, &lse], true, move |g, s, needs| {
-        let (dq, dk, dv) = flash_backward(&s[0], &s[1], &s[2], &s[4], &s[3], g, &tiles, scale)?;
-        Ok(vec![needs[0].then_some(dq), needs[1].then_some(dk), needs[2].then_some(dv)])
-    })?;
+    record(
+        "FlexAttentionBackward0",
+        &[q, k, v],
+        &mut out,
+        &[q, k, v, &lse],
+        true,
+        move |g, s, needs| {
+            let (dq, dk, dv) = flash_backward(&s[0], &s[1], &s[2], &s[4], &s[3], g, &tiles, scale)?;
+            Ok(vec![
+                needs[0].then_some(dq),
+                needs[1].then_some(dk),
+                needs[2].then_some(dv),
+            ])
+        },
+    )?;
     Ok((out, lse))
 }

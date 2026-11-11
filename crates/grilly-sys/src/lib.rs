@@ -68,12 +68,21 @@ extern "C" {
     pub fn gc_caps_get(ctx: *mut gc_ctx, out: *mut gc_caps) -> i32;
 
     pub fn gc_load_shader(ctx: *mut gc_ctx, name: *const c_char, spv_path: *const c_char) -> i32;
-    pub fn gc_load_shader_bytes(ctx: *mut gc_ctx, name: *const c_char, spv: *const u8, len: u64)
-        -> i32;
+    pub fn gc_load_shader_bytes(
+        ctx: *mut gc_ctx,
+        name: *const c_char,
+        spv: *const u8,
+        len: u64,
+    ) -> i32;
     pub fn gc_load_shader_dir(ctx: *mut gc_ctx, dir: *const c_char, loaded: *mut u32) -> i32;
     pub fn gc_submit_stats_get(ctx: *mut gc_ctx, out: *mut gc_submit_stats) -> i32;
     pub fn gc_persistent_peak_reset(ctx: *mut gc_ctx) -> i32;
-    pub fn gc_compile_shader(ctx: *mut gc_ctx, name: *const c_char, glsl: *const c_char, len: u64) -> i32;
+    pub fn gc_compile_shader(
+        ctx: *mut gc_ctx,
+        name: *const c_char,
+        glsl: *const c_char,
+        len: u64,
+    ) -> i32;
     pub fn gc_has_shader(ctx: *mut gc_ctx, name: *const c_char, out: *mut u32) -> i32;
 
     pub fn gc_buffer_create(ctx: *mut gc_ctx, bytes: u64, mem: u32, out: *mut gc_buf) -> i32;
@@ -87,8 +96,20 @@ extern "C" {
         src: *const std::ffi::c_void,
         bytes: u64,
     ) -> i32;
-    pub fn gc_upload(ctx: *mut gc_ctx, dst: gc_buf, offset: u64, src: *const c_void, bytes: u64) -> i32;
-    pub fn gc_download(ctx: *mut gc_ctx, src: gc_buf, offset: u64, dst: *mut c_void, bytes: u64) -> i32;
+    pub fn gc_upload(
+        ctx: *mut gc_ctx,
+        dst: gc_buf,
+        offset: u64,
+        src: *const c_void,
+        bytes: u64,
+    ) -> i32;
+    pub fn gc_download(
+        ctx: *mut gc_ctx,
+        src: gc_buf,
+        offset: u64,
+        dst: *mut c_void,
+        bytes: u64,
+    ) -> i32;
 
     pub fn gc_begin(ctx: *mut gc_ctx) -> i32;
     pub fn gc_dispatch(
@@ -103,7 +124,14 @@ extern "C" {
         push_bytes: u32,
     ) -> i32;
     pub fn gc_barrier(ctx: *mut gc_ctx) -> i32;
-    pub fn gc_copy(ctx: *mut gc_ctx, src: gc_buf, src_offset: u64, dst: gc_buf, dst_offset: u64, bytes: u64) -> i32;
+    pub fn gc_copy(
+        ctx: *mut gc_ctx,
+        src: gc_buf,
+        src_offset: u64,
+        dst: gc_buf,
+        dst_offset: u64,
+        bytes: u64,
+    ) -> i32;
     pub fn gc_fill(ctx: *mut gc_ctx, dst: gc_buf, offset: u64, bytes: u64, word: u32) -> i32;
     pub fn gc_submit(ctx: *mut gc_ctx) -> i32;
 }

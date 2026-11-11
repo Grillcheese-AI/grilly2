@@ -19,10 +19,25 @@ fn gpu_div(dev: &Device, a: &[f32], b: &[f32]) -> Vec<f32> {
          layout(push_constant) uniform P {{ uint n; }} p;\n\
          void main() {{ uint i = flat_index(); if (i < p.n) q[i] = div_rn(a[i], b[i]); }}\n"
     );
-    let kernel = Kernel { shader: dev.generated_kernel(&source).unwrap(), bindings: 3, push_words: 1, local_size: [256, 1, 1] };
-    let (ta, tb) = (Tensor::from_slice(dev, a, &[a.len()]).unwrap(), Tensor::from_slice(dev, b, &[b.len()]).unwrap());
+    let kernel = Kernel {
+        shader: dev.generated_kernel(&source).unwrap(),
+        bindings: 3,
+        push_words: 1,
+        local_size: [256, 1, 1],
+    };
+    let (ta, tb) = (
+        Tensor::from_slice(dev, a, &[a.len()]).unwrap(),
+        Tensor::from_slice(dev, b, &[b.len()]).unwrap(),
+    );
     let q = Tensor::empty(dev, &[a.len()]).unwrap();
-    kernel.launch_flat(dev, &[Arg::Tensor(&ta), Arg::Tensor(&tb), Arg::Tensor(&q)], a.len(), &[a.len() as u32]).unwrap();
+    kernel
+        .launch_flat(
+            dev,
+            &[Arg::Tensor(&ta), Arg::Tensor(&tb), Arg::Tensor(&q)],
+            a.len(),
+            &[a.len() as u32],
+        )
+        .unwrap();
     q.to_vec().unwrap()
 }
 
@@ -39,12 +54,20 @@ impl Rng {
     fn float(&mut self, lo: i32, hi: i32) -> f32 {
         let r = self.next();
         let exp = (lo + (r % (hi - lo + 1) as u64) as i32 + 127) as u32;
-        f32::from_bits(((r >> 32) as u32 & 0x8000_0000) | (exp << 23) | ((r >> 8) as u32 & 0x7F_FFFF))
+        f32::from_bits(
+            ((r >> 32) as u32 & 0x8000_0000) | (exp << 23) | ((r >> 8) as u32 & 0x7F_FFFF),
+        )
     }
 }
 
 fn mismatches(a: &[f32], b: &[f32], got: &[f32]) -> Vec<(f32, f32, f32, f32)> {
-    a.iter().zip(b).zip(got).filter(|((x, y), g)| (**x / **y).to_bits() != g.to_bits()).map(|((x, y), g)| (*x, *y, *g, x / y)).take(5).collect()
+    a.iter()
+        .zip(b)
+        .zip(got)
+        .filter(|((x, y), g)| (**x / **y).to_bits() != g.to_bits())
+        .map(|((x, y), g)| (*x, *y, *g, x / y))
+        .take(5)
+        .collect()
 }
 
 #[test]
@@ -53,15 +76,23 @@ fn div_rn_is_correctly_rounded() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let n = 1 << 24;
     // random operands whose quotient stays normal
-    let (a, b): (Vec<f32>, Vec<f32>) = (0..n).map(|_| (rng.float(-60, 60), rng.float(-60, 60))).unzip();
+    let (a, b): (Vec<f32>, Vec<f32>) = (0..n)
+        .map(|_| (rng.float(-60, 60), rng.float(-60, 60)))
+        .unzip();
     let bad = mismatches(&a, &b, &gpu_div(&dev, &a, &b));
-    assert!(bad.is_empty(), "div_rn differs from IEEE division, e.g. (a, b, gpu, ieee): {bad:?}");
+    assert!(
+        bad.is_empty(),
+        "div_rn differs from IEEE division, e.g. (a, b, gpu, ieee): {bad:?}"
+    );
 
     // the quantizer's divisions: absmax / 127.5, then 1 / scale
     let absmax: Vec<f32> = (0..n).map(|_| rng.float(-20, 20).abs()).collect();
     let b = vec![127.5f32; n];
     let scales = gpu_div(&dev, &absmax, &b);
-    assert!(mismatches(&absmax, &b, &scales).is_empty(), "absmax / 127.5");
+    assert!(
+        mismatches(&absmax, &b, &scales).is_empty(),
+        "absmax / 127.5"
+    );
     let ones = vec![1.0f32; n];
     let bad = mismatches(&ones, &scales, &gpu_div(&dev, &ones, &scales));
     assert!(bad.is_empty(), "1 / scale: {bad:?}");

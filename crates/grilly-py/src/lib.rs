@@ -65,24 +65,44 @@ impl PyTensor {
     /// row-major; `dtype` is a DType code.
     #[staticmethod]
     #[pyo3(signature = (data, shape, dtype=0))]
-    fn from_bytes(py: Python<'_>, data: &[u8], shape: Vec<usize>, dtype: u32) -> PyResult<PyTensor> {
+    fn from_bytes(
+        py: Python<'_>,
+        data: &[u8],
+        shape: Vec<usize>,
+        dtype: u32,
+    ) -> PyResult<PyTensor> {
         let (dev, dtype) = (device()?, DType::from_code(dtype).map_err(err)?);
-        py.detach(|| Tensor::from_bytes(&dev, data, &shape, dtype)).map(wrap).map_err(err)
+        py.detach(|| Tensor::from_bytes(&dev, data, &shape, dtype))
+            .map(wrap)
+            .map_err(err)
     }
 
     #[staticmethod]
     #[pyo3(signature = (shape, dtype=0, persistent=false))]
-    fn empty(py: Python<'_>, shape: Vec<usize>, dtype: u32, persistent: bool) -> PyResult<PyTensor> {
+    fn empty(
+        py: Python<'_>,
+        shape: Vec<usize>,
+        dtype: u32,
+        persistent: bool,
+    ) -> PyResult<PyTensor> {
         let (dev, dtype) = (device()?, DType::from_code(dtype).map_err(err)?);
-        let mem = if persistent { MemClass::Persistent } else { MemClass::Device };
-        py.detach(|| Tensor::empty_in(&dev, &shape, dtype, mem)).map(wrap).map_err(err)
+        let mem = if persistent {
+            MemClass::Persistent
+        } else {
+            MemClass::Device
+        };
+        py.detach(|| Tensor::empty_in(&dev, &shape, dtype, mem))
+            .map(wrap)
+            .map_err(err)
     }
 
     #[staticmethod]
     #[pyo3(signature = (shape, value, dtype=0))]
     fn full(py: Python<'_>, shape: Vec<usize>, value: f64, dtype: u32) -> PyResult<PyTensor> {
         let (dev, dtype) = (device()?, DType::from_code(dtype).map_err(err)?);
-        py.detach(|| Tensor::full_typed(&dev, &shape, value, dtype)).map(wrap).map_err(err)
+        py.detach(|| Tensor::full_typed(&dev, &shape, value, dtype))
+            .map(wrap)
+            .map_err(err)
     }
 
     /// `start + i * step` for `n` elements, on the device.
@@ -93,15 +113,25 @@ impl PyTensor {
     /// with `arange` sit inside a captured step.
     #[staticmethod]
     #[pyo3(signature = (n, start, step, dtype=0, integral=true))]
-    fn arange(py: Python<'_>, n: usize, start: f64, step: f64, dtype: u32, integral: bool)
-        -> PyResult<PyTensor> {
+    fn arange(
+        py: Python<'_>,
+        n: usize,
+        start: f64,
+        step: f64,
+        dtype: u32,
+        integral: bool,
+    ) -> PyResult<PyTensor> {
         let (dev, dtype) = (device()?, DType::from_code(dtype).map_err(err)?);
         py.detach(move || {
             if integral {
                 grilly_core::generic::arange(&dev, n, start as i64, step as i64, dtype)
             } else {
                 let t = grilly_core::generic::arange_f32(&dev, n, start as f32, step as f32)?;
-                if dtype == DType::F32 { Ok(t) } else { t.cast(dtype) }
+                if dtype == DType::F32 {
+                    Ok(t)
+                } else {
+                    t.cast(dtype)
+                }
             }
         })
         .map(wrap)
@@ -174,12 +204,23 @@ impl PyTensor {
     }
 
     fn set_grad(&self, grad: Option<&PyTensor>) -> PyResult<()> {
-        self.inner.set_grad(grad.map(|g| g.inner.clone())).map_err(err)
+        self.inner
+            .set_grad(grad.map(|g| g.inner.clone()))
+            .map_err(err)
     }
 
     #[pyo3(signature = (gradient=None, retain_graph=false))]
-    fn backward(&self, py: Python<'_>, gradient: Option<&PyTensor>, retain_graph: bool) -> PyResult<()> {
-        py.detach(|| self.inner.backward(gradient.map(|g| &g.inner), retain_graph)).map_err(err)
+    fn backward(
+        &self,
+        py: Python<'_>,
+        gradient: Option<&PyTensor>,
+        retain_graph: bool,
+    ) -> PyResult<()> {
+        py.detach(|| {
+            self.inner
+                .backward(gradient.map(|g| &g.inner), retain_graph)
+        })
+        .map_err(err)
     }
 
     #[getter]
@@ -189,31 +230,48 @@ impl PyTensor {
 
     // in place
     fn add_(&self, py: Python<'_>, other: &PyTensor) -> PyResult<()> {
-        py.detach(|| self.inner.add_(&other.inner).map(|_| ())).map_err(err)
+        py.detach(|| self.inner.add_(&other.inner).map(|_| ()))
+            .map_err(err)
     }
 
     fn fill_(&self, py: Python<'_>, value: f64) -> PyResult<()> {
-        py.detach(|| self.inner.fill_(value).map(|_| ())).map_err(err)
+        py.detach(|| self.inner.fill_(value).map(|_| ()))
+            .map_err(err)
     }
 
     fn copy_(&self, py: Python<'_>, src: &PyTensor) -> PyResult<()> {
-        py.detach(|| self.inner.copy_(&src.inner).map(|_| ())).map_err(err)
+        py.detach(|| self.inner.copy_(&src.inner).map(|_| ()))
+            .map_err(err)
     }
 
     fn mul_(&self, value: f32) -> PyResult<()> {
         self.inner.mul_(value).map(|_| ()).map_err(err)
     }
 
-    fn normal_(&self, py: Python<'_>, mean: f32, std: f32, generator: &Bound<'_, PyGenerator>) -> PyResult<()> {
+    fn normal_(
+        &self,
+        py: Python<'_>,
+        mean: f32,
+        std: f32,
+        generator: &Bound<'_, PyGenerator>,
+    ) -> PyResult<()> {
         let mut g = generator.borrow_mut();
         let (inner, gen) = (&self.inner, &mut g.inner);
-        py.detach(|| inner.normal_(mean, std, gen).map(|_| ())).map_err(err)
+        py.detach(|| inner.normal_(mean, std, gen).map(|_| ()))
+            .map_err(err)
     }
 
-    fn uniform_(&self, py: Python<'_>, low: f32, high: f32, generator: &Bound<'_, PyGenerator>) -> PyResult<()> {
+    fn uniform_(
+        &self,
+        py: Python<'_>,
+        low: f32,
+        high: f32,
+        generator: &Bound<'_, PyGenerator>,
+    ) -> PyResult<()> {
         let mut g = generator.borrow_mut();
         let (inner, gen) = (&self.inner, &mut g.inner);
-        py.detach(|| inner.uniform_(low, high, gen).map(|_| ())).map_err(err)
+        py.detach(|| inner.uniform_(low, high, gen).map(|_| ()))
+            .map_err(err)
     }
 }
 
@@ -233,7 +291,10 @@ impl SavedTensorHooks for PyHooks {
     fn pack(&self, t: &Tensor) -> grilly_core::Result<Box<dyn PackedTensor>> {
         Python::attach(|py| {
             let obj = self.pack.call1(py, (wrap(t.clone()),)).map_err(from_py)?;
-            Ok(Box::new(PyPacked { obj, unpack: self.unpack.clone_ref(py) }) as Box<dyn PackedTensor>)
+            Ok(Box::new(PyPacked {
+                obj,
+                unpack: self.unpack.clone_ref(py),
+            }) as Box<dyn PackedTensor>)
         })
     }
 }
@@ -241,8 +302,14 @@ impl SavedTensorHooks for PyHooks {
 impl PackedTensor for PyPacked {
     fn unpack(&mut self) -> grilly_core::Result<Tensor> {
         Python::attach(|py| {
-            let out = self.unpack.call1(py, (self.obj.clone_ref(py),)).map_err(from_py)?;
-            let t = out.bind(py).cast::<PyTensor>().map_err(|e| from_py(PyErr::from(e)))?;
+            let out = self
+                .unpack
+                .call1(py, (self.obj.clone_ref(py),))
+                .map_err(from_py)?;
+            let t = out
+                .bind(py)
+                .cast::<PyTensor>()
+                .map_err(|e| from_py(PyErr::from(e)))?;
             Ok(t.get().inner.clone())
         })
     }
@@ -270,7 +337,9 @@ struct PyGenerator {
 impl PyGenerator {
     #[new]
     fn new(seed: u64) -> PyGenerator {
-        PyGenerator { inner: rng::Generator::new(seed) }
+        PyGenerator {
+            inner: rng::Generator::new(seed),
+        }
     }
 
     fn manual_seed(&mut self, seed: u64) {
@@ -294,15 +363,30 @@ impl PyGenerator {
         let n = shape.iter().product();
         let values = self.inner.normal(n);
         let dev = device()?;
-        py.detach(|| Tensor::from_slice(&dev, &values, &shape)).map(wrap).map_err(err)
+        py.detach(|| Tensor::from_slice(&dev, &values, &shape))
+            .map(wrap)
+            .map_err(err)
     }
 
     /// int64 tensor uniform in [low, high).
-    fn integers(&mut self, py: Python<'_>, shape: Vec<usize>, low: i64, high: i64) -> PyResult<PyTensor> {
+    fn integers(
+        &mut self,
+        py: Python<'_>,
+        shape: Vec<usize>,
+        low: i64,
+        high: i64,
+    ) -> PyResult<PyTensor> {
         let n = shape.iter().product();
-        let bytes: Vec<u8> = self.inner.integers(n, low, high).iter().flat_map(|v| v.to_le_bytes()).collect();
+        let bytes: Vec<u8> = self
+            .inner
+            .integers(n, low, high)
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         let dev = device()?;
-        py.detach(|| Tensor::from_bytes(&dev, &bytes, &shape, DType::I64)).map(wrap).map_err(err)
+        py.detach(|| Tensor::from_bytes(&dev, &bytes, &shape, DType::I64))
+            .map(wrap)
+            .map_err(err)
     }
 
     /// Float32 tensor uniform in [0, 1).
@@ -310,23 +394,34 @@ impl PyGenerator {
         let n = shape.iter().product();
         let values = self.inner.uniform(n);
         let dev = device()?;
-        py.detach(|| Tensor::from_slice(&dev, &values, &shape)).map(wrap).map_err(err)
+        py.detach(|| Tensor::from_slice(&dev, &values, &shape))
+            .map(wrap)
+            .map_err(err)
     }
 }
 
 #[pyfunction]
 fn relu(py: Python<'_>, input: &PyTensor) -> PyResult<PyTensor> {
-    py.detach(|| grilly_torch::relu(&input.inner)).map(wrap).map_err(err)
+    py.detach(|| grilly_torch::relu(&input.inner))
+        .map(wrap)
+        .map_err(err)
 }
 
 #[pyfunction]
 fn add(py: Python<'_>, input: &PyTensor, other: &PyTensor) -> PyResult<PyTensor> {
-    py.detach(|| grilly_torch::add(&input.inner, &other.inner)).map(wrap).map_err(err)
+    py.detach(|| grilly_torch::add(&input.inner, &other.inner))
+        .map(wrap)
+        .map_err(err)
 }
 
 #[pyfunction]
 #[pyo3(signature = (input, weight, bias=None))]
-fn linear(py: Python<'_>, input: &PyTensor, weight: &PyTensor, bias: Option<&PyTensor>) -> PyResult<PyTensor> {
+fn linear(
+    py: Python<'_>,
+    input: &PyTensor,
+    weight: &PyTensor,
+    bias: Option<&PyTensor>,
+) -> PyResult<PyTensor> {
     py.detach(|| grilly_torch::linear(&input.inner, &weight.inner, bias.map(|b| &b.inner)))
         .map(wrap)
         .map_err(err)

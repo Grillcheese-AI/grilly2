@@ -22,7 +22,12 @@ use grilly_core::{Arg, Error, Kernel, Result, Tensor};
 
 /// Bindings: a, b, out. Push: elements, k, l, unbind, the two batch
 /// strides (0 broadcasts), and the two element offsets.
-const BIND: Kernel = Kernel { shader: "g2-blockcode-bind", bindings: 3, push_words: 8, local_size: [256, 1, 1] };
+const BIND: Kernel = Kernel {
+    shader: "g2-blockcode-bind",
+    bindings: 3,
+    push_words: 8,
+    local_size: [256, 1, 1],
+};
 
 pub const KERNELS: &[Kernel] = &[BIND];
 
@@ -31,17 +36,25 @@ pub const KERNELS: &[Kernel] = &[BIND];
 fn shape_of(t: &Tensor, what: &str) -> Result<(usize, usize, usize)> {
     let shape = t.shape();
     if shape.len() < 2 {
-        return Err(Error::Shape(format!("{what}: a block code is (..., k, l), got {shape:?}")));
+        return Err(Error::Shape(format!(
+            "{what}: a block code is (..., k, l), got {shape:?}"
+        )));
     }
     let (k, l) = (shape[shape.len() - 2], shape[shape.len() - 1]);
     if k == 0 || l == 0 {
-        return Err(Error::Shape(format!("{what}: a block code is (..., k, l) with k, l > 0, got {shape:?}")));
+        return Err(Error::Shape(format!(
+            "{what}: a block code is (..., k, l) with k, l > 0, got {shape:?}"
+        )));
     }
     Ok((t.numel() / (k * l), k, l))
 }
 
 fn convolve(a: &Tensor, b: &Tensor, unbind: bool) -> Result<Tensor> {
-    let what = if unbind { "blockcode unbind" } else { "blockcode bind" };
+    let what = if unbind {
+        "blockcode unbind"
+    } else {
+        "blockcode bind"
+    };
     let (a_vecs, k, l) = shape_of(a, what)?;
     let (b_vecs, bk, bl) = shape_of(b, what)?;
     if (bk, bl) != (k, l) {

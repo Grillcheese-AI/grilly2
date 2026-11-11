@@ -60,7 +60,12 @@ fn main() {
             continue;
         }
         let status = Command::new(&glslc)
-            .args(["-fshader-stage=compute", "-O", "--target-env=vulkan1.2", "-I"])
+            .args([
+                "-fshader-stage=compute",
+                "-O",
+                "--target-env=vulkan1.2",
+                "-I",
+            ])
             .arg(&shaders)
             .arg(&path)
             .arg("-o")
@@ -74,7 +79,11 @@ fn main() {
     // one name wins — does not depend on the order the filesystem hands
     // back directory entries
     names.sort();
-    assert!(!names.is_empty(), "no kernels compiled from {}", shaders.display());
+    assert!(
+        !names.is_empty(),
+        "no kernels compiled from {}",
+        shaders.display()
+    );
 
     let mut table = String::from(
         "/// Every kernel, baked into the binary by build.rs. `(name, SPIR-V)`.\n\
@@ -92,5 +101,9 @@ fn main() {
         .unwrap();
     }
     table.push_str("];\n");
-    std::fs::write(PathBuf::from(env::var("OUT_DIR").unwrap()).join("kernels.rs"), table).unwrap();
+    std::fs::write(
+        PathBuf::from(env::var("OUT_DIR").unwrap()).join("kernels.rs"),
+        table,
+    )
+    .unwrap();
 }

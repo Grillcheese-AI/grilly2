@@ -18,9 +18,19 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let sdk = PathBuf::from(
-        env::var("VULKAN_SDK").expect("VULKAN_SDK must point at the LunarG Vulkan SDK"),
-    );
+    // grilly-sys builds before grilly-core, so this is the message someone
+    // sees after `pip install grilly2` falls back to the sdist
+    let sdk = PathBuf::from(env::var("VULKAN_SDK").unwrap_or_else(|_| {
+        panic!(
+            "\n\
+             grilly2 is being built from source, which needs the LunarG Vulkan SDK \n\
+             (headers, glslc, shaderc). VULKAN_SDK is not set.\n\n\
+             If you did not mean to build from source, there is probably no prebuilt \n\
+             wheel for this platform yet — https://github.com/Grillcheese-AI/grilly2/issues\n\n\
+             To build: install the SDK from https://vulkan.lunarg.com/sdk/home and set \n\
+             VULKAN_SDK. Running grilly2 needs only your GPU driver.\n"
+        )
+    }));
     let vma = locate_vma(&manifest);
 
     for var in ["VULKAN_SDK", "VMA_INCLUDE_DIR"] {
@@ -30,7 +40,18 @@ fn main() {
     println!("cargo:rerun-if-changed=vulkan");
 
     let vulkan = manifest.join("vulkan");
-    cc::Build::new()
+    let mut build = cc::Build::new();
+    // `assert()` bakes `__FILE__` into the binary, and cc-rs does not define
+    // NDEBUG, so GCC and Clang would ship this machine's absolute path to
+    // vk_mem_alloc.h in every wheel (check_relocatable.py caught it). Rewrite
+    // the prefix rather than drop the asserts. MSVC does not embed it.
+    for root in [manifest.clone(), plain(manifest.clone())] {
+        build.flag_if_supported(format!(
+            "-ffile-prefix-map={}=crates/grilly-sys",
+            root.display()
+        ));
+    }
+    build
         .cpp(true)
         .std("c++17")
         .file(manifest.join("shim/gc_shim.cpp"))
@@ -41,15 +62,44 @@ fn main() {
         .include(manifest.join("shim"))
         .include(vulkan.join("include"))
         .include(&vma)
-        .include(sdk.join("Include"))
+        .include(sdk_dir(&sdk, &["Include", "include"], "vulkan/vulkan.h"))
         // the shim catches the Vulkan layer's exceptions, so unwinding has
         // to be on; MSVC defaults it off for C++ without this
         .flag_if_supported("/EHsc")
         .compile("grilly_vulkan");
 
-    println!("cargo:rustc-link-search=native={}", sdk.join("Lib").display());
-    println!("cargo:rustc-link-lib=dylib=vulkan-1");
+    // The Windows SDK names the loader `vulkan-1.lib`; everywhere else it
+    // is `libvulkan.so`. Only the import library is linked: at run time the
+    // loader is the one the GPU driver installed (see release.yml).
+    let windows = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    let (loader, shaderc) = if windows {
+        ("vulkan-1", "shaderc_combined.lib")
+    } else {
+        ("vulkan", "libshaderc_combined.a")
+    };
+    let lib = sdk_dir(&sdk, &["Lib", "lib", "lib64"], shaderc);
+    println!("cargo:rustc-link-search=native={}", lib.display());
+    println!("cargo:rustc-link-lib=dylib={loader}");
     println!("cargo:rustc-link-lib=static=shaderc_combined");
+}
+
+/// The first of `names` under the SDK that holds `marker`.
+///
+/// The Windows SDK spells its directories `Include` and `Lib`, the Linux
+/// tarball `include` and `lib`, and Linux file systems are case-sensitive.
+fn sdk_dir(sdk: &Path, names: &[&str], marker: &str) -> PathBuf {
+    names
+        .iter()
+        .map(|n| sdk.join(n))
+        .find(|d| d.join(marker).exists())
+        .unwrap_or_else(|| {
+            panic!(
+                "{marker} not found under VULKAN_SDK={} (looked in {names:?}) — \
+                 is VULKAN_SDK the SDK root for this platform? On Linux that is \
+                 the x86_64/ directory inside the tarball.",
+                sdk.display()
+            )
+        })
 }
 
 /// VulkanMemoryAllocator's include directory.

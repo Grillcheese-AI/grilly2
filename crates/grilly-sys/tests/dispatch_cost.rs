@@ -65,7 +65,12 @@ void main() {
 
 fn compile(ctx: *mut gc_ctx, name: &str, src: &str) {
     let n = CString::new(name).unwrap();
-    ok!(gc_compile_shader(ctx, n.as_ptr(), src.as_ptr().cast(), src.len() as u64));
+    ok!(gc_compile_shader(
+        ctx,
+        n.as_ptr(),
+        src.as_ptr().cast(),
+        src.len() as u64
+    ));
 }
 
 struct Ctx(*mut gc_ctx);
@@ -81,7 +86,12 @@ impl Ctx {
 
     fn buffer(&self, bytes: usize) -> gc_buf {
         let mut b = 0;
-        ok!(gc_buffer_create(self.0, bytes as u64, GC_MEM_DEVICE, &mut b));
+        ok!(gc_buffer_create(
+            self.0,
+            bytes as u64,
+            GC_MEM_DEVICE,
+            &mut b
+        ));
         b
     }
 
@@ -122,14 +132,35 @@ fn measure(ctx: &Ctx, cfg: Config) -> (f64, f64) {
                 ok!(gc_barrier(ctx.0));
             }
             // a chain reads the previous dispatch's output; otherwise the one input
-            let src = if cfg.chain && i > 0 { outs[(i - 1) % OUTPUTS] } else { input };
+            let src = if cfg.chain && i > 0 {
+                outs[(i - 1) % OUTPUTS]
+            } else {
+                input
+            };
             let bindings = [
-                gc_binding { buf: src, offset: 0, range: 0 },
-                gc_binding { buf: outs[i % OUTPUTS], offset: 0, range: 0 },
+                gc_binding {
+                    buf: src,
+                    offset: 0,
+                    range: 0,
+                },
+                gc_binding {
+                    buf: outs[i % OUTPUTS],
+                    offset: 0,
+                    range: 0,
+                },
             ];
             let name = &names[if cfg.alternate { i % 2 } else { 0 }];
-            ok!(gc_dispatch(ctx.0, name.as_ptr(), bindings.as_ptr(), 2, cfg.n.div_ceil(256), 1, 1,
-                            &cfg.n as *const u32 as *const c_void, 4));
+            ok!(gc_dispatch(
+                ctx.0,
+                name.as_ptr(),
+                bindings.as_ptr(),
+                2,
+                cfg.n.div_ceil(256),
+                1,
+                1,
+                &cfg.n as *const u32 as *const c_void,
+                4
+            ));
         }
         let recorded = t0.elapsed().as_secs_f64();
         ok!(gc_submit(ctx.0));
@@ -151,8 +182,13 @@ fn measure(ctx: &Ctx, cfg: Config) -> (f64, f64) {
 #[ignore = "measurement; run with --ignored --nocapture"]
 fn dispatch_cost_breakdown() {
     let ctx = Ctx::new();
-    println!("{DISPATCHES} dispatches per batch, median of {REPEATS} batches; microseconds per dispatch");
-    println!("{:>8} {:>9} {:>10} {:>7} | {:>8} {:>8}", "elements", "barrier", "pipeline", "chain", "GPU us", "host us");
+    println!(
+        "{DISPATCHES} dispatches per batch, median of {REPEATS} batches; microseconds per dispatch"
+    );
+    println!(
+        "{:>8} {:>9} {:>10} {:>7} | {:>8} {:>8}",
+        "elements", "barrier", "pipeline", "chain", "GPU us", "host us"
+    );
     for n in [1u32, 256, 4096, 65_536, 262_144] {
         for (barrier, alternate, chain) in [
             (true, false, false),
@@ -161,10 +197,24 @@ fn dispatch_cost_breakdown() {
             (false, true, false),
             (true, false, true),
         ] {
-            let (gpu, host) = measure(&ctx, Config { barrier, n, alternate, chain });
-            println!("{:>8} {:>9} {:>10} {:>7} | {:>8.2} {:>8.2}", n,
-                     if barrier { "yes" } else { "no" }, if alternate { "alternate" } else { "same" },
-                     if chain { "yes" } else { "no" }, gpu, host);
+            let (gpu, host) = measure(
+                &ctx,
+                Config {
+                    barrier,
+                    n,
+                    alternate,
+                    chain,
+                },
+            );
+            println!(
+                "{:>8} {:>9} {:>10} {:>7} | {:>8.2} {:>8.2}",
+                n,
+                if barrier { "yes" } else { "no" },
+                if alternate { "alternate" } else { "same" },
+                if chain { "yes" } else { "no" },
+                gpu,
+                host
+            );
         }
     }
 }
