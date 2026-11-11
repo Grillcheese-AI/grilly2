@@ -97,7 +97,11 @@ fn transcendental_unary_ops_within_2_ulp() {
     let pos: Vec<f32> = x.iter().map(|v| v.abs() + 1e-3).collect();
     let neg_int_pow: Vec<f32> = x.iter().map(|v| v.clamp(-8.0, 8.0)).collect();
     // RoPE-like angles, up to the documented 8192 limit
-    let angles: Vec<f32> = data(4099, 9).iter().enumerate().map(|(i, v)| v * [1.0, 30.0, 700.0, 8000.0][i % 4]).collect();
+    let angles: Vec<f32> = data(4099, 9)
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v * [1.0, 30.0, 700.0, 8000.0][i % 4])
+        .collect();
     let cases: &[(Unary, f32, &[f32], &str)] = &[
         (Unary::Exp, 0.0, &x, "x.double().exp()"),
         (Unary::Log, 0.0, &pos, "x.double().log()"),
@@ -115,11 +119,18 @@ fn transcendental_unary_ops_within_2_ulp() {
     ];
     for &(op, a, input, truth_expr) in cases {
         let n = input.len();
-        let got = generic::unary(&t(input, &[n]), op, a, 0.0).unwrap().to_vec().unwrap();
+        let got = generic::unary(&t(input, &[n]), op, a, 0.0)
+            .unwrap()
+            .to_vec()
+            .unwrap();
         let truth = torch(truth_expr, &[("x", input, &[n])]);
         let e = ulps(&got, &truth);
         println!("{op:?} a={a}: {e:.2} ulp");
-        let bound = if op == Unary::PowScalar && a != a.floor() && a != 0.5 { NON_INTEGER_POW_ULP_BOUND } else { ULP_BOUND };
+        let bound = if op == Unary::PowScalar && a != a.floor() && a != 0.5 {
+            NON_INTEGER_POW_ULP_BOUND
+        } else {
+            ULP_BOUND
+        };
         assert!(e <= bound, "{op:?} a={a}: {e} ulp > {bound}");
     }
 }
@@ -130,12 +141,21 @@ fn gelu_within_absolute_bound() {
     let n = x.len();
     for (op, truth_expr) in [
         (Unary::Gelu, "torch.nn.functional.gelu(x.double())"),
-        (Unary::GeluGrad, "grads(lambda v: torch.nn.functional.gelu(v.double()), (x,), torch.ones_like(x))[0]"),
+        (
+            Unary::GeluGrad,
+            "grads(lambda v: torch.nn.functional.gelu(v.double()), (x,), torch.ones_like(x))[0]",
+        ),
     ] {
-        let got = generic::unary(&t(&x, &[n]), op, 0.0, 0.0).unwrap().to_vec().unwrap();
+        let got = generic::unary(&t(&x, &[n]), op, 0.0, 0.0)
+            .unwrap()
+            .to_vec()
+            .unwrap();
         let truth = torch(truth_expr, &[("x", &x, &[n])]);
         for ((g, w), xi) in got.iter().zip(&truth).zip(&x) {
-            assert!((g - w).abs() <= 3e-7 * xi.abs().max(1.0), "{op:?} at x={xi}: {g} vs {w}");
+            assert!(
+                (g - w).abs() <= 3e-7 * xi.abs().max(1.0),
+                "{op:?} at x={xi}: {g} vs {w}"
+            );
         }
     }
 }
@@ -169,15 +189,25 @@ fn binary_ops_broadcast_like_torch() {
         (Binary::Eq, "(a == b).float()"),
     ];
     for (i, &(sa, sb)) in shapes.iter().enumerate() {
-        let (a, b) = (wide(sa.iter().product(), 10 + i as u32), wide(sb.iter().product(), 20 + i as u32));
+        let (a, b) = (
+            wide(sa.iter().product(), 10 + i as u32),
+            wide(sb.iter().product(), 20 + i as u32),
+        );
         let (at, bt) = (t(&a, sa), t(&b, sb));
         let inputs = [("a", &a[..], sa), ("b", &b[..], sb)];
         for (op, expr) in exact_ops {
             let got = generic::binary(&at, &bt, op).unwrap();
             let want = torch(expr, &inputs);
-            exact(&got.to_vec().unwrap(), &want, &format!("{expr} {sa:?} {sb:?}"));
+            exact(
+                &got.to_vec().unwrap(),
+                &want,
+                &format!("{expr} {sa:?} {sb:?}"),
+            );
         }
-        let got = generic::binary(&at, &bt, Binary::Div).unwrap().to_vec().unwrap();
+        let got = generic::binary(&at, &bt, Binary::Div)
+            .unwrap()
+            .to_vec()
+            .unwrap();
         let e = ulps(&got, &torch("(a.double() / b.double()).float()", &inputs));
         assert!(e <= ULP_BOUND, "div {sa:?} {sb:?}: {e} ulp");
     }
@@ -189,8 +219,14 @@ fn binary_ops_broadcast_like_torch() {
 fn binary_pow_matches_float64() {
     let base: Vec<f32> = wide(1000, 4).iter().map(|v| v.abs() + 0.1).collect();
     let expo: Vec<f32> = data(1000, 5).iter().map(|v| v * 3.0).collect();
-    let got = generic::binary(&t(&base, &[1000]), &t(&expo, &[1000]), Binary::Pow).unwrap().to_vec().unwrap();
-    let truth = torch("a.double().pow(b.double()).float()", &[("a", &base, &[1000]), ("b", &expo, &[1000])]);
+    let got = generic::binary(&t(&base, &[1000]), &t(&expo, &[1000]), Binary::Pow)
+        .unwrap()
+        .to_vec()
+        .unwrap();
+    let truth = torch(
+        "a.double().pow(b.double()).float()",
+        &[("a", &base, &[1000]), ("b", &expo, &[1000])],
+    );
     let e = ulps(&got, &truth);
     println!("pow(tensor, tensor): {e:.2} ulp");
     assert!(e <= NON_INTEGER_POW_ULP_BOUND, "{e}");
@@ -211,15 +247,27 @@ fn reductions_match_torch() {
                     &format!("(x.{name}({dim}, keepdim={kd}), x.double().abs().{name}({dim}, keepdim={kd}).float())"),
                     &inputs,
                 );
-                let bound: Vec<f32> = want[1].iter().map(|m| m * ((k as f32).sqrt() + 2.0) * f32::EPSILON).collect();
+                let bound: Vec<f32> = want[1]
+                    .iter()
+                    .map(|m| m * ((k as f32).sqrt() + 2.0) * f32::EPSILON)
+                    .collect();
                 let g = got.to_vec().unwrap();
                 assert_eq!(g.len(), want[0].len());
-                let worst = g.iter().zip(&want[0]).zip(&bound).map(|((a, b), c)| (a - b).abs() / c.max(f32::MIN_POSITIVE)).fold(0.0f32, f32::max);
+                let worst = g
+                    .iter()
+                    .zip(&want[0])
+                    .zip(&bound)
+                    .map(|((a, b), c)| (a - b).abs() / c.max(f32::MIN_POSITIVE))
+                    .fold(0.0f32, f32::max);
                 assert!(worst <= 1.0, "{name} dim {dim}: {worst} of bound");
             }
             for (op, expr) in [(Reduce::Max, "amax"), (Reduce::Min, "amin")] {
                 let got = generic::reduce(&xt, dim, op, keepdim).unwrap();
-                exact(&got.to_vec().unwrap(), &torch(&format!("x.{expr}({dim}, keepdim={kd})"), &inputs), expr);
+                exact(
+                    &got.to_vec().unwrap(),
+                    &torch(&format!("x.{expr}({dim}, keepdim={kd})"), &inputs),
+                    expr,
+                );
                 assert_eq!(got.dim(), if keepdim { 3 } else { 2 });
             }
         }
@@ -234,7 +282,10 @@ fn reductions_match_torch() {
 #[test]
 fn sum_to_shape_undoes_broadcasting() {
     let g = t(&(0..24).map(|i| i as f32).collect::<Vec<_>>(), &[2, 3, 4]);
-    let want = torch("g.sum(0).sum(1, keepdim=True)", &[("g", &g.to_vec().unwrap(), &[2, 3, 4])]);
+    let want = torch(
+        "g.sum(0).sum(1, keepdim=True)",
+        &[("g", &g.to_vec().unwrap(), &[2, 3, 4])],
+    );
     let got = generic::sum_to_shape(&g, &[3, 1]).unwrap();
     assert_eq!(got.shape(), &[3, 1]);
     exact(&got.to_vec().unwrap(), &want, "sum_to_shape");
@@ -247,13 +298,20 @@ fn strided_copy_transposes_and_writes_slices() {
     let src = t(&x, &[2, 3, 4]);
     let dst = Tensor::zeros(&dev(), &[4, 3, 2]).unwrap();
     generic::copy_strided(&src, 0, &[1, 4, 12], &dst, 0, &[6, 2, 1], &[4, 3, 2]).unwrap();
-    exact(&dst.to_vec().unwrap(), &torch("x.permute(2, 1, 0).contiguous()", &[("x", &x, &[2, 3, 4])]), "permute");
+    exact(
+        &dst.to_vec().unwrap(),
+        &torch("x.permute(2, 1, 0).contiguous()", &[("x", &x, &[2, 3, 4])]),
+        "permute",
+    );
 
     // write a (2, 2) block into rows 1..3, cols 2..4 of a (4, 5) zeros
     let out = Tensor::zeros(&dev(), &[4, 5]).unwrap();
     let block = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
     generic::write_strided(&block, 0, &[2, 1], &out, 5 + 2, &[5, 1], &[2, 2]).unwrap();
-    let want = torch("torch.nn.functional.pad(x, (2, 1, 1, 1))", &[("x", &[1.0, 2.0, 3.0, 4.0], &[2, 2])]);
+    let want = torch(
+        "torch.nn.functional.pad(x, (2, 1, 1, 1))",
+        &[("x", &[1.0, 2.0, 3.0, 4.0], &[2, 2])],
+    );
     exact(&out.to_vec().unwrap(), &want, "slice write");
     assert_eq!(out.version(), 1); // a fresh zeros tensor is at 0, as in torch; one write
 }
@@ -264,7 +322,17 @@ fn launches_beyond_one_dimension_of_workgroups() {
     let n = 16_777_216 + 1000;
     let x = Tensor::full(&dev(), &[n], 1.5).unwrap();
     let y = generic::unary(&x, Unary::MulScalar, 2.0, 0.0).unwrap();
-    let total = generic::reduce_all(&y, Reduce::Max).unwrap().to_vec().unwrap()[0];
-    let low = generic::reduce_all(&y, Reduce::Min).unwrap().to_vec().unwrap()[0];
-    assert_eq!((total, low), (3.0, 3.0), "every element written exactly once");
+    let total = generic::reduce_all(&y, Reduce::Max)
+        .unwrap()
+        .to_vec()
+        .unwrap()[0];
+    let low = generic::reduce_all(&y, Reduce::Min)
+        .unwrap()
+        .to_vec()
+        .unwrap()[0];
+    assert_eq!(
+        (total, low),
+        (3.0, 3.0),
+        "every element written exactly once"
+    );
 }

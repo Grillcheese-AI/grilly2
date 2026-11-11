@@ -8,10 +8,10 @@
 //! by a full barrier, so they observe each other's writes in order.
 
 pub mod autograd;
-pub mod fault;
 mod device;
 mod dtype;
 mod error;
+pub mod fault;
 pub mod fusion;
 pub mod generic;
 pub mod graph;

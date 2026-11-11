@@ -45,7 +45,10 @@ impl Drop for GradModeGuard {
 /// (`torch.set_grad_enabled`).
 pub fn set_grad_enabled(enabled: bool) -> GradModeGuard {
     let previous = GRAD_ENABLED.with(|g| g.replace(enabled));
-    GradModeGuard { previous, _not_send: std::marker::PhantomData }
+    GradModeGuard {
+        previous,
+        _not_send: std::marker::PhantomData,
+    }
 }
 
 /// `torch.no_grad()`.
@@ -85,7 +88,10 @@ impl Meta {
     }
 
     fn with_grad_fn(edge: Edge) -> Meta {
-        Meta { grad_fn: Some(edge), ..Meta::leaf() }
+        Meta {
+            grad_fn: Some(edge),
+            ..Meta::leaf()
+        }
     }
 }
 
@@ -108,7 +114,10 @@ pub struct Node {
 
 enum Kind {
     /// Writes into a leaf's `.grad`. Weak, so the graph never keeps a leaf alive.
-    Accumulate { leaf: Weak<Meta>, shape: Vec<usize> },
+    Accumulate {
+        leaf: Weak<Meta>,
+        shape: Vec<usize>,
+    },
     Function(Mutex<Box<dyn Backward>>),
 }
 
@@ -117,7 +126,11 @@ pub trait Backward: Send {
     /// Gradients w.r.t. the op's outputs (None: that output got no gradient)
     /// to gradients w.r.t. its inputs, one per input. Entries whose
     /// `needs_input_grad` is false may be None. Runs with grad mode off.
-    fn apply(&mut self, grads: &[Option<Tensor>], needs_input_grad: &[bool]) -> Result<Vec<Option<Tensor>>>;
+    fn apply(
+        &mut self,
+        grads: &[Option<Tensor>],
+        needs_input_grad: &[bool],
+    ) -> Result<Vec<Option<Tensor>>>;
 
     /// Drop saved tensors; called after `apply` unless the graph is retained.
     fn release(&mut self) {}
@@ -178,7 +191,10 @@ impl SavedTensor {
         let hooks = HOOKS.with(|h| h.borrow().last().cloned());
         let state = match hooks {
             Some(h) => Saved::Packed(h.pack(&t.detach())?),
-            None => Saved::Plain { data: t.detach(), version: t.version() },
+            None => Saved::Plain {
+                data: t.detach(),
+                version: t.version(),
+            },
         };
         Ok(SavedTensor { state })
     }
@@ -232,7 +248,10 @@ fn edge_for(t: &Tensor) -> Option<Edge> {
             name: "AccumulateGrad",
             next: Vec::new(),
             num_outputs: 1,
-            kind: Kind::Accumulate { leaf: Arc::downgrade(meta), shape: t.shape().to_vec() },
+            kind: Kind::Accumulate {
+                leaf: Arc::downgrade(meta),
+                shape: t.shape().to_vec(),
+            },
         });
         *slot = Arc::downgrade(&node);
         node
@@ -265,7 +284,10 @@ pub fn record<B: Backward + 'static>(
         kind: Kind::Function(Mutex::new(Box::new(backward))),
     });
     for (i, out) in outputs.iter_mut().enumerate() {
-        out.set_meta(Arc::new(Meta::with_grad_fn(Edge { node: node.clone(), input_nr: i })));
+        out.set_meta(Arc::new(Meta::with_grad_fn(Edge {
+            node: node.clone(),
+            input_nr: i,
+        })));
     }
     Ok(())
 }
@@ -338,8 +360,14 @@ fn key(node: &Arc<Node>) -> usize {
     Arc::as_ptr(node) as usize
 }
 
-fn buffer_add(buffers: &mut HashMap<usize, Vec<Option<Tensor>>>, edge: &Edge, grad: Tensor) -> Result<()> {
-    let slots = buffers.entry(key(&edge.node)).or_insert_with(|| vec![None; edge.node.num_outputs]);
+fn buffer_add(
+    buffers: &mut HashMap<usize, Vec<Option<Tensor>>>,
+    edge: &Edge,
+    grad: Tensor,
+) -> Result<()> {
+    let slots = buffers
+        .entry(key(&edge.node))
+        .or_insert_with(|| vec![None; edge.node.num_outputs]);
     let slot = &mut slots[edge.input_nr];
     *slot = Some(match slot.take() {
         None => grad,
@@ -362,7 +390,11 @@ fn accumulate_grad(leaf: &Meta, shape: &[usize], grad: Tensor) -> Result<()> {
         Some(existing) => ops::add_into(existing, &grad),
         None => {
             // Keep it only if nothing else can see it; otherwise store a copy.
-            *slot = Some(if grad.is_sole_owner() { grad.detach() } else { grad.clone_data()? });
+            *slot = Some(if grad.is_sole_owner() {
+                grad.detach()
+            } else {
+                grad.clone_data()?
+            });
             Ok(())
         }
     }
@@ -408,10 +440,16 @@ pub(crate) fn backward(root: &Tensor, gradient: Option<&Tensor>, retain_graph: b
     let mut buffers = HashMap::new();
     buffer_add(&mut buffers, &root_edge, root_grad)?;
     let mut order = 0u64;
-    let mut ready = BinaryHeap::from([Ready { seq: root_edge.node.seq, order, node: root_edge.node }]);
+    let mut ready = BinaryHeap::from([Ready {
+        seq: root_edge.node.seq,
+        order,
+        node: root_edge.node,
+    }]);
 
     while let Some(Ready { node, .. }) = ready.pop() {
-        let grads = buffers.remove(&key(&node)).unwrap_or_else(|| vec![None; node.num_outputs]);
+        let grads = buffers
+            .remove(&key(&node))
+            .unwrap_or_else(|| vec![None; node.num_outputs]);
         let input_grads = match &node.kind {
             Kind::Accumulate { leaf, shape } => {
                 if let (Some(leaf), Some(Some(g))) = (leaf.upgrade(), grads.into_iter().next()) {
@@ -450,7 +488,11 @@ pub(crate) fn backward(root: &Tensor, gradient: Option<&Tensor>, retain_graph: b
             *remaining -= 1;
             if *remaining == 0 {
                 order += 1;
-                ready.push(Ready { seq: edge.node.seq, order, node: edge.node.clone() });
+                ready.push(Ready {
+                    seq: edge.node.seq,
+                    order,
+                    node: edge.node.clone(),
+                });
             }
         }
     }

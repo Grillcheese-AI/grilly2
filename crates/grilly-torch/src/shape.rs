@@ -3,8 +3,8 @@
 //! marked as view copies (in-place writes through them are refused rather
 //! than silently missing the original). Gradients are torch's.
 
-use grilly_core::generic::{self as k, contiguous_strides, IndexMode};
 use grilly_core::fault::{self, IndexOp};
+use grilly_core::generic::{self as k, contiguous_strides, IndexMode};
 use grilly_core::{DType, Error, Result, Tensor};
 
 use crate::math::record;
@@ -19,7 +19,11 @@ pub fn broadcast_raw(t: &Tensor, shape: &[usize]) -> Result<Tensor> {
         return Ok(t.clone());
     }
     let ok = t.dim() <= shape.len()
-        && t.shape().iter().rev().zip(shape.iter().rev()).all(|(&a, &b)| a == b || a == 1);
+        && t.shape()
+            .iter()
+            .rev()
+            .zip(shape.iter().rev())
+            .all(|(&a, &b)| a == b || a == 1);
     if !ok {
         return Err(Error::Shape(format!(
             "The expanded size of the tensor must match the existing size: cannot expand {:?} to {shape:?}",
@@ -29,10 +33,24 @@ pub fn broadcast_raw(t: &Tensor, shape: &[usize]) -> Result<Tensor> {
     let own = strides_of(t);
     let lead = shape.len() - t.dim();
     let src: Vec<usize> = (0..shape.len())
-        .map(|i| if i < lead || t.shape()[i - lead] == 1 { 0 } else { own[i - lead] })
+        .map(|i| {
+            if i < lead || t.shape()[i - lead] == 1 {
+                0
+            } else {
+                own[i - lead]
+            }
+        })
         .collect();
     let out = Tensor::empty_typed(t.device(), shape, t.dtype())?;
-    k::copy_strided(t, t.offset(), &src, &out, 0, &contiguous_strides(shape), shape)?;
+    k::copy_strided(
+        t,
+        t.offset(),
+        &src,
+        &out,
+        0,
+        &contiguous_strides(shape),
+        shape,
+    )?;
     Ok(out)
 }
 
@@ -44,7 +62,14 @@ pub fn expand(x: &Tensor, shape: &[usize]) -> Result<Tensor> {
     }
     out.mark_view_copy();
     let in_shape = x.shape().to_vec();
-    record("ExpandBackward0", &[x], &mut out, &[], false, move |g, _, _| Ok(vec![Some(k::sum_to_shape(g, &in_shape)?)]))?;
+    record(
+        "ExpandBackward0",
+        &[x],
+        &mut out,
+        &[],
+        false,
+        move |g, _, _| Ok(vec![Some(k::sum_to_shape(g, &in_shape)?)]),
+    )?;
     Ok(out)
 }
 
@@ -53,14 +78,29 @@ fn permute_raw(x: &Tensor, dims: &[usize]) -> Result<Tensor> {
     let shape: Vec<usize> = dims.iter().map(|&d| x.shape()[d]).collect();
     let src: Vec<usize> = dims.iter().map(|&d| own[d]).collect();
     let out = Tensor::empty_typed(x.device(), &shape, x.dtype())?;
-    k::copy_strided(x, x.offset(), &src, &out, 0, &contiguous_strides(&shape), &shape)?;
+    k::copy_strided(
+        x,
+        x.offset(),
+        &src,
+        &out,
+        0,
+        &contiguous_strides(&shape),
+        &shape,
+    )?;
     Ok(out)
 }
 
 fn permute_named(x: &Tensor, dims: &[usize], name: &'static str) -> Result<Tensor> {
     let mut seen = vec![false; x.dim()];
-    if dims.len() != x.dim() || dims.iter().any(|&d| d >= x.dim() || std::mem::replace(&mut seen[d], true)) {
-        return Err(Error::Shape(format!("permute: {dims:?} is not a permutation of the dims of a {}-d tensor", x.dim())));
+    if dims.len() != x.dim()
+        || dims
+            .iter()
+            .any(|&d| d >= x.dim() || std::mem::replace(&mut seen[d], true))
+    {
+        return Err(Error::Shape(format!(
+            "permute: {dims:?} is not a permutation of the dims of a {}-d tensor",
+            x.dim()
+        )));
     }
     let mut out = permute_raw(x, dims)?;
     out.mark_view_copy();
@@ -68,7 +108,9 @@ fn permute_named(x: &Tensor, dims: &[usize], name: &'static str) -> Result<Tenso
     for (i, &d) in dims.iter().enumerate() {
         inverse[d] = i;
     }
-    record(name, &[x], &mut out, &[], false, move |g, _, _| Ok(vec![Some(permute_raw(g, &inverse)?)]))?;
+    record(name, &[x], &mut out, &[], false, move |g, _, _| {
+        Ok(vec![Some(permute_raw(g, &inverse)?)])
+    })?;
     Ok(out)
 }
 
@@ -81,7 +123,10 @@ pub fn permute(x: &Tensor, dims: &[usize]) -> Result<Tensor> {
 pub fn transpose(x: &Tensor, d0: usize, d1: usize) -> Result<Tensor> {
     let mut dims: Vec<usize> = (0..x.dim()).collect();
     if d0 >= x.dim() || d1 >= x.dim() {
-        return Err(Error::Shape(format!("transpose: dims {d0}, {d1} out of range for a {}-d tensor", x.dim())));
+        return Err(Error::Shape(format!(
+            "transpose: dims {d0}, {d1} out of range for a {}-d tensor",
+            x.dim()
+        )));
     }
     dims.swap(d0, d1);
     permute_named(x, &dims, "TransposeBackward0")
@@ -90,14 +135,36 @@ pub fn transpose(x: &Tensor, d0: usize, d1: usize) -> Result<Tensor> {
 /// Read the elements at `offset + c . strides` for every coordinate `c` of
 /// `shape` (offset relative to `x`'s first element): torch's basic indexing
 /// and slicing. `name` is the grad_fn torch reports.
-pub fn strided_read(x: &Tensor, offset: usize, strides: &[usize], shape: &[usize], name: &'static str) -> Result<Tensor> {
+pub fn strided_read(
+    x: &Tensor,
+    offset: usize,
+    strides: &[usize],
+    shape: &[usize],
+    name: &'static str,
+) -> Result<Tensor> {
     let mut out = Tensor::empty_typed(x.device(), shape, x.dtype())?;
-    k::copy_strided(x, x.offset() + offset, strides, &out, 0, &contiguous_strides(shape), shape)?;
+    k::copy_strided(
+        x,
+        x.offset() + offset,
+        strides,
+        &out,
+        0,
+        &contiguous_strides(shape),
+        shape,
+    )?;
     out.mark_view_copy();
     let (in_shape, strides, shape) = (x.shape().to_vec(), strides.to_vec(), shape.to_vec());
     record(name, &[x], &mut out, &[], false, move |g, _, _| {
         let grad = Tensor::zeros(g.device(), &in_shape)?;
-        k::copy_strided(g, g.offset(), &contiguous_strides(&shape), &grad, offset, &strides, &shape)?;
+        k::copy_strided(
+            g,
+            g.offset(),
+            &contiguous_strides(&shape),
+            &grad,
+            offset,
+            &strides,
+            &shape,
+        )?;
         Ok(vec![Some(grad)])
     })?;
     Ok(out)
@@ -120,7 +187,10 @@ pub fn narrow(x: &Tensor, dim: usize, start: usize, length: usize) -> Result<Ten
 /// `x.select(dim, index)`: the slice at `index`, with `dim` removed.
 pub fn select(x: &Tensor, dim: usize, index: usize) -> Result<Tensor> {
     if dim >= x.dim() || index >= x.shape()[dim] {
-        return Err(Error::Shape(format!("index {index} is out of bounds for dimension {dim} of {:?}", x.shape())));
+        return Err(Error::Shape(format!(
+            "index {index} is out of bounds for dimension {dim} of {:?}",
+            x.shape()
+        )));
     }
     let own = strides_of(x);
     let mut shape = x.shape().to_vec();
@@ -132,25 +202,51 @@ pub fn select(x: &Tensor, dim: usize, index: usize) -> Result<Tensor> {
 
 /// Write `value` (broadcast to `shape`) into `dst` at `offset + c . strides`:
 /// torch's `dst[index] = value`. An in-place op: torch's rules apply.
-pub fn write_region(dst: &Tensor, offset: usize, strides: &[usize], shape: &[usize], value: &Tensor) -> Result<()> {
+pub fn write_region(
+    dst: &Tensor,
+    offset: usize,
+    strides: &[usize],
+    shape: &[usize],
+    value: &Tensor,
+) -> Result<()> {
     dst.check_inplace(&[value])?;
     // torch converts the value to the destination's dtype.
     let v = broadcast_raw(&value.cast(dst.dtype())?, shape)?;
-    k::write_strided(&v, v.offset(), &contiguous_strides(shape), dst, dst.offset() + offset, strides, shape)
+    k::write_strided(
+        &v,
+        v.offset(),
+        &contiguous_strides(shape),
+        dst,
+        dst.offset() + offset,
+        strides,
+        shape,
+    )
 }
 
 fn check_cat(xs: &[&Tensor], dim: usize, what: &str) -> Result<()> {
-    let first = xs.first().ok_or_else(|| Error::Invalid(format!("{what}(): expected a non-empty list of Tensors")))?;
+    let first = xs
+        .first()
+        .ok_or_else(|| Error::Invalid(format!("{what}(): expected a non-empty list of Tensors")))?;
     if xs.iter().any(|t| t.dtype() != first.dtype()) {
-        return Err(Error::NotImplemented(format!("{what}() of tensors with different dtypes (type promotion)")));
+        return Err(Error::NotImplemented(format!(
+            "{what}() of tensors with different dtypes (type promotion)"
+        )));
     }
     for t in xs {
         let same = t.dim() == first.dim()
-            && t.shape().iter().zip(first.shape()).enumerate().all(|(i, (a, b))| a == b || (what == "cat" && i == dim));
+            && t.shape()
+                .iter()
+                .zip(first.shape())
+                .enumerate()
+                .all(|(i, (a, b))| a == b || (what == "cat" && i == dim));
         if !same {
             return Err(Error::Shape(format!(
                 "{what}(): tensors must have the same shape{} (got {:?} and {:?})",
-                if what == "cat" { " except in the concatenating dimension" } else { "" },
+                if what == "cat" {
+                    " except in the concatenating dimension"
+                } else {
+                    ""
+                },
                 first.shape(),
                 t.shape()
             )));
@@ -163,7 +259,10 @@ fn check_cat(xs: &[&Tensor], dim: usize, what: &str) -> Result<()> {
 pub fn cat(xs: &[&Tensor], dim: usize) -> Result<Tensor> {
     check_cat(xs, dim, "cat")?;
     if dim >= xs[0].dim() {
-        return Err(Error::Shape(format!("cat: dim {dim} out of range for {}-d tensors", xs[0].dim())));
+        return Err(Error::Shape(format!(
+            "cat: dim {dim} out of range for {}-d tensors",
+            xs[0].dim()
+        )));
     }
     let mut shape = xs[0].shape().to_vec();
     shape[dim] = xs.iter().map(|t| t.shape()[dim]).sum();
@@ -173,16 +272,37 @@ pub fn cat(xs: &[&Tensor], dim: usize) -> Result<Tensor> {
     let mut at = 0;
     for t in xs {
         starts.push((at, t.shape()[dim]));
-        k::copy_strided(t, t.offset(), &strides_of(t), &out, at * out_strides[dim], &out_strides, t.shape())?;
+        k::copy_strided(
+            t,
+            t.offset(),
+            &strides_of(t),
+            &out,
+            at * out_strides[dim],
+            &out_strides,
+            t.shape(),
+        )?;
         at += t.shape()[dim];
     }
-    record("CatBackward0", xs, &mut out, &[], false, move |g, _, needs| {
-        starts
-            .iter()
-            .zip(needs)
-            .map(|(&(start, len), &need)| if need { narrow(g, dim, start, len).map(|t| Some(t.detach())) } else { Ok(None) })
-            .collect()
-    })?;
+    record(
+        "CatBackward0",
+        xs,
+        &mut out,
+        &[],
+        false,
+        move |g, _, needs| {
+            starts
+                .iter()
+                .zip(needs)
+                .map(|(&(start, len), &need)| {
+                    if need {
+                        narrow(g, dim, start, len).map(|t| Some(t.detach()))
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .collect()
+        },
+    )?;
     Ok(out)
 }
 
@@ -190,7 +310,10 @@ pub fn cat(xs: &[&Tensor], dim: usize) -> Result<Tensor> {
 pub fn stack(xs: &[&Tensor], dim: usize) -> Result<Tensor> {
     check_cat(xs, dim, "stack")?;
     if dim > xs[0].dim() {
-        return Err(Error::Shape(format!("stack: dim {dim} out of range for {}-d tensors", xs[0].dim())));
+        return Err(Error::Shape(format!(
+            "stack: dim {dim} out of range for {}-d tensors",
+            xs[0].dim()
+        )));
     }
     let mut shape = xs[0].shape().to_vec();
     shape.insert(dim, xs.len());
@@ -199,15 +322,36 @@ pub fn stack(xs: &[&Tensor], dim: usize) -> Result<Tensor> {
     let mut dst_strides = out_strides.clone();
     dst_strides.remove(dim);
     for (i, t) in xs.iter().enumerate() {
-        k::copy_strided(t, t.offset(), &strides_of(t), &out, i * out_strides[dim], &dst_strides, t.shape())?;
+        k::copy_strided(
+            t,
+            t.offset(),
+            &strides_of(t),
+            &out,
+            i * out_strides[dim],
+            &dst_strides,
+            t.shape(),
+        )?;
     }
-    record("StackBackward0", xs, &mut out, &[], false, move |g, _, needs| {
-        needs
-            .iter()
-            .enumerate()
-            .map(|(i, &need)| if need { select(g, dim, i).map(|t| Some(t.detach())) } else { Ok(None) })
-            .collect()
-    })?;
+    record(
+        "StackBackward0",
+        xs,
+        &mut out,
+        &[],
+        false,
+        move |g, _, needs| {
+            needs
+                .iter()
+                .enumerate()
+                .map(|(i, &need)| {
+                    if need {
+                        select(g, dim, i).map(|t| Some(t.detach()))
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .collect()
+        },
+    )?;
     Ok(out)
 }
 
@@ -218,7 +362,9 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     use crate::math::{binary, sum};
     use grilly_core::generic::Binary;
     match (a.dim(), b.dim()) {
-        (0, _) | (_, 0) => Err(Error::Invalid("both arguments to matmul need to be at least 1D".into())),
+        (0, _) | (_, 0) => Err(Error::Invalid(
+            "both arguments to matmul need to be at least 1D".into(),
+        )),
         (1, 1) => sum(&binary(a, b, Binary::Mul)?, &[], false),
         (1, _) => {
             // a row vector: (1, K) @ b, then drop that dim
@@ -282,21 +428,36 @@ pub fn matmul_t(a: &Tensor, b: &Tensor) -> Result<Tensor> {
 fn bmm(a: &Tensor, b: &Tensor, trans_b: bool) -> Result<Tensor> {
     let mut out = k::bmm(a, b, false, trans_b)?;
     let (sa, sb) = (a.shape().to_vec(), b.shape().to_vec());
-    let name = if trans_b { "BmmTransposedBackward0" } else { "BmmBackward0" };
-    record(name, &[a, b], &mut out, &[a, b], false, move |g, s, needs| {
-        let grad_a = if needs[0] {
-            Some(k::sum_to_shape(&k::bmm(g, &s[1], false, !trans_b)?, &sa)?)
-        } else {
-            None
-        };
-        let grad_b = if needs[1] {
-            let raw = if trans_b { k::bmm(g, &s[0], true, false)? } else { k::bmm(&s[0], g, true, false)? };
-            Some(k::sum_to_shape(&raw, &sb)?)
-        } else {
-            None
-        };
-        Ok(vec![grad_a, grad_b])
-    })?;
+    let name = if trans_b {
+        "BmmTransposedBackward0"
+    } else {
+        "BmmBackward0"
+    };
+    record(
+        name,
+        &[a, b],
+        &mut out,
+        &[a, b],
+        false,
+        move |g, s, needs| {
+            let grad_a = if needs[0] {
+                Some(k::sum_to_shape(&k::bmm(g, &s[1], false, !trans_b)?, &sa)?)
+            } else {
+                None
+            };
+            let grad_b = if needs[1] {
+                let raw = if trans_b {
+                    k::bmm(g, &s[0], true, false)?
+                } else {
+                    k::bmm(&s[0], g, true, false)?
+                };
+                Some(k::sum_to_shape(&raw, &sb)?)
+            } else {
+                None
+            };
+            Ok(vec![grad_a, grad_b])
+        },
+    )?;
     Ok(out)
 }
 
@@ -307,7 +468,9 @@ fn as_index(index: &Tensor, op: &str) -> Result<Tensor> {
     match index.dtype() {
         DType::I64 => Ok(index.clone()),
         DType::I32 => index.cast(DType::I64),
-        _ => Err(Error::Invalid(format!("{op}(): Expected dtype int32/int64 for index"))),
+        _ => Err(Error::Invalid(format!(
+            "{op}(): Expected dtype int32/int64 for index"
+        ))),
     }
 }
 
@@ -320,15 +483,29 @@ fn as_index(index: &Tensor, op: &str) -> Result<Tensor> {
 /// `grilly.graphed`. torch does not ask either — CUDA asserts on the device
 /// and the error surfaces at the next synchronize. The fault is recorded on
 /// the device and raised at the next host read (`grilly_core::fault`).
-fn check_bounds(index: &Tensor, size: usize, allow_negative: bool, op: IndexOp, dim: usize) -> Result<()> {
+fn check_bounds(
+    index: &Tensor,
+    size: usize,
+    allow_negative: bool,
+    op: IndexOp,
+    dim: usize,
+) -> Result<()> {
     fault::check_indices(index, size, allow_negative, op, dim)
 }
 
-fn indexed(src: &Tensor, dim: usize, index: &Tensor, mode: IndexMode, name: &'static str) -> Result<Tensor> {
+fn indexed(
+    src: &Tensor,
+    dim: usize,
+    index: &Tensor,
+    mode: IndexMode,
+    name: &'static str,
+) -> Result<Tensor> {
     let mut out = k::index_gather(src, dim, index, mode)?;
     let (idx, in_shape) = (index.detach(), src.shape().to_vec());
     record(name, &[src], &mut out, &[], false, move |g, _, _| {
-        Ok(vec![Some(k::index_add_backward(g, dim, &idx, mode, &in_shape)?)])
+        Ok(vec![Some(k::index_add_backward(
+            g, dim, &idx, mode, &in_shape,
+        )?)])
     })?;
     Ok(out)
 }
@@ -336,7 +513,10 @@ fn indexed(src: &Tensor, dim: usize, index: &Tensor, mode: IndexMode, name: &'st
 /// `torch.gather(input, dim, index)`.
 pub fn gather(input: &Tensor, dim: usize, index: &Tensor) -> Result<Tensor> {
     let index = as_index(index, "gather")?;
-    let size = *input.shape().get(dim).ok_or_else(|| Error::Shape(format!("gather: dim {dim} out of range")))?;
+    let size = *input
+        .shape()
+        .get(dim)
+        .ok_or_else(|| Error::Shape(format!("gather: dim {dim} out of range")))?;
     check_bounds(&index, size, false, IndexOp::Gather, dim)?;
     indexed(input, dim, &index, IndexMode::Gather, "GatherBackward0")
 }
@@ -344,9 +524,18 @@ pub fn gather(input: &Tensor, dim: usize, index: &Tensor) -> Result<Tensor> {
 /// `torch.index_select(input, dim, index)`.
 pub fn index_select(input: &Tensor, dim: usize, index: &Tensor) -> Result<Tensor> {
     let index = as_index(index, "index_select")?;
-    let size = *input.shape().get(dim).ok_or_else(|| Error::Shape(format!("index_select: dim {dim} out of range")))?;
+    let size = *input
+        .shape()
+        .get(dim)
+        .ok_or_else(|| Error::Shape(format!("index_select: dim {dim} out of range")))?;
     check_bounds(&index, size, false, IndexOp::IndexSelect, dim)?;
-    indexed(input, dim, &index, IndexMode::Select, "IndexSelectBackward0")
+    indexed(
+        input,
+        dim,
+        &index,
+        IndexMode::Select,
+        "IndexSelectBackward0",
+    )
 }
 
 /// Advanced indexing `x[index]` along `dim` (a tensor index, any shape):
@@ -375,14 +564,21 @@ pub fn embedding(input: &Tensor, weight: &Tensor, padding_idx: Option<usize>) ->
     let flat = index.detach().reshape(&[index.numel()])?;
     let mut out = k::index_gather(weight, 0, &flat, IndexMode::Select)?;
     let w_shape = weight.shape().to_vec();
-    record("EmbeddingBackward0", &[weight], &mut out, &[], false, move |g, _, _| {
-        let grad = k::index_add_backward(g, 0, &flat, IndexMode::Select, &w_shape)?;
-        if let Some(p) = padding_idx {
-            let zeros = Tensor::zeros(grad.device(), &[width])?;
-            k::copy_strided(&zeros, 0, &[1], &grad, p * width, &[1], &[width])?;
-        }
-        Ok(vec![Some(grad)])
-    })?;
+    record(
+        "EmbeddingBackward0",
+        &[weight],
+        &mut out,
+        &[],
+        false,
+        move |g, _, _| {
+            let grad = k::index_add_backward(g, 0, &flat, IndexMode::Select, &w_shape)?;
+            if let Some(p) = padding_idx {
+                let zeros = Tensor::zeros(grad.device(), &[width])?;
+                k::copy_strided(&zeros, 0, &[1], &grad, p * width, &[1], &[width])?;
+            }
+            Ok(vec![Some(grad)])
+        },
+    )?;
     let mut shape = index.shape().to_vec();
     shape.push(width);
     out.reshape(&shape)
@@ -409,9 +605,14 @@ pub fn argmax(x: &Tensor, dim: usize, keepdim: bool, max: bool) -> Result<Tensor
 /// torch's IndexError for reducing an empty (or missing) dimension.
 fn check_reducible(x: &Tensor, dim: usize, op: &str) -> Result<()> {
     match x.shape().get(dim) {
-        Some(0) => Err(Error::Index(format!("{op}(): Expected reduction dim {dim} to have non-zero size."))),
+        Some(0) => Err(Error::Index(format!(
+            "{op}(): Expected reduction dim {dim} to have non-zero size."
+        ))),
         Some(_) => Ok(()),
-        None => Err(Error::Index(format!("{op}(): dim {dim} out of range for {} dimensions", x.dim()))),
+        None => Err(Error::Index(format!(
+            "{op}(): dim {dim} out of range for {} dimensions",
+            x.dim()
+        ))),
     }
 }
 
@@ -427,7 +628,13 @@ fn dropped(shape: &[usize], dim: usize) -> Vec<usize> {
 pub fn max_dim(x: &Tensor, dim: usize, keepdim: bool, max: bool) -> Result<(Tensor, Tensor)> {
     check_reducible(x, dim, if max { "max" } else { "min" })?;
     let idx = argmax(x, dim, true, max)?;
-    let values = indexed(x, dim, &idx, IndexMode::Gather, if max { "MaxBackward0" } else { "MinBackward0" })?;
+    let values = indexed(
+        x,
+        dim,
+        &idx,
+        IndexMode::Gather,
+        if max { "MaxBackward0" } else { "MinBackward0" },
+    )?;
     if keepdim {
         return Ok((values, idx));
     }
@@ -440,7 +647,13 @@ pub fn max_dim(x: &Tensor, dim: usize, keepdim: bool, max: bool) -> Result<(Tens
 /// their original order and NaN sorts as the largest value, so the result
 /// is deterministic; values are gathered from `x`, so they keep its dtype
 /// and gradients are torch's. int32 and bool sort as int64 keys.
-pub fn sorted(x: &Tensor, dim: usize, descending: bool, take: usize, name: &'static str) -> Result<(Tensor, Tensor)> {
+pub fn sorted(
+    x: &Tensor,
+    dim: usize,
+    descending: bool,
+    take: usize,
+    name: &'static str,
+) -> Result<(Tensor, Tensor)> {
     if x.dim() == 0 {
         let (v, i) = sorted(&x.reshape(&[1])?, 0, descending, take, name)?;
         return Ok((v.reshape(&[])?, i.reshape(&[])?));
@@ -450,9 +663,17 @@ pub fn sorted(x: &Tensor, dim: usize, descending: bool, take: usize, name: &'sta
         _ => x.detach().cast(DType::I64)?,
     };
     let last = x.dim() - 1;
-    let moved = if dim == last { keys } else { transpose(&keys, dim, last)? };
+    let moved = if dim == last {
+        keys
+    } else {
+        transpose(&keys, dim, last)?
+    };
     let pos = k::sort_positions(&moved, descending, take)?;
-    let idx = if dim == last { pos } else { transpose(&pos, dim, last)? };
+    let idx = if dim == last {
+        pos
+    } else {
+        transpose(&pos, dim, last)?
+    };
     let values = indexed(x, dim, &idx, IndexMode::Gather, name)?;
     Ok((values, idx))
 }
@@ -463,12 +684,18 @@ pub fn sorted(x: &Tensor, dim: usize, descending: bool, take: usize, name: &'sta
 fn check_scatter(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Result<Tensor> {
     let index = as_index(index, "scatter")?;
     if src.dtype() != dst.dtype() {
-        return Err(Error::Invalid("scatter(): Expected self.dtype to be equal to src.dtype".into()));
+        return Err(Error::Invalid(
+            "scatter(): Expected self.dtype to be equal to src.dtype".into(),
+        ));
     }
     if index.dim() != dst.dim() || (src.dim() != dst.dim() && index.numel() > 0) {
-        return Err(Error::Invalid("Index tensor must have the same number of dimensions as self tensor".into()));
+        return Err(Error::Invalid(
+            "Index tensor must have the same number of dimensions as self tensor".into(),
+        ));
     }
-    let fits = (0..index.dim()).all(|d| index.shape()[d] <= src.shape()[d] && (d == dim || index.shape()[d] <= dst.shape()[d]));
+    let fits = (0..index.dim()).all(|d| {
+        index.shape()[d] <= src.shape()[d] && (d == dim || index.shape()[d] <= dst.shape()[d])
+    });
     if !fits {
         return Err(Error::Invalid(format!(
             "Expected index {:?} to be no larger than self {:?} apart from dimension {dim} and to be no larger size than src {:?}",
@@ -500,7 +727,15 @@ fn scatter_src_grad(g: &Tensor, dim: usize, index: &Tensor, src_shape: &[usize])
         return Ok(picked);
     }
     let out = Tensor::zeros(g.device(), src_shape)?;
-    k::copy_strided(&picked, 0, &contiguous_strides(picked.shape()), &out, 0, &contiguous_strides(src_shape), picked.shape())?;
+    k::copy_strided(
+        &picked,
+        0,
+        &contiguous_strides(picked.shape()),
+        &out,
+        0,
+        &contiguous_strides(src_shape),
+        picked.shape(),
+    )?;
     Ok(out)
 }
 
@@ -512,17 +747,33 @@ pub fn scatter(input: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Resu
     let mut out = copied(input)?;
     k::scatter(&out, dim, &index, src)?;
     let src_shape = src.shape().to_vec();
-    record("ScatterBackward0", &[input, src], &mut out, &[], false, move |g, _, needs| {
-        let grad_input = if needs[0] {
-            let copy = copied(g)?;
-            k::scatter(&copy, dim, &index, &Tensor::zeros(g.device(), index.shape())?)?;
-            Some(copy)
-        } else {
-            None
-        };
-        let grad_src = if needs[1] { Some(scatter_src_grad(g, dim, &index, &src_shape)?) } else { None };
-        Ok(vec![grad_input, grad_src])
-    })?;
+    record(
+        "ScatterBackward0",
+        &[input, src],
+        &mut out,
+        &[],
+        false,
+        move |g, _, needs| {
+            let grad_input = if needs[0] {
+                let copy = copied(g)?;
+                k::scatter(
+                    &copy,
+                    dim,
+                    &index,
+                    &Tensor::zeros(g.device(), index.shape())?,
+                )?;
+                Some(copy)
+            } else {
+                None
+            };
+            let grad_src = if needs[1] {
+                Some(scatter_src_grad(g, dim, &index, &src_shape)?)
+            } else {
+                None
+            };
+            Ok(vec![grad_input, grad_src])
+        },
+    )?;
     Ok(out)
 }
 
@@ -556,16 +807,27 @@ pub fn index_copy_(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Re
         )));
     }
     if src.dtype() != dst.dtype() {
-        return Err(Error::Invalid("index_copy_(): self and source must have the same dtype".into()));
+        return Err(Error::Invalid(
+            "index_copy_(): self and source must have the same dtype".into(),
+        ));
     }
     check_bounds(&index, dst.shape()[dim], false, IndexOp::Scatter, dim)?;
     let index = index.detach();
     k::index_copy(dst, dim, &index, src)?;
     let mut out = dst.detach();
     let src_shape = src.shape().to_vec();
-    record("IndexCopyBackward0", &[src], &mut out, &[], false, move |g, _, _| {
-        Ok(vec![Some(indexed(g, dim, &index, IndexMode::Select, "index_copy_")?.reshape(&src_shape)?)])
-    })?;
+    record(
+        "IndexCopyBackward0",
+        &[src],
+        &mut out,
+        &[],
+        false,
+        move |g, _, _| {
+            Ok(vec![Some(
+                indexed(g, dim, &index, IndexMode::Select, "index_copy_")?.reshape(&src_shape)?,
+            )])
+        },
+    )?;
     Ok(out)
 }
 
@@ -580,8 +842,13 @@ pub fn scatter_(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Resul
     k::scatter(dst, dim, &index, src)?;
     let mut out = dst.detach();
     let src_shape = src.shape().to_vec();
-    record("ScatterBackward0", &[src], &mut out, &[], false, move |g, _, _| {
-        Ok(vec![Some(scatter_src_grad(g, dim, &index, &src_shape)?)])
-    })?;
+    record(
+        "ScatterBackward0",
+        &[src],
+        &mut out,
+        &[],
+        false,
+        move |g, _, _| Ok(vec![Some(scatter_src_grad(g, dim, &index, &src_shape)?)]),
+    )?;
     Ok(out)
 }

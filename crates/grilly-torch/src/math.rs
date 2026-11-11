@@ -19,7 +19,11 @@ pub(crate) struct Formula {
 impl Backward for Formula {
     fn apply(&mut self, grads: &[Option<Tensor>], needs: &[bool]) -> Result<Vec<Option<Tensor>>> {
         let g = grads[0].as_ref().expect("single-output formula");
-        let saved = self.saved.iter_mut().map(SavedTensor::get).collect::<Result<Vec<_>>>()?;
+        let saved = self
+            .saved
+            .iter_mut()
+            .map(SavedTensor::get)
+            .collect::<Result<Vec<_>>>()?;
         (self.f)(g, &saved, needs)
     }
 
@@ -39,17 +43,27 @@ pub(crate) fn record(
     f: impl FnMut(&Tensor, &[Tensor], &[bool]) -> Result<Vec<Option<Tensor>>> + Send + 'static,
 ) -> Result<()> {
     autograd::record(name, inputs, &mut [out], |outs| {
-        let mut saved = save.iter().map(|t| SavedTensor::save(t)).collect::<Result<Vec<_>>>()?;
+        let mut saved = save
+            .iter()
+            .map(|t| SavedTensor::save(t))
+            .collect::<Result<Vec<_>>>()?;
         if save_out {
             saved.push(SavedTensor::save(outs[0])?);
         }
-        Ok(Formula { saved, f: Box::new(f) })
+        Ok(Formula {
+            saved,
+            f: Box::new(f),
+        })
     })
 }
 
 /// `Some(f())` when input `i` needs a gradient.
 fn need(needs: &[bool], i: usize, f: impl FnOnce() -> Result<Tensor>) -> Result<Option<Tensor>> {
-    if needs[i] { f().map(Some) } else { Ok(None) }
+    if needs[i] {
+        f().map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 // Untracked helpers for formulas (backward runs with grad mode off anyway).
@@ -75,41 +89,103 @@ pub fn binary(a: &Tensor, b: &Tensor, op: Binary) -> Result<Tensor> {
     let (sa, sb) = (a.shape().to_vec(), b.shape().to_vec());
     let down = move |t: Tensor, s: &[usize]| k::sum_to_shape(&t, s);
     match op {
-        Binary::Add => record("AddBackward0", &[a, b], &mut out, &[], false, move |g, _, n| {
-            Ok(vec![need(n, 0, || down(g.clone(), &sa))?, need(n, 1, || down(g.clone(), &sb))?])
-        })?,
-        Binary::Sub => record("SubBackward0", &[a, b], &mut out, &[], false, move |g, _, n| {
-            Ok(vec![need(n, 0, || down(g.clone(), &sa))?, need(n, 1, || down(neg(g)?, &sb))?])
-        })?,
-        Binary::Mul => record("MulBackward0", &[a, b], &mut out, &[a, b], false, move |g, s, n| {
-            Ok(vec![need(n, 0, || down(mul(g, &s[1])?, &sa))?, need(n, 1, || down(mul(g, &s[0])?, &sb))?])
-        })?,
-        Binary::Div => record("DivBackward0", &[a, b], &mut out, &[a, b], false, move |g, s, n| {
-            let ga = div(g, &s[1])?;
-            let gb = need(n, 1, || down(neg(&mul(&ga, &div(&s[0], &s[1])?)?)?, &sb))?;
-            Ok(vec![need(n, 0, || down(ga.clone(), &sa))?, gb])
-        })?,
-        Binary::Pow => record("PowBackward1", &[a, b], &mut out, &[a, b], true, move |g, s, n| {
-            let (base, expo, result) = (&s[0], &s[1], &s[2]);
-            let ga = need(n, 0, || {
-                let lower = k::binary(base, &k::unary(expo, Unary::AddScalar, -1.0, 0.0)?, Binary::Pow)?;
-                down(mul(g, &mul(expo, &lower)?)?, &sa)
-            })?;
-            // torch zeroes the exponent's gradient where the base is 0.
-            let gb = need(n, 1, || {
-                let safe = k::binary(base, &k::binary(base, &Tensor::zeros(base.device(), &[])?, Binary::Eq)?, Binary::Add)?;
-                down(mul(g, &mul(result, &k::unary(&safe, Unary::Log, 0.0, 0.0)?)?)?, &sb)
-            })?;
-            Ok(vec![ga, gb])
-        })?,
+        Binary::Add => record(
+            "AddBackward0",
+            &[a, b],
+            &mut out,
+            &[],
+            false,
+            move |g, _, n| {
+                Ok(vec![
+                    need(n, 0, || down(g.clone(), &sa))?,
+                    need(n, 1, || down(g.clone(), &sb))?,
+                ])
+            },
+        )?,
+        Binary::Sub => record(
+            "SubBackward0",
+            &[a, b],
+            &mut out,
+            &[],
+            false,
+            move |g, _, n| {
+                Ok(vec![
+                    need(n, 0, || down(g.clone(), &sa))?,
+                    need(n, 1, || down(neg(g)?, &sb))?,
+                ])
+            },
+        )?,
+        Binary::Mul => record(
+            "MulBackward0",
+            &[a, b],
+            &mut out,
+            &[a, b],
+            false,
+            move |g, s, n| {
+                Ok(vec![
+                    need(n, 0, || down(mul(g, &s[1])?, &sa))?,
+                    need(n, 1, || down(mul(g, &s[0])?, &sb))?,
+                ])
+            },
+        )?,
+        Binary::Div => record(
+            "DivBackward0",
+            &[a, b],
+            &mut out,
+            &[a, b],
+            false,
+            move |g, s, n| {
+                let ga = div(g, &s[1])?;
+                let gb = need(n, 1, || down(neg(&mul(&ga, &div(&s[0], &s[1])?)?)?, &sb))?;
+                Ok(vec![need(n, 0, || down(ga.clone(), &sa))?, gb])
+            },
+        )?,
+        Binary::Pow => record(
+            "PowBackward1",
+            &[a, b],
+            &mut out,
+            &[a, b],
+            true,
+            move |g, s, n| {
+                let (base, expo, result) = (&s[0], &s[1], &s[2]);
+                let ga = need(n, 0, || {
+                    let lower = k::binary(
+                        base,
+                        &k::unary(expo, Unary::AddScalar, -1.0, 0.0)?,
+                        Binary::Pow,
+                    )?;
+                    down(mul(g, &mul(expo, &lower)?)?, &sa)
+                })?;
+                // torch zeroes the exponent's gradient where the base is 0.
+                let gb = need(n, 1, || {
+                    let safe = k::binary(
+                        base,
+                        &k::binary(base, &Tensor::zeros(base.device(), &[])?, Binary::Eq)?,
+                        Binary::Add,
+                    )?;
+                    down(
+                        mul(g, &mul(result, &k::unary(&safe, Unary::Log, 0.0, 0.0)?)?)?,
+                        &sb,
+                    )
+                })?;
+                Ok(vec![ga, gb])
+            },
+        )?,
         Binary::Maximum | Binary::Minimum => {
-            let (name, win) = if op == Binary::Maximum { ("MaximumBackward0", Binary::Gt) } else { ("MinimumBackward0", Binary::Lt) };
+            let (name, win) = if op == Binary::Maximum {
+                ("MaximumBackward0", Binary::Gt)
+            } else {
+                ("MinimumBackward0", Binary::Lt)
+            };
             record(name, &[a, b], &mut out, &[a, b], false, move |g, s, n| {
                 // The larger (smaller) input gets the gradient; ties split it, as in torch.
                 let tie = scale(&k::binary(&s[0], &s[1], Binary::Eq)?, 0.5)?;
                 let wa = k::binary(&k::binary(&s[0], &s[1], win)?, &tie, Binary::Add)?;
                 let wb = k::unary(&wa, Unary::RsubScalar, 1.0, 0.0)?;
-                Ok(vec![need(n, 0, || down(mul(g, &wa)?, &sa))?, need(n, 1, || down(mul(g, &wb)?, &sb))?])
+                Ok(vec![
+                    need(n, 0, || down(mul(g, &wa)?, &sa))?,
+                    need(n, 1, || down(mul(g, &wb)?, &sb))?,
+                ])
             })?
         }
         Binary::Eq | Binary::Ne | Binary::Gt | Binary::Ge | Binary::Lt | Binary::Le => {}
@@ -124,15 +200,24 @@ pub fn unary(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<Tensor> {
     let mut out = k::unary(x, op, a, b)?;
     let o = &mut out;
     match op {
-        Unary::Neg => record("NegBackward0", &[x], o, &[], false, |g, _, _| Ok(vec![Some(neg(g)?)]))?,
+        Unary::Neg => record("NegBackward0", &[x], o, &[], false, |g, _, _| {
+            Ok(vec![Some(neg(g)?)])
+        })?,
         Unary::Abs => record("AbsBackward0", &[x], o, &[x], false, |g, s, _| {
-            Ok(vec![Some(mul(g, &k::unary(&s[0], Unary::Sign, 0.0, 0.0)?)?)])
+            Ok(vec![Some(mul(
+                g,
+                &k::unary(&s[0], Unary::Sign, 0.0, 0.0)?,
+            )?)])
         })?,
         Unary::Sign => record("SignBackward0", &[x], o, &[], false, |g, _, _| {
             Ok(vec![Some(Tensor::zeros(g.device(), g.shape())?)])
         })?,
-        Unary::Exp => record("ExpBackward0", &[x], o, &[], true, |g, s, _| Ok(vec![Some(mul(g, &s[0])?)]))?,
-        Unary::Log => record("LogBackward0", &[x], o, &[x], false, |g, s, _| Ok(vec![Some(div(g, &s[0])?)]))?,
+        Unary::Exp => record("ExpBackward0", &[x], o, &[], true, |g, s, _| {
+            Ok(vec![Some(mul(g, &s[0])?)])
+        })?,
+        Unary::Log => record("LogBackward0", &[x], o, &[x], false, |g, s, _| {
+            Ok(vec![Some(div(g, &s[0])?)])
+        })?,
         Unary::Sqrt => record("SqrtBackward0", &[x], o, &[], true, |g, s, _| {
             Ok(vec![Some(div(g, &scale(&s[0], 2.0)?)?)])
         })?,
@@ -141,16 +226,27 @@ pub fn unary(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<Tensor> {
             Ok(vec![Some(scale(&mul(g, &cube)?, -0.5)?)])
         })?,
         Unary::Tanh => record("TanhBackward0", &[x], o, &[], true, |g, s, _| {
-            let d = k::unary(&k::unary(&s[0], Unary::PowScalar, 2.0, 0.0)?, Unary::RsubScalar, 1.0, 0.0)?;
+            let d = k::unary(
+                &k::unary(&s[0], Unary::PowScalar, 2.0, 0.0)?,
+                Unary::RsubScalar,
+                1.0,
+                0.0,
+            )?;
             Ok(vec![Some(mul(g, &d)?)])
         })?,
         Unary::Sigmoid => record("SigmoidBackward0", &[x], o, &[], true, |g, s, _| {
             let d = mul(&s[0], &k::unary(&s[0], Unary::RsubScalar, 1.0, 0.0)?)?;
             Ok(vec![Some(mul(g, &d)?)])
         })?,
-        Unary::AddScalar => record("AddBackward1", &[x], o, &[], false, |g, _, _| Ok(vec![Some(g.clone())]))?,
-        Unary::MulScalar => record("MulBackward1", &[x], o, &[], false, move |g, _, _| Ok(vec![Some(scale(g, a)?)]))?,
-        Unary::RsubScalar => record("RsubBackward1", &[x], o, &[], false, |g, _, _| Ok(vec![Some(neg(g)?)]))?,
+        Unary::AddScalar => record("AddBackward1", &[x], o, &[], false, |g, _, _| {
+            Ok(vec![Some(g.clone())])
+        })?,
+        Unary::MulScalar => record("MulBackward1", &[x], o, &[], false, move |g, _, _| {
+            Ok(vec![Some(scale(g, a)?)])
+        })?,
+        Unary::RsubScalar => record("RsubBackward1", &[x], o, &[], false, |g, _, _| {
+            Ok(vec![Some(neg(g)?)])
+        })?,
         Unary::RdivScalar => record("DivBackward0", &[x], o, &[x], true, |g, s, _| {
             Ok(vec![Some(neg(&mul(g, &div(&s[1], &s[0])?)?)?)])
         })?,
@@ -162,16 +258,25 @@ pub fn unary(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<Tensor> {
             Ok(vec![Some(scale(&mul(g, &lower)?, a)?)])
         })?,
         Unary::Clamp => record("ClampBackward1", &[x], o, &[x], false, move |g, s, _| {
-            Ok(vec![Some(mul(g, &k::unary(&s[0], Unary::ClampMask, a, b)?)?)])
+            Ok(vec![Some(mul(
+                g,
+                &k::unary(&s[0], Unary::ClampMask, a, b)?,
+            )?)])
         })?,
         Unary::Sin => record("SinBackward0", &[x], o, &[x], false, |g, s, _| {
             Ok(vec![Some(mul(g, &k::unary(&s[0], Unary::Cos, 0.0, 0.0)?)?)])
         })?,
         Unary::Cos => record("CosBackward0", &[x], o, &[x], false, |g, s, _| {
-            Ok(vec![Some(neg(&mul(g, &k::unary(&s[0], Unary::Sin, 0.0, 0.0)?)?)?)])
+            Ok(vec![Some(neg(&mul(
+                g,
+                &k::unary(&s[0], Unary::Sin, 0.0, 0.0)?,
+            )?)?)])
         })?,
         Unary::Gelu => record("GeluBackward0", &[x], o, &[x], false, |g, s, _| {
-            Ok(vec![Some(mul(g, &k::unary(&s[0], Unary::GeluGrad, 0.0, 0.0)?)?)])
+            Ok(vec![Some(mul(
+                g,
+                &k::unary(&s[0], Unary::GeluGrad, 0.0, 0.0)?,
+            )?)])
         })?,
         // piecewise constant: a zero gradient, as in torch
         Unary::Floor | Unary::Ceil | Unary::Trunc | Unary::Round => {
@@ -181,7 +286,9 @@ pub fn unary(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<Tensor> {
                 Unary::Trunc => "TruncBackward0",
                 _ => "RoundBackward0",
             };
-            record(name, &[x], o, &[], false, |g, _, _| Ok(vec![Some(Tensor::zeros(g.device(), g.shape())?)]))?
+            record(name, &[x], o, &[], false, |g, _, _| {
+                Ok(vec![Some(Tensor::zeros(g.device(), g.shape())?)])
+            })?
         }
         // internal helpers and predicates: not differentiable
         Unary::ClampMask | Unary::GeluGrad | Unary::IsFinite | Unary::IsInf | Unary::IsNan => {}
@@ -192,11 +299,17 @@ pub fn unary(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<Tensor> {
 // ── reductions ───────────────────────────────────────────────────────────
 
 fn check_dims(x: &Tensor, dims: &[usize]) -> Result<Vec<usize>> {
-    let mut d: Vec<usize> = if dims.is_empty() { (0..x.dim()).collect() } else { dims.to_vec() };
+    let mut d: Vec<usize> = if dims.is_empty() {
+        (0..x.dim()).collect()
+    } else {
+        dims.to_vec()
+    };
     d.sort_unstable();
     d.dedup();
     if !dims.is_empty() && d.len() != dims.len() {
-        return Err(Error::Invalid("dim appears multiple times in the list of dims".into()));
+        return Err(Error::Invalid(
+            "dim appears multiple times in the list of dims".into(),
+        ));
     }
     if let Some(&bad) = d.iter().find(|&&v| v >= x.dim().max(1)) {
         return Err(Error::Shape(format!(
@@ -210,7 +323,11 @@ fn check_dims(x: &Tensor, dims: &[usize]) -> Result<Vec<usize>> {
 
 /// Shape with every dim in `dims` set to 1.
 fn kept_shape(shape: &[usize], dims: &[usize]) -> Vec<usize> {
-    shape.iter().enumerate().map(|(i, &s)| if dims.contains(&i) { 1 } else { s }).collect()
+    shape
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| if dims.contains(&i) { 1 } else { s })
+        .collect()
 }
 
 fn reduce_raw(x: &Tensor, dims: &[usize], op: Reduce, keepdim: bool) -> Result<Tensor> {
@@ -254,9 +371,16 @@ pub fn sum(x: &Tensor, dims: &[usize], keepdim: bool) -> Result<Tensor> {
     let d = check_dims(x, dims)?;
     let mut out = reduce_raw(x, &d, Reduce::Sum, keepdim)?;
     let (in_shape, keep) = (x.shape().to_vec(), kept_shape(x.shape(), &d));
-    let name = if dims.is_empty() { "SumBackward0" } else { "SumBackward1" };
+    let name = if dims.is_empty() {
+        "SumBackward0"
+    } else {
+        "SumBackward1"
+    };
     record(name, &[x], &mut out, &[], false, move |g, _, _| {
-        Ok(vec![Some(shape::broadcast_raw(&g.detach().reshape(&keep)?, &in_shape)?)])
+        Ok(vec![Some(shape::broadcast_raw(
+            &g.detach().reshape(&keep)?,
+            &in_shape,
+        )?)])
     })?;
     Ok(out)
 }
@@ -265,9 +389,16 @@ pub fn sum(x: &Tensor, dims: &[usize], keepdim: bool) -> Result<Tensor> {
 pub fn mean(x: &Tensor, dims: &[usize], keepdim: bool) -> Result<Tensor> {
     let d = check_dims(x, dims)?;
     let mut out = reduce_raw(x, &d, Reduce::Mean, keepdim)?;
-    let count: usize = d.iter().map(|&i| x.shape().get(i).copied().unwrap_or(1)).product();
+    let count: usize = d
+        .iter()
+        .map(|&i| x.shape().get(i).copied().unwrap_or(1))
+        .product();
     let (in_shape, keep) = (x.shape().to_vec(), kept_shape(x.shape(), &d));
-    let name = if dims.is_empty() { "MeanBackward0" } else { "MeanBackward1" };
+    let name = if dims.is_empty() {
+        "MeanBackward0"
+    } else {
+        "MeanBackward1"
+    };
     record(name, &[x], &mut out, &[], false, move |g, _, _| {
         let spread = shape::broadcast_raw(&g.detach().reshape(&keep)?, &in_shape)?;
         Ok(vec![Some(scale(&spread, 1.0 / count as f32)?)])
@@ -281,7 +412,11 @@ pub fn amax(x: &Tensor, dims: &[usize], keepdim: bool, max: bool) -> Result<Tens
     let op = if max { Reduce::Max } else { Reduce::Min };
     let mut out = reduce_raw(x, &d, op, keepdim)?;
     let (in_shape, keep, dd) = (x.shape().to_vec(), kept_shape(x.shape(), &d), d.clone());
-    let name = if max { "AmaxBackward0" } else { "AminBackward0" };
+    let name = if max {
+        "AmaxBackward0"
+    } else {
+        "AminBackward0"
+    };
     record(name, &[x], &mut out, &[x], true, move |g, s, _| {
         let best = shape::broadcast_raw(&s[1].detach().reshape(&keep)?, &in_shape)?;
         let hit = k::binary(&s[0], &best, Binary::Eq)?;
@@ -305,7 +440,12 @@ pub fn softmax(x: &Tensor, dim: usize) -> Result<Tensor> {
 pub fn log_softmax(x: &Tensor, dim: usize) -> Result<Tensor> {
     let m = reduce_raw(&x.detach(), &check_dims(x, &[dim])?, Reduce::Max, true)?;
     let shifted = binary(x, &m, Binary::Sub)?;
-    let lse = unary(&sum(&unary(&shifted, Unary::Exp, 0.0, 0.0)?, &[dim], true)?, Unary::Log, 0.0, 0.0)?;
+    let lse = unary(
+        &sum(&unary(&shifted, Unary::Exp, 0.0, 0.0)?, &[dim], true)?,
+        Unary::Log,
+        0.0,
+        0.0,
+    )?;
     binary(&shifted, &lse, Binary::Sub)
 }
 
@@ -318,9 +458,18 @@ pub fn normalize(x: &Tensor, dim: usize, eps: f32) -> Result<Tensor> {
 }
 
 /// `F.layer_norm` over the trailing `normalized` dims (biased variance).
-pub fn layer_norm(x: &Tensor, normalized: usize, weight: Option<&Tensor>, bias: Option<&Tensor>, eps: f32) -> Result<Tensor> {
+pub fn layer_norm(
+    x: &Tensor,
+    normalized: usize,
+    weight: Option<&Tensor>,
+    bias: Option<&Tensor>,
+    eps: f32,
+) -> Result<Tensor> {
     if normalized == 0 || normalized > x.dim() {
-        return Err(Error::Shape(format!("layer_norm over {normalized} dims of a {}-d input", x.dim())));
+        return Err(Error::Shape(format!(
+            "layer_norm over {normalized} dims of a {}-d input",
+            x.dim()
+        )));
     }
     // one fused kernel each way (g2-layer-norm*); the backward is torch's
     // formula, with dw and db as column sums over rows
@@ -332,28 +481,42 @@ pub fn layer_norm(x: &Tensor, normalized: usize, weight: Option<&Tensor>, bias: 
     let mut save = vec![x];
     save.extend(weight);
     let (has_w, has_b) = (weight.is_some(), bias.is_some());
-    let (w_shape, b_shape) = (weight.map(|t| t.shape().to_vec()), bias.map(|t| t.shape().to_vec()));
-    record("NativeLayerNormBackward0", &inputs, &mut y, &save, false, move |g, s, needs| {
-        let rows = stats.shape()[0];
-        let w = if has_w { Some(&s[1]) } else { None };
-        let need_w = has_w && needs[1];
-        let need_b = has_b && needs[if has_w { 2 } else { 1 }];
-        let (dx, gxhat) = k::layer_norm_backward(g, &s[0], w, &stats, n, need_w)?;
-        let column_sum = |t: &Tensor, shape: &[usize]| -> Result<Tensor> {
-            k::reduce(&t.reshape(&[rows, n])?, 0, Reduce::Sum, false)?.reshape(shape)
-        };
-        let mut grads = vec![if needs[0] { Some(dx) } else { None }];
-        if has_w {
-            grads.push(match gxhat {
-                Some(gx) if need_w => Some(column_sum(&gx, w_shape.as_deref().unwrap())?),
-                _ => None,
-            });
-        }
-        if has_b {
-            grads.push(if need_b { Some(column_sum(g, b_shape.as_deref().unwrap())?) } else { None });
-        }
-        Ok(grads)
-    })?;
+    let (w_shape, b_shape) = (
+        weight.map(|t| t.shape().to_vec()),
+        bias.map(|t| t.shape().to_vec()),
+    );
+    record(
+        "NativeLayerNormBackward0",
+        &inputs,
+        &mut y,
+        &save,
+        false,
+        move |g, s, needs| {
+            let rows = stats.shape()[0];
+            let w = if has_w { Some(&s[1]) } else { None };
+            let need_w = has_w && needs[1];
+            let need_b = has_b && needs[if has_w { 2 } else { 1 }];
+            let (dx, gxhat) = k::layer_norm_backward(g, &s[0], w, &stats, n, need_w)?;
+            let column_sum = |t: &Tensor, shape: &[usize]| -> Result<Tensor> {
+                k::reduce(&t.reshape(&[rows, n])?, 0, Reduce::Sum, false)?.reshape(shape)
+            };
+            let mut grads = vec![if needs[0] { Some(dx) } else { None }];
+            if has_w {
+                grads.push(match gxhat {
+                    Some(gx) if need_w => Some(column_sum(&gx, w_shape.as_deref().unwrap())?),
+                    _ => None,
+                });
+            }
+            if has_b {
+                grads.push(if need_b {
+                    Some(column_sum(g, b_shape.as_deref().unwrap())?)
+                } else {
+                    None
+                });
+            }
+            Ok(grads)
+        },
+    )?;
     Ok(y)
 }
 
@@ -399,7 +562,12 @@ pub fn compare(a: &Tensor, b: &Tensor, op: Binary) -> Result<Tensor> {
     if a.dtype().is_floating() {
         return k::binary(a, b, op)?.cast(DType::Bool);
     }
-    k::binary_int(&a.cast(DType::I64)?, &b.cast(DType::I64)?, int_op(op)?, true)
+    k::binary_int(
+        &a.cast(DType::I64)?,
+        &b.cast(DType::I64)?,
+        int_op(op)?,
+        true,
+    )
 }
 
 /// Integer arithmetic (+, -, *, maximum, minimum) or bitwise/logical ops on
@@ -407,7 +575,10 @@ pub fn compare(a: &Tensor, b: &Tensor, op: Binary) -> Result<Tensor> {
 /// `out` (the promoted dtype chosen by the caller).
 pub fn integer(a: &Tensor, b: &Tensor, op: IntBinary, out: DType) -> Result<Tensor> {
     let (a, b) = (a.cast(DType::I64)?, b.cast(DType::I64)?);
-    if matches!(op, IntBinary::FloorDiv | IntBinary::Remainder | IntBinary::TruncDiv) {
+    if matches!(
+        op,
+        IntBinary::FloorDiv | IntBinary::Remainder | IntBinary::TruncDiv
+    ) {
         // torch raises for an integer zero divisor and a GPU cannot, so the
         // check runs on the device and surfaces at the next host read —
         // the bargain the index bounds checks make, and for the same
@@ -420,7 +591,11 @@ pub fn integer(a: &Tensor, b: &Tensor, op: IntBinary, out: DType) -> Result<Tens
 /// Integer sum / max / min over dims (all when empty), computed in int64;
 /// torch's `sum` of integers or bools is int64.
 pub fn integer_reduce(x: &Tensor, dims: &[usize], op: Reduce, keepdim: bool) -> Result<Tensor> {
-    let mut d: Vec<usize> = if dims.is_empty() { (0..x.dim()).collect() } else { dims.to_vec() };
+    let mut d: Vec<usize> = if dims.is_empty() {
+        (0..x.dim()).collect()
+    } else {
+        dims.to_vec()
+    };
     d.sort_unstable();
     d.dedup();
     let mut t = x.cast(DType::I64)?;
@@ -433,7 +608,13 @@ pub fn integer_reduce(x: &Tensor, dims: &[usize], op: Reduce, keepdim: bool) -> 
     if keepdim {
         return Ok(t);
     }
-    let shape: Vec<usize> = x.shape().iter().enumerate().filter(|(i, _)| !d.contains(i)).map(|(_, &s)| s).collect();
+    let shape: Vec<usize> = x
+        .shape()
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !d.contains(i))
+        .map(|(_, &s)| s)
+        .collect();
     t.reshape(&shape)
 }
 
@@ -445,13 +626,24 @@ pub fn where_(cond: &Tensor, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         return Ok(out);
     }
     let (sa, sb) = (a.shape().to_vec(), b.shape().to_vec());
-    record("WhereBackward0", &[a, b], &mut out, &[cond], false, move |g, s, n| {
-        let zero = Tensor::zeros(g.device(), &[])?;
-        Ok(vec![
-            need(n, 0, || k::sum_to_shape(&k::where_select(&s[0], g, &zero)?, &sa))?,
-            need(n, 1, || k::sum_to_shape(&k::where_select(&s[0], &zero, g)?, &sb))?,
-        ])
-    })?;
+    record(
+        "WhereBackward0",
+        &[a, b],
+        &mut out,
+        &[cond],
+        false,
+        move |g, s, n| {
+            let zero = Tensor::zeros(g.device(), &[])?;
+            Ok(vec![
+                need(n, 0, || {
+                    k::sum_to_shape(&k::where_select(&s[0], g, &zero)?, &sa)
+                })?,
+                need(n, 1, || {
+                    k::sum_to_shape(&k::where_select(&s[0], &zero, g)?, &sb)
+                })?,
+            ])
+        },
+    )?;
     Ok(out)
 }
 
@@ -466,9 +658,14 @@ pub fn cumsum(x: &Tensor, dim: usize) -> Result<Tensor> {
         _ => x.cast(DType::I64)?,
     };
     let mut out = k::scan(&src, dim, Scan::Cumsum, false)?;
-    record("CumsumBackward0", &[x], &mut out, &[], false, move |g, _, _| {
-        Ok(vec![Some(k::scan(g, dim, Scan::Cumsum, true)?)])
-    })?;
+    record(
+        "CumsumBackward0",
+        &[x],
+        &mut out,
+        &[],
+        false,
+        move |g, _, _| Ok(vec![Some(k::scan(g, dim, Scan::Cumsum, true)?)]),
+    )?;
     Ok(out)
 }
 
@@ -478,25 +675,44 @@ pub fn cumsum(x: &Tensor, dim: usize) -> Result<Tensor> {
 /// log-cumsum-exps, so nothing overflows.
 pub fn logcumsumexp(x: &Tensor, dim: usize) -> Result<Tensor> {
     if !x.dtype().is_floating() {
-        return Err(Error::Invalid(format!("\"logcumsumexp_out_cpu\" not implemented for '{}'", type_label(x.dtype()))));
+        return Err(Error::Invalid(format!(
+            "\"logcumsumexp_out_cpu\" not implemented for '{}'",
+            type_label(x.dtype())
+        )));
     }
     let mut out = k::scan(x, dim, Scan::LogCumsumExp, false)?;
-    record("LogcumsumexpBackward0", &[x], &mut out, &[x], true, move |g, s, _| {
-        let (x, y) = (&s[0], &s[1]);
-        if g.numel() <= 1 || g.shape()[dim] == 1 {
-            return Ok(vec![Some(g.clone())]);
-        }
-        let dev = g.device();
-        let (zero, lowest) = (Tensor::zeros(dev, &[])?, Tensor::full(dev, &[], f32::MIN)?);
-        let log_abs = k::unary(&k::unary(g, Unary::Abs, 0.0, 0.0)?, Unary::Log, 0.0, 0.0)?;
-        let part = |op: Binary| -> Result<Tensor> {
-            let mask = k::binary(g, &zero, op)?.cast(DType::Bool)?;
-            let log_part = k::where_select(&mask, &log_abs, &lowest)?;
-            let r = k::scan(&k::binary(&log_part, y, Binary::Sub)?, dim, Scan::LogCumsumExp, true)?;
-            k::unary(&k::binary(&r, x, Binary::Add)?, Unary::Exp, 0.0, 0.0)
-        };
-        Ok(vec![Some(k::binary(&part(Binary::Gt)?, &part(Binary::Lt)?, Binary::Sub)?)])
-    })?;
+    record(
+        "LogcumsumexpBackward0",
+        &[x],
+        &mut out,
+        &[x],
+        true,
+        move |g, s, _| {
+            let (x, y) = (&s[0], &s[1]);
+            if g.numel() <= 1 || g.shape()[dim] == 1 {
+                return Ok(vec![Some(g.clone())]);
+            }
+            let dev = g.device();
+            let (zero, lowest) = (Tensor::zeros(dev, &[])?, Tensor::full(dev, &[], f32::MIN)?);
+            let log_abs = k::unary(&k::unary(g, Unary::Abs, 0.0, 0.0)?, Unary::Log, 0.0, 0.0)?;
+            let part = |op: Binary| -> Result<Tensor> {
+                let mask = k::binary(g, &zero, op)?.cast(DType::Bool)?;
+                let log_part = k::where_select(&mask, &log_abs, &lowest)?;
+                let r = k::scan(
+                    &k::binary(&log_part, y, Binary::Sub)?,
+                    dim,
+                    Scan::LogCumsumExp,
+                    true,
+                )?;
+                k::unary(&k::binary(&r, x, Binary::Add)?, Unary::Exp, 0.0, 0.0)
+            };
+            Ok(vec![Some(k::binary(
+                &part(Binary::Gt)?,
+                &part(Binary::Lt)?,
+                Binary::Sub,
+            )?)])
+        },
+    )?;
     Ok(out)
 }
 

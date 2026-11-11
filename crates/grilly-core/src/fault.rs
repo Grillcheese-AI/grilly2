@@ -27,7 +27,12 @@ use crate::{Arg, DType, Device, Error, Kernel, Result, Tensor};
 
 /// Bindings: index, record. Push: elements, index offset, size,
 /// allow_negative, kind, dim.
-const CHECK: Kernel = Kernel { shader: "g2-index-fault", bindings: 2, push_words: 7, local_size: [256, 1, 1] };
+const CHECK: Kernel = Kernel {
+    shader: "g2-index-fault",
+    bindings: 2,
+    push_words: 7,
+    local_size: [256, 1, 1],
+};
 
 pub const KERNELS: &[Kernel] = &[CHECK];
 
@@ -145,7 +150,8 @@ pub fn check_indices(
         &[
             n as u32,
             index.offset() as u32,
-            u32::try_from(size).map_err(|_| Error::Shape(format!("dimension {size} exceeds u32")))?,
+            u32::try_from(size)
+                .map_err(|_| Error::Shape(format!("dimension {size} exceeds u32")))?,
             u32::from(allow_negative),
             op as u32,
             u32::try_from(dim).unwrap_or(0),
@@ -173,7 +179,15 @@ pub fn check_nonzero(divisor: &Tensor) -> Result<()> {
         device,
         &[Arg::Storage(divisor), Arg::Tensor(&record)],
         divisor.numel(),
-        &[divisor.numel() as u32, divisor.offset() as u32, 0, 0, IndexOp::ZeroDivision as u32, 0, 1],
+        &[
+            divisor.numel() as u32,
+            divisor.offset() as u32,
+            0,
+            0,
+            IndexOp::ZeroDivision as u32,
+            0,
+            1,
+        ],
     )
 }
 

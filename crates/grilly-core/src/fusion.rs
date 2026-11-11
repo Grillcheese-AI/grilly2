@@ -91,12 +91,18 @@ impl Graph {
                 Node::Input(i) => i < self.inputs,
                 Node::Param(i) => i < self.params,
                 Node::Unary(_, x, a, b) => {
-                    earlier(x) && [a, b].iter().flatten().all(|&p| earlier(p) && matches!(self.nodes[p], Node::Param(_)))
+                    earlier(x)
+                        && [a, b]
+                            .iter()
+                            .flatten()
+                            .all(|&p| earlier(p) && matches!(self.nodes[p], Node::Param(_)))
                 }
                 Node::Binary(_, x, y) => earlier(x) && earlier(y),
             };
             if !ok {
-                return bad(&format!("node {k} ({node:?}) refers to a later or missing node"));
+                return bad(&format!(
+                    "node {k} ({node:?}) refers to a later or missing node"
+                ));
             }
         }
         if self.outputs.iter().any(|&o| o >= self.nodes.len()) {
@@ -115,10 +121,18 @@ impl Graph {
         s.push_str(COMMON);
         s.push_str("\nlayout(std430, binding = 0) readonly buffer Meta { uint meta[]; };\n");
         for i in 0..self.inputs {
-            let _ = writeln!(s, "layout(std430, binding = {}) readonly buffer In{i} {{ float src{i}[]; }};", 1 + i);
+            let _ = writeln!(
+                s,
+                "layout(std430, binding = {}) readonly buffer In{i} {{ float src{i}[]; }};",
+                1 + i
+            );
         }
         for o in 0..self.outputs.len() {
-            let _ = writeln!(s, "layout(std430, binding = {}) writeonly buffer Out{o} {{ float dst{o}[]; }};", 1 + self.inputs + o);
+            let _ = writeln!(
+                s,
+                "layout(std430, binding = {}) writeonly buffer Out{o} {{ float dst{o}[]; }};",
+                1 + self.inputs + o
+            );
         }
         s.push_str("layout(push_constant) uniform P { uint n; } p;\n\nvoid main() {\n");
         s.push_str("    uint i = flat_index();\n    if (i >= p.n) return;\n    uint rem = i;\n");
@@ -137,11 +151,25 @@ impl Graph {
         for (k, node) in self.nodes.iter().enumerate() {
             let _ = match *node {
                 Node::Input(j) => writeln!(s, "    precise float t{k} = src{j}[at{j}];"),
-                Node::Param(j) => writeln!(s, "    float t{k} = uintBitsToFloat(meta[{}]);", param_base + j),
+                Node::Param(j) => writeln!(
+                    s,
+                    "    float t{k} = uintBitsToFloat(meta[{}]);",
+                    param_base + j
+                ),
                 Node::Unary(op, x, a, b) => {
-                    writeln!(s, "    precise float t{k} = g2_unary({}u, t{x}, {}, {});", op as u32, arg(a), arg(b))
+                    writeln!(
+                        s,
+                        "    precise float t{k} = g2_unary({}u, t{x}, {}, {});",
+                        op as u32,
+                        arg(a),
+                        arg(b)
+                    )
                 }
-                Node::Binary(op, x, y) => writeln!(s, "    precise float t{k} = g2_binary({}u, t{x}, t{y});", op as u32),
+                Node::Binary(op, x, y) => writeln!(
+                    s,
+                    "    precise float t{k} = g2_binary({}u, t{x}, t{y});",
+                    op as u32
+                ),
             };
         }
         for (o, &node) in self.outputs.iter().enumerate() {
@@ -164,25 +192,40 @@ impl Graph {
                 params.len()
             )));
         }
-        let first = inputs.first().ok_or_else(|| Error::Invalid("fusion graph without inputs".into()))?;
+        let first = inputs
+            .first()
+            .ok_or_else(|| Error::Invalid("fusion graph without inputs".into()))?;
         let device = first.device();
         if shape.len() > MAX_DIMS {
-            return Err(Error::NotImplemented(format!("fused kernels over more than {MAX_DIMS} dimensions")));
+            return Err(Error::NotImplemented(format!(
+                "fused kernels over more than {MAX_DIMS} dimensions"
+            )));
         }
         for t in inputs {
             if t.dtype() != DType::F32 {
-                return Err(Error::Invalid(format!("fused kernels take float32 inputs, got {}", t.dtype().name())));
+                return Err(Error::Invalid(format!(
+                    "fused kernels take float32 inputs, got {}",
+                    t.dtype().name()
+                )));
             }
             if broadcast_shape(t.shape(), shape)? != shape {
-                return Err(Error::Shape(format!("input of shape {:?} does not broadcast to {shape:?}", t.shape())));
+                return Err(Error::Shape(format!(
+                    "input of shape {:?} does not broadcast to {shape:?}",
+                    t.shape()
+                )));
             }
         }
-        let outputs = self.outputs.iter().map(|_| Tensor::empty(device, shape)).collect::<Result<Vec<_>>>()?;
+        let outputs = self
+            .outputs
+            .iter()
+            .map(|_| Tensor::empty(device, shape))
+            .collect::<Result<Vec<_>>>()?;
         let n: usize = shape.iter().product();
         if n == 0 {
             return Ok(outputs);
         }
-        let word = |v: usize| u32::try_from(v).map_err(|_| Error::Shape(format!("{v} exceeds u32")));
+        let word =
+            |v: usize| u32::try_from(v).map_err(|_| Error::Shape(format!("{v} exceeds u32")));
         let mut meta = vec![shape.len() as u32];
         for d in 0..MAX_DIMS {
             meta.push(word(shape.get(d).copied().unwrap_or(1))?);
@@ -240,7 +283,9 @@ impl Graph {
     pub fn backward(&self, out: usize, params: &[f32], wanted: &[bool]) -> Result<Backward> {
         self.check()?;
         if out >= self.nodes.len() || params.len() != self.params || wanted.len() != self.inputs {
-            return Err(Error::Invalid("fusion backward: bad output, params or wanted flags".into()));
+            return Err(Error::Invalid(
+                "fusion backward: bad output, params or wanted flags".into(),
+            ));
         }
         // which nodes depend on a wanted input
         let mut reaches = vec![false; self.nodes.len()];
@@ -252,8 +297,17 @@ impl Graph {
                 Node::Binary(_, x, y) => reaches[x] || reaches[y],
             };
         }
-        let forward = Graph { nodes: self.nodes[..=out].to_vec(), outputs: vec![], inputs: self.inputs + 1, params: self.params };
-        let mut b = Rules { g: forward, params: params.to_vec(), constants: Vec::new() };
+        let forward = Graph {
+            nodes: self.nodes[..=out].to_vec(),
+            outputs: vec![],
+            inputs: self.inputs + 1,
+            params: self.params,
+        };
+        let mut b = Rules {
+            g: forward,
+            params: params.to_vec(),
+            constants: Vec::new(),
+        };
         let grad = b.g.push(Node::Input(self.inputs));
         let mut adj: Vec<Option<usize>> = vec![None; out + 1];
         adj[out] = Some(grad);
@@ -289,7 +343,11 @@ impl Graph {
                 b.g.outputs.push(node);
             }
         }
-        Ok(Backward { graph: b.g, params: b.params, grads })
+        Ok(Backward {
+            graph: b.g,
+            params: b.params,
+            grads,
+        })
     }
 }
 
@@ -341,7 +399,15 @@ impl Rules {
     }
 
     /// The contribution to x of y = op(x; a, b) with upstream g (None: zero).
-    fn unary_rule(&mut self, op: Unary, g: usize, x: usize, y: usize, a: Option<usize>, b: Option<usize>) -> Option<usize> {
+    fn unary_rule(
+        &mut self,
+        op: Unary,
+        g: usize,
+        x: usize,
+        y: usize,
+        a: Option<usize>,
+        b: Option<usize>,
+    ) -> Option<usize> {
         let c = match op {
             Unary::Neg => self.un(Unary::Neg, g, None, None),
             Unary::Abs => {
@@ -420,12 +486,25 @@ impl Rules {
 
     /// The contributions to x and y of z = op(x, y) with upstream g;
     /// `xyz` is [x, y, z].
-    fn binary_rule(&mut self, op: Binary, g: usize, xyz: [usize; 3], need_x: bool, need_y: bool) -> (Option<usize>, Option<usize>) {
+    fn binary_rule(
+        &mut self,
+        op: Binary,
+        g: usize,
+        xyz: [usize; 3],
+        need_x: bool,
+        need_y: bool,
+    ) -> (Option<usize>, Option<usize>) {
         let [x, y, z] = xyz;
         match op {
             Binary::Add => (need_x.then_some(g), need_y.then_some(g)),
-            Binary::Sub => (need_x.then_some(g), need_y.then(|| self.un(Unary::Neg, g, None, None))),
-            Binary::Mul => (need_x.then(|| self.bin(Binary::Mul, g, y)), need_y.then(|| self.bin(Binary::Mul, g, x))),
+            Binary::Sub => (
+                need_x.then_some(g),
+                need_y.then(|| self.un(Unary::Neg, g, None, None)),
+            ),
+            Binary::Mul => (
+                need_x.then(|| self.bin(Binary::Mul, g, y)),
+                need_y.then(|| self.bin(Binary::Mul, g, x)),
+            ),
             Binary::Div => {
                 let ga = self.bin(Binary::Div, g, y);
                 let gb = need_y.then(|| {
@@ -455,7 +534,11 @@ impl Rules {
             }
             Binary::Maximum | Binary::Minimum => {
                 // the larger (smaller) input gets the gradient; ties split it, as torch
-                let win = if op == Binary::Maximum { Binary::Gt } else { Binary::Lt };
+                let win = if op == Binary::Maximum {
+                    Binary::Gt
+                } else {
+                    Binary::Lt
+                };
                 let eq = self.bin(Binary::Eq, x, y);
                 let tie = self.scalar(Unary::MulScalar, eq, 0.5);
                 let w = self.bin(win, x, y);
@@ -467,7 +550,9 @@ impl Rules {
                 });
                 (ga, gb)
             }
-            Binary::Eq | Binary::Ne | Binary::Gt | Binary::Ge | Binary::Lt | Binary::Le => (None, None),
+            Binary::Eq | Binary::Ne | Binary::Gt | Binary::Ge | Binary::Lt | Binary::Le => {
+                (None, None)
+            }
         }
     }
 }

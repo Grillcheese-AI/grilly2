@@ -36,7 +36,13 @@ fn same_bits(a: &Tensor, b: &Tensor) {
     let (xf, yf) = (a.to_vec().unwrap(), b.to_vec().unwrap());
     let differs = |(p, q): (&f32, &f32)| !(p.is_nan() && q.is_nan()) && p.to_bits() != q.to_bits();
     if let Some(i) = xf.iter().zip(&yf).position(differs) {
-        panic!("differ at {i}: fused {:e} ({:#x}) vs eager {:e} ({:#x})", xf[i], xf[i].to_bits(), yf[i], yf[i].to_bits());
+        panic!(
+            "differ at {i}: fused {:e} ({:#x}) vs eager {:e} ({:#x})",
+            xf[i],
+            xf[i].to_bits(),
+            yf[i],
+            yf[i].to_bits()
+        );
     }
 }
 
@@ -48,10 +54,26 @@ fn tanh_gelu_chain_matches_eager_bit_for_bit() {
     let (c, k) = (0.044715f32, (2.0 / std::f32::consts::PI).sqrt());
 
     let cube = generic::unary(&x, Unary::PowScalar, 3.0, 0.0).unwrap();
-    let inner = generic::binary(&x, &generic::unary(&cube, Unary::MulScalar, c, 0.0).unwrap(), Binary::Add).unwrap();
-    let t = generic::unary(&generic::unary(&inner, Unary::MulScalar, k, 0.0).unwrap(), Unary::Tanh, 0.0, 0.0).unwrap();
+    let inner = generic::binary(
+        &x,
+        &generic::unary(&cube, Unary::MulScalar, c, 0.0).unwrap(),
+        Binary::Add,
+    )
+    .unwrap();
+    let t = generic::unary(
+        &generic::unary(&inner, Unary::MulScalar, k, 0.0).unwrap(),
+        Unary::Tanh,
+        0.0,
+        0.0,
+    )
+    .unwrap();
     let eager = generic::unary(
-        &generic::binary(&x, &generic::unary(&t, Unary::AddScalar, 1.0, 0.0).unwrap(), Binary::Mul).unwrap(),
+        &generic::binary(
+            &x,
+            &generic::unary(&t, Unary::AddScalar, 1.0, 0.0).unwrap(),
+            Binary::Mul,
+        )
+        .unwrap(),
         Unary::MulScalar,
         0.5,
         0.0,
@@ -80,16 +102,36 @@ fn every_unary_and_binary_op_matches_eager() {
     let x = Tensor::from_slice(&dev, &data(3000, 2), &[3000]).unwrap();
     let y = Tensor::from_slice(&dev, &data(3000, 3), &[3000]).unwrap();
     let unaries = [
-        (Unary::Neg, 0.0, 0.0), (Unary::Abs, 0.0, 0.0), (Unary::Sign, 0.0, 0.0), (Unary::Exp, 0.0, 0.0),
-        (Unary::Log, 0.0, 0.0), (Unary::Sqrt, 0.0, 0.0), (Unary::Rsqrt, 0.0, 0.0), (Unary::Tanh, 0.0, 0.0),
-        (Unary::Sigmoid, 0.0, 0.0), (Unary::AddScalar, 1.5, 0.0), (Unary::MulScalar, -0.3, 0.0),
-        (Unary::RsubScalar, 2.0, 0.0), (Unary::RdivScalar, 1.0, 0.0), (Unary::PowScalar, 2.5, 0.0),
-        (Unary::PowScalar, 3.0, 0.0), (Unary::Clamp, -1.0, 1.0), (Unary::Gelu, 0.0, 0.0),
-        (Unary::Sin, 0.0, 0.0), (Unary::Cos, 0.0, 0.0), (Unary::Floor, 0.0, 0.0), (Unary::Round, 0.0, 0.0),
+        (Unary::Neg, 0.0, 0.0),
+        (Unary::Abs, 0.0, 0.0),
+        (Unary::Sign, 0.0, 0.0),
+        (Unary::Exp, 0.0, 0.0),
+        (Unary::Log, 0.0, 0.0),
+        (Unary::Sqrt, 0.0, 0.0),
+        (Unary::Rsqrt, 0.0, 0.0),
+        (Unary::Tanh, 0.0, 0.0),
+        (Unary::Sigmoid, 0.0, 0.0),
+        (Unary::AddScalar, 1.5, 0.0),
+        (Unary::MulScalar, -0.3, 0.0),
+        (Unary::RsubScalar, 2.0, 0.0),
+        (Unary::RdivScalar, 1.0, 0.0),
+        (Unary::PowScalar, 2.5, 0.0),
+        (Unary::PowScalar, 3.0, 0.0),
+        (Unary::Clamp, -1.0, 1.0),
+        (Unary::Gelu, 0.0, 0.0),
+        (Unary::Sin, 0.0, 0.0),
+        (Unary::Cos, 0.0, 0.0),
+        (Unary::Floor, 0.0, 0.0),
+        (Unary::Round, 0.0, 0.0),
     ];
     for (op, a, b) in unaries {
         // op(x) + y, fused against two eager kernels
-        let eager = generic::binary(&generic::unary(&x, op, a, 0.0 + b).unwrap(), &y, Binary::Add).unwrap();
+        let eager = generic::binary(
+            &generic::unary(&x, op, a, 0.0 + b).unwrap(),
+            &y,
+            Binary::Add,
+        )
+        .unwrap();
         let mut g = Graph::new();
         let (xi, yi) = (g.input(), g.input());
         let (pa, pb) = (g.param(), g.param());
@@ -100,8 +142,17 @@ fn every_unary_and_binary_op_matches_eager() {
         println!("{op:?}");
         same_bits(&fused[0], &eager);
     }
-    for op in [Binary::Sub, Binary::Mul, Binary::Div, Binary::Pow, Binary::Maximum, Binary::Minimum, Binary::Gt] {
-        let eager = generic::unary(&generic::binary(&x, &y, op).unwrap(), Unary::Exp, 0.0, 0.0).unwrap();
+    for op in [
+        Binary::Sub,
+        Binary::Mul,
+        Binary::Div,
+        Binary::Pow,
+        Binary::Maximum,
+        Binary::Minimum,
+        Binary::Gt,
+    ] {
+        let eager =
+            generic::unary(&generic::binary(&x, &y, op).unwrap(), Unary::Exp, 0.0, 0.0).unwrap();
         let mut g = Graph::new();
         let (xi, yi) = (g.input(), g.input());
         let r = g.binary(op, xi, yi);
@@ -143,7 +194,13 @@ fn adam_style_update_with_runtime_params_compiles_once() {
     let n = 5000;
     let p = Tensor::from_slice(&dev, &data(n, 7), &[n]).unwrap();
     let m = Tensor::from_slice(&dev, &data(n, 8), &[n]).unwrap();
-    let v = generic::unary(&Tensor::from_slice(&dev, &data(n, 9), &[n]).unwrap(), Unary::Abs, 0.0, 0.0).unwrap();
+    let v = generic::unary(
+        &Tensor::from_slice(&dev, &data(n, 9), &[n]).unwrap(),
+        Unary::Abs,
+        0.0,
+        0.0,
+    )
+    .unwrap();
     let mut g = Graph::new();
     let (pi, mi, vi) = (g.input(), g.input(), g.input());
     let (lr, eps) = (g.param(), g.param());
@@ -154,8 +211,20 @@ fn adam_style_update_with_runtime_params_compiles_once() {
     let out = g.binary(Binary::Sub, pi, step);
     g.output(out);
     for (lr, eps) in [(1e-3f32, 1e-8f32), (3e-4, 1e-6), (0.1, 1e-8)] {
-        let d = generic::unary(&generic::unary(&v, Unary::Sqrt, 0.0, 0.0).unwrap(), Unary::AddScalar, eps, 0.0).unwrap();
-        let step = generic::unary(&generic::binary(&m, &d, Binary::Div).unwrap(), Unary::MulScalar, lr, 0.0).unwrap();
+        let d = generic::unary(
+            &generic::unary(&v, Unary::Sqrt, 0.0, 0.0).unwrap(),
+            Unary::AddScalar,
+            eps,
+            0.0,
+        )
+        .unwrap();
+        let step = generic::unary(
+            &generic::binary(&m, &d, Binary::Div).unwrap(),
+            Unary::MulScalar,
+            lr,
+            0.0,
+        )
+        .unwrap();
         let eager = generic::binary(&p, &step, Binary::Sub).unwrap();
         same_bits(&g.run(&[&p, &m, &v], &[lr, eps], &[n]).unwrap()[0], &eager);
     }
@@ -173,7 +242,8 @@ fn malformed_graphs_are_refused() {
     assert!(g.run(&[], &[], &[2]).is_err()); // wrong input count
     assert!(g.run(&[&x], &[], &[3]).is_err()); // does not broadcast
     let mut bad = Graph::new();
-    bad.nodes.push(grilly_core::fusion::Node::Binary(Binary::Add, 1, 2));
+    bad.nodes
+        .push(grilly_core::fusion::Node::Binary(Binary::Add, 1, 2));
     bad.output(0);
     assert!(bad.run(&[&x], &[], &[2]).is_err());
 }
@@ -187,9 +257,25 @@ fn tanh_gelu_timing() {
     let (c, k) = (0.044715f32, (2.0 / std::f32::consts::PI).sqrt());
     let eager = || {
         let cube = generic::unary(&x, Unary::PowScalar, 3.0, 0.0).unwrap();
-        let inner = generic::binary(&x, &generic::unary(&cube, Unary::MulScalar, c, 0.0).unwrap(), Binary::Add).unwrap();
-        let t = generic::unary(&generic::unary(&inner, Unary::MulScalar, k, 0.0).unwrap(), Unary::Tanh, 0.0, 0.0).unwrap();
-        let y = generic::binary(&x, &generic::unary(&t, Unary::AddScalar, 1.0, 0.0).unwrap(), Binary::Mul).unwrap();
+        let inner = generic::binary(
+            &x,
+            &generic::unary(&cube, Unary::MulScalar, c, 0.0).unwrap(),
+            Binary::Add,
+        )
+        .unwrap();
+        let t = generic::unary(
+            &generic::unary(&inner, Unary::MulScalar, k, 0.0).unwrap(),
+            Unary::Tanh,
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        let y = generic::binary(
+            &x,
+            &generic::unary(&t, Unary::AddScalar, 1.0, 0.0).unwrap(),
+            Binary::Mul,
+        )
+        .unwrap();
         generic::unary(&y, Unary::MulScalar, 0.5, 0.0).unwrap()
     };
     let mut g = Graph::new();
@@ -204,14 +290,24 @@ fn tanh_gelu_timing() {
     let y = g.binary(Binary::Mul, xi, t);
     let y = g.unary(Unary::MulScalar, y, Some(half), None);
     g.output(y);
-    let fused = || g.run(&[&x], &[3.0, c, k, 1.0, 0.5], &[n]).unwrap().remove(0);
-    for (name, f) in [("eager (8 kernels)", &eager as &dyn Fn() -> Tensor), ("fused (1 kernel)", &fused)] {
+    let fused = || {
+        g.run(&[&x], &[3.0, c, k, 1.0, 0.5], &[n])
+            .unwrap()
+            .remove(0)
+    };
+    for (name, f) in [
+        ("eager (8 kernels)", &eager as &dyn Fn() -> Tensor),
+        ("fused (1 kernel)", &fused),
+    ] {
         f().to_bytes().unwrap();
         let t0 = std::time::Instant::now();
         for _ in 0..5 {
             let _ = f();
         }
         f().to_bytes().unwrap();
-        println!("tanh-gelu over 16M: {name}: {:.2} ms", t0.elapsed().as_secs_f64() * 1e3 / 6.0);
+        println!(
+            "tanh-gelu over 16M: {name}: {:.2} ms",
+            t0.elapsed().as_secs_f64() * 1e3 / 6.0
+        );
     }
 }

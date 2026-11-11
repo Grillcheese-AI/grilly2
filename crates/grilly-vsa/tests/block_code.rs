@@ -8,8 +8,8 @@
 //!   the hot positions, so the port is `==` against that rule, not near it.
 //!   CLAUDE.md §8.2: the inputs are (n, k, l) batches of ONE-HOT vectors,
 //!   and dense random ones are a different test, below.
-//! - **continuous codes: a float64 reference.** `|got - ref| <= 4 * l * eps
-//!   * max|a| * max|b|`, l products summed in float32, and the worst
+//! - **continuous codes: a float64 reference.** `|got - ref| <=
+//!   4 * l * eps * max|a| * max|b|`, l products summed in float32, and the worst
 //!   measured ratio to that bound is printed. Case (b) of CLAUDE.md §9.
 
 use grilly_core::{Device, Tensor};
@@ -49,7 +49,9 @@ fn one_hot(n: usize, seed: u64) -> (Vec<f32>, Vec<usize>) {
 
 fn dense(n: usize, seed: u64) -> Vec<f32> {
     let mut next = rng(seed);
-    (0..n * K * L).map(|_| (next() * 2.0 - 1.0) as f32).collect()
+    (0..n * K * L)
+        .map(|_| (next() * 2.0 - 1.0) as f32)
+        .collect()
 }
 
 /// The same convolution in float64, straight from the definition.
@@ -101,7 +103,11 @@ fn unbinding_recovers_a_one_hot_code_exactly() {
     let tx = Tensor::from_slice(&dev, &x, &[n, K, L]).unwrap();
     let tk = Tensor::from_slice(&dev, &key, &[n, K, L]).unwrap();
     let composite = bind(&tx, &tk).unwrap();
-    assert_eq!(unbind(&composite, &tk).unwrap().to_vec().unwrap(), x, "bind then unbind lost the code");
+    assert_eq!(
+        unbind(&composite, &tk).unwrap().to_vec().unwrap(),
+        x,
+        "bind then unbind lost the code"
+    );
 }
 
 #[test]
@@ -112,17 +118,27 @@ fn continuous_codes_match_a_float64_convolution() {
         let (a, b) = (dense(n, seed), dense(n, seed + 100));
         let ta = Tensor::from_slice(&dev, &a, &[n, K, L]).unwrap();
         let tb = Tensor::from_slice(&dev, &b, &[n, K, L]).unwrap();
-        let got = if unb { unbind(&ta, &tb) } else { bind(&ta, &tb) }.unwrap().to_vec().unwrap();
+        let got = if unb {
+            unbind(&ta, &tb)
+        } else {
+            bind(&ta, &tb)
+        }
+        .unwrap()
+        .to_vec()
+        .unwrap();
         let want = reference(&a, &b, n, unb);
 
-        let (amax, bmax) = (1.0f64, 1.0f64);  // dense() is bounded by 1
+        let (amax, bmax) = (1.0f64, 1.0f64); // dense() is bounded by 1
         let bound = 4.0 * L as f64 * f32::EPSILON as f64 * amax * bmax;
         let worst = got
             .iter()
             .zip(&want)
             .map(|(g, w)| (*g as f64 - w).abs() / bound)
             .fold(0.0f64, f64::max);
-        println!("{}: worst error / bound = {worst:.3}", if unb { "unbind" } else { "bind" });
+        println!(
+            "{}: worst error / bound = {worst:.3}",
+            if unb { "unbind" } else { "bind" }
+        );
         assert!(worst <= 1.0, "worst error is {worst:.3} of the bound");
     }
 }
@@ -136,7 +152,11 @@ fn one_code_binds_against_a_whole_codebook() {
     let tcb = Tensor::from_slice(&dev, &cb, &[n, K, L]).unwrap();
     let tkey = Tensor::from_slice(&dev, &key, &[K, L]).unwrap();
     let got = bind(&tcb, &tkey).unwrap();
-    assert_eq!(got.shape(), &[n, K, L], "the batch shape is the wide operand's");
+    assert_eq!(
+        got.shape(),
+        &[n, K, L],
+        "the batch shape is the wide operand's"
+    );
 
     let mut want = vec![0.0f32; n * K * L];
     for v in 0..n {
@@ -144,13 +164,17 @@ fn one_code_binds_against_a_whole_codebook() {
             want[(v * K + blk) * L + (hc[v * K + blk] + hk[blk]) % L] = 1.0;
         }
     }
-    assert_eq!(got.to_vec().unwrap(), want, "broadcasting a key over a codebook");
+    assert_eq!(
+        got.to_vec().unwrap(),
+        want,
+        "broadcasting a key over a codebook"
+    );
 }
 
 #[test]
 fn mismatched_block_shapes_are_refused() {
     let dev = dev();
-    let a = Tensor::from_slice(&dev, &vec![0.0f32; 4 * 8], &[4, 8]).unwrap();
+    let a = Tensor::from_slice(&dev, &[0.0f32; 4 * 8], &[4, 8]).unwrap();
     let b = Tensor::from_slice(&dev, &vec![0.0f32; 4 * 16], &[4, 16]).unwrap();
     let e = bind(&a, &b).unwrap_err();
     assert!(format!("{e}").contains("block shapes differ"), "{e}");

@@ -38,12 +38,18 @@ fn leaf(dev: &Device, v: &[f32], shape: &[usize]) -> Tensor {
 }
 
 fn grads(leaves: &[&Tensor]) -> Vec<Vec<f32>> {
-    leaves.iter().map(|l| l.grad().expect("a gradient").to_vec().unwrap()).collect()
+    leaves
+        .iter()
+        .map(|l| l.grad().expect("a gradient").to_vec().unwrap())
+        .collect()
 }
 
 fn same_bits(a: &[f32], b: &[f32], what: &str) {
     for (i, (x, y)) in a.iter().zip(b).enumerate() {
-        assert!(x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()), "{what}: element {i}: fused {x:e} vs eager {y:e}");
+        assert!(
+            x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()),
+            "{what}: element {i}: fused {x:e} vs eager {y:e}"
+        );
     }
 }
 
@@ -57,7 +63,10 @@ fn close(a: &[f32], b: &[f32], rtol: f32, what: &str) {
     }
     println!("{what}: worst ratio to the rtol {rtol:e} bound {worst:.3}, worst {ulps} ulp");
     for (i, (x, y)) in a.iter().zip(b).enumerate() {
-        assert!((x - y).abs() <= rtol * y.abs().max(1.0), "{what}: element {i}: fused {x:e} vs eager {y:e}");
+        assert!(
+            (x - y).abs() <= rtol * y.abs().max(1.0),
+            "{what}: element {i}: fused {x:e} vs eager {y:e}"
+        );
     }
 }
 
@@ -67,17 +76,34 @@ fn every_unary_rule_matches_eager_bit_for_bit() {
     let n = 2000;
     let (xv, gv) = (data(n, 1, 0.3, 2.5), data(n, 2, -1.0, 1.0));
     let ops = [
-        (Unary::Neg, 0.0, 0.0), (Unary::Abs, 0.0, 0.0), (Unary::Exp, 0.0, 0.0), (Unary::Log, 0.0, 0.0),
-        (Unary::Sqrt, 0.0, 0.0), (Unary::Rsqrt, 0.0, 0.0), (Unary::Tanh, 0.0, 0.0), (Unary::Sigmoid, 0.0, 0.0),
-        (Unary::AddScalar, 1.5, 0.0), (Unary::MulScalar, -0.7, 0.0), (Unary::RsubScalar, 2.0, 0.0),
-        (Unary::RdivScalar, 3.0, 0.0), (Unary::PowScalar, 2.5, 0.0), (Unary::PowScalar, 3.0, 0.0),
-        (Unary::PowScalar, 0.0, 0.0), (Unary::Clamp, 0.8, 1.9), (Unary::Sin, 0.0, 0.0), (Unary::Cos, 0.0, 0.0),
-        (Unary::Gelu, 0.0, 0.0), (Unary::Floor, 0.0, 0.0),
+        (Unary::Neg, 0.0, 0.0),
+        (Unary::Abs, 0.0, 0.0),
+        (Unary::Exp, 0.0, 0.0),
+        (Unary::Log, 0.0, 0.0),
+        (Unary::Sqrt, 0.0, 0.0),
+        (Unary::Rsqrt, 0.0, 0.0),
+        (Unary::Tanh, 0.0, 0.0),
+        (Unary::Sigmoid, 0.0, 0.0),
+        (Unary::AddScalar, 1.5, 0.0),
+        (Unary::MulScalar, -0.7, 0.0),
+        (Unary::RsubScalar, 2.0, 0.0),
+        (Unary::RdivScalar, 3.0, 0.0),
+        (Unary::PowScalar, 2.5, 0.0),
+        (Unary::PowScalar, 3.0, 0.0),
+        (Unary::PowScalar, 0.0, 0.0),
+        (Unary::Clamp, 0.8, 1.9),
+        (Unary::Sin, 0.0, 0.0),
+        (Unary::Cos, 0.0, 0.0),
+        (Unary::Gelu, 0.0, 0.0),
+        (Unary::Floor, 0.0, 0.0),
     ];
     for (op, a, b) in ops {
         let g = Tensor::from_slice(&dev, &gv, &[n]).unwrap();
         let x = leaf(&dev, &xv, &[n]);
-        math::unary(&x, op, a, b).unwrap().backward(Some(&g), false).unwrap();
+        math::unary(&x, op, a, b)
+            .unwrap()
+            .backward(Some(&g), false)
+            .unwrap();
         let eager = grads(&[&x]);
 
         let xf = leaf(&dev, &xv, &[n]);
@@ -86,7 +112,10 @@ fn every_unary_rule_matches_eager_bit_for_bit() {
         let (pa, pb) = (gr.param(), gr.param());
         let y = gr.unary(op, xi, Some(pa), Some(pb));
         gr.output(y);
-        fused(&gr, &[&xf], &[a, b], &[n]).unwrap().backward(Some(&g), false).unwrap();
+        fused(&gr, &[&xf], &[a, b], &[n])
+            .unwrap()
+            .backward(Some(&g), false)
+            .unwrap();
         same_bits(&grads(&[&xf])[0], &eager[0], &format!("{op:?}"));
     }
 }
@@ -95,16 +124,35 @@ fn every_unary_rule_matches_eager_bit_for_bit() {
 fn every_binary_rule_matches_eager_bit_for_bit() {
     let dev = device();
     let n = 2000;
-    let (xv, yv, gv) = (data(n, 3, 0.3, 2.5), data(n, 4, 0.3, 2.5), data(n, 5, -1.0, 1.0));
+    let (xv, yv, gv) = (
+        data(n, 3, 0.3, 2.5),
+        data(n, 4, 0.3, 2.5),
+        data(n, 5, -1.0, 1.0),
+    );
     let mut yv_ties = yv.clone();
     for i in (0..n).step_by(7) {
         yv_ties[i] = xv[i]; // maximum / minimum split ties
     }
-    for op in [Binary::Add, Binary::Sub, Binary::Mul, Binary::Div, Binary::Pow, Binary::Maximum, Binary::Minimum] {
+    for op in [
+        Binary::Add,
+        Binary::Sub,
+        Binary::Mul,
+        Binary::Div,
+        Binary::Pow,
+        Binary::Maximum,
+        Binary::Minimum,
+    ] {
         let g = Tensor::from_slice(&dev, &gv, &[n]).unwrap();
-        let yvals = if matches!(op, Binary::Maximum | Binary::Minimum) { &yv_ties } else { &yv };
+        let yvals = if matches!(op, Binary::Maximum | Binary::Minimum) {
+            &yv_ties
+        } else {
+            &yv
+        };
         let (x, y) = (leaf(&dev, &xv, &[n]), leaf(&dev, yvals, &[n]));
-        math::binary(&x, &y, op).unwrap().backward(Some(&g), false).unwrap();
+        math::binary(&x, &y, op)
+            .unwrap()
+            .backward(Some(&g), false)
+            .unwrap();
         let eager = grads(&[&x, &y]);
 
         let (xf, yf) = (leaf(&dev, &xv, &[n]), leaf(&dev, yvals, &[n]));
@@ -112,7 +160,10 @@ fn every_binary_rule_matches_eager_bit_for_bit() {
         let (xi, yi) = (gr.input(), gr.input());
         let z = gr.binary(op, xi, yi);
         gr.output(z);
-        fused(&gr, &[&xf, &yf], &[], &[n]).unwrap().backward(Some(&g), false).unwrap();
+        fused(&gr, &[&xf, &yf], &[], &[n])
+            .unwrap()
+            .backward(Some(&g), false)
+            .unwrap();
         let got = grads(&[&xf, &yf]);
         same_bits(&got[0], &eager[0], &format!("{op:?} dx"));
         same_bits(&got[1], &eager[1], &format!("{op:?} dy"));
@@ -125,18 +176,48 @@ fn chains_with_reuse_and_broadcasting_match_eager() {
     // x is used three times, w and b broadcast
     let dev = device();
     let shape = [4, 3, 5];
-    let (xv, wv, bv, gv) = (data(60, 6, -2.0, 2.0), data(3, 7, -1.0, 1.0), data(5, 8, -1.0, 1.0), data(60, 9, -1.0, 1.0));
+    let (xv, wv, bv, gv) = (
+        data(60, 6, -2.0, 2.0),
+        data(3, 7, -1.0, 1.0),
+        data(5, 8, -1.0, 1.0),
+        data(60, 9, -1.0, 1.0),
+    );
     let g = Tensor::from_slice(&dev, &gv, &shape).unwrap();
 
-    let (x, w, b) = (leaf(&dev, &xv, &shape), leaf(&dev, &wv, &[3, 1]), leaf(&dev, &bv, &[5]));
-    let t = math::unary(&math::binary(&math::binary(&x, &w, Binary::Mul).unwrap(), &b, Binary::Add).unwrap(), Unary::Tanh, 0.0, 0.0).unwrap();
-    let sq = math::unary(&math::unary(&x, Unary::PowScalar, 2.0, 0.0).unwrap(), Unary::Neg, 0.0, 0.0).unwrap();
-    let f = math::binary(&math::binary(&t, &x, Binary::Mul).unwrap(), &math::unary(&sq, Unary::Exp, 0.0, 0.0).unwrap(), Binary::Add).unwrap();
+    let (x, w, b) = (
+        leaf(&dev, &xv, &shape),
+        leaf(&dev, &wv, &[3, 1]),
+        leaf(&dev, &bv, &[5]),
+    );
+    let t = math::unary(
+        &math::binary(&math::binary(&x, &w, Binary::Mul).unwrap(), &b, Binary::Add).unwrap(),
+        Unary::Tanh,
+        0.0,
+        0.0,
+    )
+    .unwrap();
+    let sq = math::unary(
+        &math::unary(&x, Unary::PowScalar, 2.0, 0.0).unwrap(),
+        Unary::Neg,
+        0.0,
+        0.0,
+    )
+    .unwrap();
+    let f = math::binary(
+        &math::binary(&t, &x, Binary::Mul).unwrap(),
+        &math::unary(&sq, Unary::Exp, 0.0, 0.0).unwrap(),
+        Binary::Add,
+    )
+    .unwrap();
     let eager_f = f.to_vec().unwrap();
     f.backward(Some(&g), false).unwrap();
     let eager = grads(&[&x, &w, &b]);
 
-    let (xf, wf, bf) = (leaf(&dev, &xv, &shape), leaf(&dev, &wv, &[3, 1]), leaf(&dev, &bv, &[5]));
+    let (xf, wf, bf) = (
+        leaf(&dev, &xv, &shape),
+        leaf(&dev, &wv, &[3, 1]),
+        leaf(&dev, &bv, &[5]),
+    );
     let mut gr = Graph::new();
     let (xi, wi, bi) = (gr.input(), gr.input(), gr.input());
     let two = gr.param();
@@ -170,7 +251,11 @@ fn inputs_without_a_path_get_zero_gradients_and_frozen_inputs_none() {
     gr.output(z);
     let out = fused(&gr, &[&x, &y, &frozen], &[], &[2]).unwrap();
     assert_eq!(out.to_vec().unwrap(), [6.0, 8.0]);
-    out.backward(Some(&Tensor::from_slice(&dev, &[1.0, 1.0], &[2]).unwrap()), false).unwrap();
+    out.backward(
+        Some(&Tensor::from_slice(&dev, &[1.0, 1.0], &[2]).unwrap()),
+        false,
+    )
+    .unwrap();
     assert_eq!(x.grad().unwrap().to_vec().unwrap(), [0.0, 0.0]);
     assert_eq!(y.grad().unwrap().to_vec().unwrap(), [0.0, 0.0]);
     assert!(frozen.grad().is_none());

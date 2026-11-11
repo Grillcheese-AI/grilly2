@@ -25,11 +25,17 @@ fn ones(shape: &[usize]) -> Tensor {
 #[test]
 fn leaves_accumulate_in_place_across_backwards() {
     let x = leaf(&[1.0, 2.0, 3.0], &[3]);
-    add(&x, &x).unwrap().backward(Some(&ones(&[3])), false).unwrap();
+    add(&x, &x)
+        .unwrap()
+        .backward(Some(&ones(&[3])), false)
+        .unwrap();
     let g = x.grad().expect("grad after backward");
     assert_eq!(g.to_vec().unwrap(), [2.0, 2.0, 2.0]);
 
-    add(&x, &x).unwrap().backward(Some(&ones(&[3])), false).unwrap();
+    add(&x, &x)
+        .unwrap()
+        .backward(Some(&ones(&[3])), false)
+        .unwrap();
     assert_eq!(x.grad().unwrap().to_vec().unwrap(), [4.0, 4.0, 4.0]);
     // Accumulation is in place, as in torch: the earlier handle sees it.
     assert_eq!(g.to_vec().unwrap(), [4.0, 4.0, 4.0]);
@@ -89,8 +95,14 @@ fn grad_fn_names_follow_torch() {
     let x = leaf(&[1.0, 2.0], &[2]);
     assert_eq!(x.grad_fn_name(), None);
     assert_eq!(add(&x, &x).unwrap().grad_fn_name(), Some("AddBackward0"));
-    assert_eq!(x.reshape(&[1, 2]).unwrap().grad_fn_name(), Some("ViewBackward0"));
-    assert_eq!(x.clone_data().unwrap().grad_fn_name(), Some("CloneBackward0"));
+    assert_eq!(
+        x.reshape(&[1, 2]).unwrap().grad_fn_name(),
+        Some("ViewBackward0")
+    );
+    assert_eq!(
+        x.clone_data().unwrap().grad_fn_name(),
+        Some("CloneBackward0")
+    );
 }
 
 #[test]
@@ -113,23 +125,39 @@ fn torch_errors() {
     let x = leaf(&[1.0, 2.0], &[2]);
     let c = t(&[1.0, 2.0], &[2]);
 
-    let e = add(&c, &c).unwrap().backward(Some(&ones(&[2])), false).unwrap_err();
+    let e = add(&c, &c)
+        .unwrap()
+        .backward(Some(&ones(&[2])), false)
+        .unwrap_err();
     assert!(e.to_string().contains("does not require grad"), "{e}");
 
     let e = add(&x, &x).unwrap().backward(None, false).unwrap_err();
     assert!(e.to_string().contains("only for scalar outputs"), "{e}");
 
-    let e = add(&x, &x).unwrap().backward(Some(&ones(&[3])), false).unwrap_err();
-    assert!(matches!(e, Error::Shape(ref m) if m.contains("Mismatch in shape")), "{e}");
+    let e = add(&x, &x)
+        .unwrap()
+        .backward(Some(&ones(&[3])), false)
+        .unwrap_err();
+    assert!(
+        matches!(e, Error::Shape(ref m) if m.contains("Mismatch in shape")),
+        "{e}"
+    );
 
     let e = add(&x, &x).unwrap().set_requires_grad(false).unwrap_err();
-    assert!(e.to_string().contains("only change requires_grad flags of leaf"), "{e}");
+    assert!(
+        e.to_string()
+            .contains("only change requires_grad flags of leaf"),
+        "{e}"
+    );
 }
 
 #[test]
 fn gradients_are_bit_identical_across_runs() {
     let run = || {
-        let x = leaf(&(0..64).map(|i| i as f32 * 0.37 - 5.0).collect::<Vec<_>>(), &[64]);
+        let x = leaf(
+            &(0..64).map(|i| i as f32 * 0.37 - 5.0).collect::<Vec<_>>(),
+            &[64],
+        );
         let mut y = x.clone();
         for _ in 0..10 {
             y = add(&y, &x.reshape(&[64]).unwrap()).unwrap();

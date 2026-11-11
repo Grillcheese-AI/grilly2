@@ -44,7 +44,11 @@ fn config() -> StepConfig {
 
 /// The recurrence the kernel encodes, in float64.
 fn reference(v: &[f32], x: &[f32], c: &StepConfig) -> (Vec<f64>, Vec<f64>) {
-    let rest = if c.reset == Reset::Soft { 0.0 } else { c.rest as f64 };
+    let rest = if c.reset == Reset::Soft {
+        0.0
+    } else {
+        c.rest as f64
+    };
     let mut spikes = Vec::with_capacity(v.len());
     let mut next = Vec::with_capacity(v.len());
     for (&vi, &xi) in v.iter().zip(x) {
@@ -64,7 +68,11 @@ fn reference(v: &[f32], x: &[f32], c: &StepConfig) -> (Vec<f64>, Vec<f64>) {
 fn the_step_matches_the_recurrence_it_encodes() {
     let dev = dev();
     let n = 4096;
-    for (name, mut c) in [("hard", config()), ("soft", config()), ("decay_input", config())] {
+    for (name, mut c) in [
+        ("hard", config()),
+        ("soft", config()),
+        ("decay_input", config()),
+    ] {
         if name == "soft" {
             c.reset = Reset::Soft;
         }
@@ -79,8 +87,14 @@ fn the_step_matches_the_recurrence_it_encodes() {
         let (want_s, want_v) = reference(&v, &x, &c);
 
         let got_s = spikes.to_vec().unwrap();
-        assert!(got_s.iter().zip(&want_s).all(|(g, w)| f64::from(*g) == *w), "{name}: spikes");
-        assert!(got_s.iter().all(|s| *s == 0.0 || *s == 1.0), "{name}: a spike is 0 or 1");
+        assert!(
+            got_s.iter().zip(&want_s).all(|(g, w)| f64::from(*g) == *w),
+            "{name}: spikes"
+        );
+        assert!(
+            got_s.iter().all(|s| *s == 0.0 || *s == 1.0),
+            "{name}: a spike is 0 or 1"
+        );
 
         let got_v = next.to_vec().unwrap();
         let worst = got_v
@@ -114,13 +128,21 @@ fn a_soft_reset_keeps_the_overshoot_and_a_hard_one_does_not() {
     hard.decay = 1.0;
     let (s, next) = step(&v, &x, hard).unwrap();
     assert_eq!(s.to_vec().unwrap(), vec![1.0]);
-    assert_eq!(next.to_vec().unwrap(), vec![0.0], "hard reset clears to rest");
+    assert_eq!(
+        next.to_vec().unwrap(),
+        vec![0.0],
+        "hard reset clears to rest"
+    );
 
     let mut soft = hard;
     soft.reset = Reset::Soft;
     let (s, next) = step(&v, &x, soft).unwrap();
     assert_eq!(s.to_vec().unwrap(), vec![1.0]);
-    assert_eq!(next.to_vec().unwrap(), vec![5.0 - 0.8], "soft reset subtracts the threshold");
+    assert_eq!(
+        next.to_vec().unwrap(),
+        vec![5.0 - 0.8],
+        "soft reset subtracts the threshold"
+    );
 }
 
 #[test]

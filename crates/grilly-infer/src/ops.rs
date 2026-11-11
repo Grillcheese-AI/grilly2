@@ -7,9 +7,19 @@ use grilly_core::{require_float, Arg, Error, Kernel, Result, Tensor};
 
 /// Bindings: src, cos, sin, dst. Push: n, t, heads, dim, row, col, src_off,
 /// pos0, dst_off, ds_b, ds_h, ds_t.
-pub(crate) const ROPE: Kernel = Kernel { shader: "g2-rope", bindings: 4, push_words: 12, local_size: [256, 1, 1] };
+pub(crate) const ROPE: Kernel = Kernel {
+    shader: "g2-rope",
+    bindings: 4,
+    push_words: 12,
+    local_size: [256, 1, 1],
+};
 /// Bindings: gate, up, out. Push: n, width, g_off, g_row, g_col, u_off, u_row, u_col.
-const SWIGLU: Kernel = Kernel { shader: "g2-swiglu", bindings: 3, push_words: 8, local_size: [256, 1, 1] };
+const SWIGLU: Kernel = Kernel {
+    shader: "g2-swiglu",
+    bindings: 3,
+    push_words: 8,
+    local_size: [256, 1, 1],
+};
 pub const KERNELS: &[Kernel] = &[ROPE, SWIGLU];
 
 pub(crate) fn u32_of(v: usize, what: &str) -> Result<u32> {
@@ -30,7 +40,10 @@ impl Heads<'_> {
     pub(crate) fn layout(&self) -> Result<(usize, usize, usize)> {
         require_float("rotary embedding", self.src.dtype())?;
         let &[b, t, row] = self.src.shape() else {
-            return Err(Error::Shape(format!("expected a (batch, T, features) projection, got {:?}", self.src.shape())));
+            return Err(Error::Shape(format!(
+                "expected a (batch, T, features) projection, got {:?}",
+                self.src.shape()
+            )));
         };
         if !self.dim.is_multiple_of(2) || self.col + self.heads * self.dim > row {
             return Err(Error::Shape(format!(
@@ -71,7 +84,13 @@ impl Rotary<'_> {
 
 /// Record the rotary kernel writing `x` to `dst` at element offset
 /// `dst_off` with strides `(batch, head, T)` (dim is contiguous).
-fn rope_into(x: &Heads, rot: &Rotary, dst: &Tensor, dst_off: usize, strides: [usize; 3]) -> Result<()> {
+fn rope_into(
+    x: &Heads,
+    rot: &Rotary,
+    dst: &Tensor,
+    dst_off: usize,
+    strides: [usize; 3],
+) -> Result<()> {
     let (b, t, row) = x.layout()?;
     rot.check(t, x.dim)?;
     let n = b * t * x.heads * x.dim;
@@ -94,7 +113,12 @@ fn rope_into(x: &Heads, rot: &Rotary, dst: &Tensor, dst_off: usize, strides: [us
     ];
     ROPE.launch_flat(
         x.src.device(),
-        &[Arg::Storage(x.src), Arg::Storage(rot.cos), Arg::Storage(rot.sin), Arg::Storage(dst)],
+        &[
+            Arg::Storage(x.src),
+            Arg::Storage(rot.cos),
+            Arg::Storage(rot.sin),
+            Arg::Storage(dst),
+        ],
         n,
         &push,
     )
@@ -110,7 +134,13 @@ pub fn rope(x: &Heads, rot: &Rotary) -> Result<Tensor> {
 
 /// `silu(gate) * up`, `(batch, T, width)`, reading `width` columns of each
 /// from its source (`(batch, T, row)`) at its column.
-pub fn swiglu(gate: &Tensor, gate_col: usize, up: &Tensor, up_col: usize, width: usize) -> Result<Tensor> {
+pub fn swiglu(
+    gate: &Tensor,
+    gate_col: usize,
+    up: &Tensor,
+    up_col: usize,
+    width: usize,
+) -> Result<Tensor> {
     let mut rows = 0;
     let mut lead = Vec::new();
     for (t, col) in [(gate, gate_col), (up, up_col)] {
@@ -119,11 +149,18 @@ pub fn swiglu(gate: &Tensor, gate_col: usize, up: &Tensor, up_col: usize, width:
             return Err(Error::Shape("swiglu: a 0-d source".into()));
         };
         if col + width > row {
-            return Err(Error::Shape(format!("swiglu: columns {col}..{} do not fit rows of {row}", col + width)));
+            return Err(Error::Shape(format!(
+                "swiglu: columns {col}..{} do not fit rows of {row}",
+                col + width
+            )));
         }
         let r = l.iter().product::<usize>();
         if !lead.is_empty() && lead != l {
-            return Err(Error::Shape(format!("swiglu: gate {:?} and up {:?} disagree", gate.shape(), up.shape())));
+            return Err(Error::Shape(format!(
+                "swiglu: gate {:?} and up {:?} disagree",
+                gate.shape(),
+                up.shape()
+            )));
         }
         lead = l.to_vec();
         rows = r;
@@ -144,7 +181,12 @@ pub fn swiglu(gate: &Tensor, gate_col: usize, up: &Tensor, up_col: usize, width:
             u32_of(row(up), "row")?,
             u32_of(up_col, "col")?,
         ];
-        SWIGLU.launch_flat(gate.device(), &[Arg::Storage(gate), Arg::Storage(up), Arg::Tensor(&out)], n, &push)?;
+        SWIGLU.launch_flat(
+            gate.device(),
+            &[Arg::Storage(gate), Arg::Storage(up), Arg::Tensor(&out)],
+            n,
+            &push,
+        )?;
     }
     Ok(out)
 }
