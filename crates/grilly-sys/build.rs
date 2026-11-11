@@ -40,7 +40,18 @@ fn main() {
     println!("cargo:rerun-if-changed=vulkan");
 
     let vulkan = manifest.join("vulkan");
-    cc::Build::new()
+    let mut build = cc::Build::new();
+    // `assert()` bakes `__FILE__` into the binary, and cc-rs does not define
+    // NDEBUG, so GCC and Clang would ship this machine's absolute path to
+    // vk_mem_alloc.h in every wheel (check_relocatable.py caught it). Rewrite
+    // the prefix rather than drop the asserts. MSVC does not embed it.
+    for root in [manifest.clone(), plain(manifest.clone())] {
+        build.flag_if_supported(format!(
+            "-ffile-prefix-map={}=crates/grilly-sys",
+            root.display()
+        ));
+    }
+    build
         .cpp(true)
         .std("c++17")
         .file(manifest.join("shim/gc_shim.cpp"))
