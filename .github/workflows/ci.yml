@@ -128,12 +128,39 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install pytest pytest-timeout
+          python -m pip install pytest pytest-timeout transformers
           python -m pip install "$(ls dist/*.whl)[huggingface]"
       - name: the device opens
         run: python -m grilly.doctor
+      # Skipped on lavapipe ONLY, by name. Each asserts a precision the
+      # RX 6750 XT has and Vulkan does not promise, measured failing here
+      # on 2026-11-11 (Mesa llvmpipe, LLVM 21). They stay strict on hardware.
+      #
+      #   div_rn: Markstein division needs fma() to round once. Vulkan lets
+      #     fma be a separate mul + add, and lavapipe's is: 1 ULP off.
+      #   the int8 / int4 quantizer tests: bit-exact against torchao through
+      #     div_rn. 4 of 57,344 int8 values tip from -127 to -128 at a row's
+      #     absmax; one int4 scale is 1 ULP off. The kernels are right.
+      #   int8 linear vs float64: same quantized weights, one of them flipped.
+      #   transcendentals within 2 ULP: Vulkan bounds log() by absolute
+      #     error near 1, which is 1677 ULP there on lavapipe.
+      #
+      # Anything else failing here is a real regression.
       - name: rust tests
-        run: cargo test --workspace --release --no-fail-fast -- --test-threads=2
+        run: >
+          cargo test --workspace --release --no-fail-fast -- --test-threads=2
+          --skip div_rn_is_correctly_rounded
+          --skip quantized_values_are_torchaos_exactly
+          --skip quantized_values_follow_torchaos_formula_exactly
+          --skip linear_matches_a_float64_reference_within_its_bound
+          --skip transcendental_unary_ops_within_2_ulp
+      # quant4.rs has a test of the same name that passes here; the skip
+      # above cannot tell the two apart, so the int4 one runs on its own
+      - name: rust tests (int4 linear)
+        if: ${{ !cancelled() }}
+        run: >
+          cargo test --release -p grilly-infer --test quant4 --
+          linear_matches_a_float64_reference_within_its_bound --exact
       # run from outside the repo so `import grilly` cannot resolve to
       # python/grilly in the checkout, which has no compiled _C in it
       - name: python tests
