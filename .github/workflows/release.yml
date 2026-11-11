@@ -16,11 +16,11 @@
 #     that driver; torch and cupy skip repair for their GPU runtimes for
 #     the same reason.
 #
-#   * the Linux wheel is built on ubuntu-22.04 and tagged manylinux_2_35,
+#   * the Linux wheel is built on ubuntu-22.04 and tagged manylinux_2_34,
 #     not in a manylinux_2_28 container. shaderc is not packaged for the
 #     manylinux images and building it there is a slow, fragile detour; the
 #     LunarG SDK's own Linux build targets 22.04. The cost is that glibc
-#     older than 2.35 (RHEL 8, Ubuntu 20.04) gets the sdist instead. The
+#     older than 2.34 (RHEL 8, Ubuntu 20.04) gets the sdist instead. The
 #     `auditwheel show` step prints what the binary actually requires, so
 #     that tag is checked rather than asserted.
 #
@@ -89,13 +89,24 @@ jobs:
       - name: build
         run: |
           python -m pip install --upgrade pip maturin auditwheel
-          maturin build --release --out dist --auditwheel skip --compatibility manylinux_2_35
+          maturin build --release --out dist --auditwheel skip --compatibility manylinux_2_34
       - name: the wheel must not reference this runner
         run: python .github/scripts/check_relocatable.py dist
-      # informational: what the binary really needs. libvulkan.so.1 is
-      # listed as external on purpose (see the header).
-      - name: what the wheel requires
-        run: auditwheel show dist/*.whl
+      # The tag is a claim; this checks it. auditwheel names the newest glibc
+      # the binary needs (2_34 when first measured: GLIBC_2.34,
+      # GLIBCXX_3.4.29). It also calls the wheel plain linux_x86_64, only
+      # because libvulkan.so.1 is external on purpose (see the header).
+      - name: the manylinux tag is true
+        run: |
+          auditwheel show dist/*.whl | tee show.txt
+          python - <<'EOF'
+          import re
+          text = " ".join(open("show.txt").read().split())
+          m = re.search(r'constrains the platform tag to "manylinux_2_(\d+)_x86_64"', text)
+          need = int(m.group(1)) if m else 17
+          assert need <= 34, f"binary needs glibc 2.{need}; the wheel claims manylinux_2_34"
+          print(f"binary needs glibc 2.{need}; tag manylinux_2_34 holds")
+          EOF
       - uses: actions/upload-artifact@v4
         with: { name: wheels-linux, path: dist/*.whl }
 

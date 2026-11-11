@@ -133,10 +133,11 @@ jobs:
       - name: the device opens
         run: python -m grilly.doctor
       - name: rust tests
-        run: cargo test --workspace --release -- --test-threads=2
+        run: cargo test --workspace --release --no-fail-fast -- --test-threads=2
       # run from outside the repo so `import grilly` cannot resolve to
       # python/grilly in the checkout, which has no compiled _C in it
       - name: python tests
+        if: ${{ !cancelled() }}   # report these even when a Rust test failed
         working-directory: ${{ runner.temp }}
         run: >
           python -m pytest "$GITHUB_WORKSPACE/tests/python"
