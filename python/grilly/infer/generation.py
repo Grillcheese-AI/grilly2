@@ -8,8 +8,18 @@
 ``generation_config`` and HF's generation keyword arguments, with HF's
 defaults. The supported ones are ``max_length``, ``max_new_tokens``,
 ``do_sample``, ``temperature``, ``top_k``, ``top_p``, ``repetition_penalty``,
-``eos_token_id`` and ``pad_token_id``. It also takes ``attention_mask`` and
-``streamer``. Anything else raises, naming it.
+``eos_token_id`` and ``pad_token_id``. It also takes ``attention_mask``,
+``streamer``, ``logits_processor`` and ``prefix_allowed_tokens_fn``.
+Anything else raises, naming it.
+
+**Steering each token** (transformers' names and order): ``logits_processor``
+is a callable ``(input_ids, scores) -> scores``, or a list of them, run on
+each step's next-token logits after the repetition penalty and before
+temperature, top-k, top-p and the draw; ``prefix_allowed_tokens_fn(batch_id,
+input_ids) -> list[int]`` lets each row draw only the ids it returns, and runs
+before the caller's processors. Both stay on the device
+(:mod:`grilly.infer.logits_process`). With both ``None`` the loop is the one
+without them: the same kernels, the same tokens.
 
 **Batches of unequal length** go in left-padded, as transformers wants for a
 decoder-only model: ``attention_mask`` 0 on each row's leading padding, 1 on
@@ -41,7 +51,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields, replace
 
 from .. import Tensor, _not_yet, _require_tensor, cat, int64, no_grad, tensor
-from . import sampling
+from . import logits_process, sampling
 
 __all__ = ["CausalLMOutput", "GenerationConfig", "GenerationMixin"]
 
@@ -90,7 +100,8 @@ class GenerationMixin:
 
     generation_config: GenerationConfig | None = None
 
-    def generate(self, inputs=None, generation_config: GenerationConfig | None = None, streamer=None, **kwargs) -> Tensor:
+    def generate(self, inputs=None, generation_config: GenerationConfig | None = None, logits_processor=None,
+                 prefix_allowed_tokens_fn=None, streamer=None, **kwargs) -> Tensor:
         if inputs is None:
             inputs = kwargs.pop("input_ids", None)
         if inputs is None:
@@ -124,6 +135,8 @@ class GenerationMixin:
         if pad is None and eos:
             pad = min(eos)
         rows = [list(r) for r in ids.tolist()]
+        processors = logits_process.as_list(logits_processor, prefix_allowed_tokens_fn)
+        prefix = next((p for p in processors if isinstance(p, logits_process.PrefixConstrainedLogitsProcessor)), None)
         if streamer is not None:
             streamer.put(ids)
         if steps <= 0:
@@ -136,7 +149,7 @@ class GenerationMixin:
                 cache = self.make_cache(batch, total, keep=keep if keep is not None else [[1] * prompt] * batch)
             else:
                 cache = self.make_cache(batch, total)
-            history = ids if config.repetition_penalty not in (None, 1.0) else None
+            history = ids if config.repetition_penalty not in (None, 1.0) or processors else None
             unfinished = [True] * batch
             active = list(range(batch))  # the batch row each running row is
             undo: list = []
@@ -145,9 +158,18 @@ class GenerationMixin:
                 for step in range(steps):
                     n = len(active)
                     logits = out.logits.reshape(n, -1)
-                    nxt = sampling.next_token(logits, history, do_sample=config.do_sample,
-                                              temperature=config.temperature, top_k=config.top_k,
-                                              top_p=config.top_p, repetition_penalty=config.repetition_penalty)
+                    if processors:  # the penalty, the processors, then the one kernel for the rest
+                        if prefix is not None:
+                            prefix.batch_ids = active
+                        logits = processors(history, sampling.processed_logits(
+                            logits, history, repetition_penalty=config.repetition_penalty))
+                        nxt = sampling.next_token(logits, None, do_sample=config.do_sample,
+                                                  temperature=config.temperature, top_k=config.top_k,
+                                                  top_p=config.top_p, repetition_penalty=1.0)
+                    else:
+                        nxt = sampling.next_token(logits, history, do_sample=config.do_sample,
+                                                  temperature=config.temperature, top_k=config.top_k,
+                                                  top_p=config.top_p, repetition_penalty=config.repetition_penalty)
                     drawn = nxt.tolist()
                     toks = [pad] * batch
                     for i, r in enumerate(active):
