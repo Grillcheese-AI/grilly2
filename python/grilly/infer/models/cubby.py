@@ -555,8 +555,18 @@ class CubbyForCausalLM(nn.Module, GenerationMixin):
 
     def forward(self, input_ids: Tensor, past_key_values: CubbyState | None = None,
                 logits_to_keep: int = 0) -> CausalLMOutput:
-        """Logits for ``input_ids`` (batch, T). A fresh ``past_key_values``
-        is filled from the whole prompt; a filled one takes one token."""
+        """Logits for ``input_ids`` (batch, T): :meth:`hidden`, then the
+        head. A fresh ``past_key_values`` is filled from the whole prompt; a
+        filled one takes one token."""
+        x = self.hidden(input_ids, past_key_values, logits_to_keep)
+        return CausalLMOutput(logits=self.lm_head(x), past_key_values=past_key_values)
+
+    def hidden(self, input_ids: Tensor, past_key_values: CubbyState | None = None,
+               logits_to_keep: int = 0) -> Tensor:
+        """What the head reads for ``input_ids`` (batch, T): the adapter's
+        output, (batch, T, hidden), at the last ``logits_to_keep`` positions
+        (all of them when 0). ``forward`` without the head; ``generate``
+        calls it when a shortlist picks the token."""
         state = past_key_values
         b, t = input_ids.shape
         start = 0 if state is None else state.position
@@ -590,4 +600,4 @@ class CubbyForCausalLM(nn.Module, GenerationMixin):
         x = self.model.adapter(x, ctx)
         if logits_to_keep:
             x = x.narrow(1, t - logits_to_keep, logits_to_keep)
-        return CausalLMOutput(logits=self.lm_head(x), past_key_values=state)
+        return x
