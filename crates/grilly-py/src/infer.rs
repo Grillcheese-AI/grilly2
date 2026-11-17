@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use grilly_infer::{
     ops, sampling, Heads, Int4Weight, Int8Weight, KvCache, LoadError, Rotary, SafeTensorsFile,
-    Sampling,
+    Sampling, ShortlistHead,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyFileNotFoundError, PyOSError};
@@ -488,7 +488,97 @@ fn swiglu(
         .map_err(err)
 }
 
+/// A vocabulary shortlist head (grilly_infer::ShortlistHead). The
+/// torch-facing wrapper is python/grilly/infer/shortlist.py.
+#[pyclass(name = "ShortlistHead", module = "grilly._C", frozen)]
+struct PyShortlistHead {
+    inner: ShortlistHead,
+}
+
+#[pymethods]
+impl PyShortlistHead {
+    #[new]
+    #[pyo3(signature = (weight, centroids, cluster_ids, cluster_offsets, successors=None, near=2048, context=8192, ranks=256))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        weight: &PyTensor,
+        centroids: &PyTensor,
+        cluster_ids: &PyTensor,
+        cluster_offsets: &PyTensor,
+        successors: Option<&PyTensor>,
+        near: usize,
+        context: usize,
+        ranks: usize,
+    ) -> PyResult<PyShortlistHead> {
+        py.detach(|| {
+            ShortlistHead::new(
+                &weight.inner,
+                &centroids.inner,
+                &cluster_ids.inner,
+                &cluster_offsets.inner,
+                successors.map(|s| &s.inner),
+                near,
+                context,
+                ranks,
+            )
+        })
+        .map(|inner| PyShortlistHead { inner })
+        .map_err(err)
+    }
+
+    /// (token, rows scored, short)
+    #[pyo3(signature = (x, prev=None))]
+    fn argmax(
+        &self,
+        py: Python<'_>,
+        x: &PyTensor,
+        prev: Option<usize>,
+    ) -> PyResult<(usize, usize, bool)> {
+        py.detach(|| self.inner.argmax(&x.inner, prev))
+            .map(|c| (c.token, c.rows, c.short))
+            .map_err(err)
+    }
+
+    /// (the union's rows ascending, short)
+    #[pyo3(signature = (x, prev=None))]
+    fn union(
+        &self,
+        py: Python<'_>,
+        x: &PyTensor,
+        prev: Option<usize>,
+    ) -> PyResult<(Vec<u32>, bool)> {
+        py.detach(|| self.inner.union(&x.inner, prev))
+            .map(|u| (u.rows, u.short))
+            .map_err(err)
+    }
+
+    /// Run the first `stages` dispatches and wait.
+    #[pyo3(signature = (x, prev, stages))]
+    fn profile(
+        &self,
+        py: Python<'_>,
+        x: &PyTensor,
+        prev: Option<usize>,
+        stages: usize,
+    ) -> PyResult<()> {
+        py.detach(|| self.inner.profile(&x.inner, prev, stages))
+            .map_err(err)
+    }
+
+    fn codes(&self) -> PyTensor {
+        wrap(self.inner.codes().clone())
+    }
+
+    /// (vocab, dim)
+    #[getter]
+    fn shape(&self) -> Vec<usize> {
+        self.inner.shape().to_vec()
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyShortlistHead>()?;
     m.add_class::<PySafeFile>()?;
     m.add_class::<PyInt8Weight>()?;
     m.add_class::<PyInt4Weight>()?;

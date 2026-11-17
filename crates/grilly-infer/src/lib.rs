@@ -9,6 +9,7 @@ pub mod quant;
 pub mod quant4;
 pub mod safetensors;
 pub mod sampling;
+pub mod shortlist;
 
 pub use crate::kv_cache::KvCache;
 pub use crate::ops::{rope, swiglu, Heads, Rotary};
@@ -16,3 +17,4 @@ pub use crate::quant::Int8Weight;
 pub use crate::quant4::Int4Weight;
 pub use crate::safetensors::{LoadError, SafeTensorsFile};
 pub use crate::sampling::Sampling;
+pub use crate::shortlist::ShortlistHead;
