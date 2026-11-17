@@ -41,7 +41,11 @@ fn data(n: usize, seed: u64, lo: f32, hi: f32) -> Vec<f32> {
 fn reference(w: &[f32], k: usize, group: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
     let rows = w.len() / k;
     let groups = k.div_ceil(group);
-    let (mut q, mut scale, mut zero) = (vec![0u8; rows * k], vec![0.0; rows * groups], vec![0.0; rows * groups]);
+    let (mut q, mut scale, mut zero) = (
+        vec![0u8; rows * k],
+        vec![0.0; rows * groups],
+        vec![0.0; rows * groups],
+    );
     for r in 0..rows {
         for g in 0..groups {
             let (start, end) = (g * group, ((g + 1) * group).min(k));
@@ -70,7 +74,11 @@ fn levels(weight: &Int4Weight) -> Vec<u8> {
         .map(|i| {
             let (r, c) = (i / k, i % k);
             let byte = bytes[r * row_bytes + c / 2];
-            if c % 2 == 0 { byte & 0xF } else { byte >> 4 }
+            if c % 2 == 0 {
+                byte & 0xF
+            } else {
+                byte >> 4
+            }
         })
         .collect()
 }
@@ -78,15 +86,31 @@ fn levels(weight: &Int4Weight) -> Vec<u8> {
 #[test]
 fn quantized_values_follow_torchaos_formula_exactly() {
     let dev = dev();
-    for (n, k, group) in [(1, 32, 32), (3, 128, 128), (5, 130, 128), (2, 256, 64), (7, 896, 128), (4, 4864, 128)] {
+    for (n, k, group) in [
+        (1, 32, 32),
+        (3, 128, 128),
+        (5, 130, 128),
+        (2, 256, 64),
+        (7, 896, 128),
+        (4, 4864, 128),
+    ] {
         let w = data(n * k, (n + k + group) as u64, -1.5, 1.0);
-        let qw = Int4Weight::quantize(&Tensor::from_slice(&dev, &w, &[n, k]).unwrap(), group).unwrap();
+        let qw =
+            Int4Weight::quantize(&Tensor::from_slice(&dev, &w, &[n, k]).unwrap(), group).unwrap();
         assert_eq!(qw.shape(), [n, k]);
         assert_eq!(qw.group_size(), group);
         let (q, scale, zero) = reference(&w, k, group);
         assert_eq!(levels(&qw), q, "({n}, {k}, group {group}) levels");
-        assert_eq!(qw.scale().to_vec().unwrap(), scale, "({n}, {k}, group {group}) scales");
-        assert_eq!(qw.zero().to_vec().unwrap(), zero, "({n}, {k}, group {group}) zero points");
+        assert_eq!(
+            qw.scale().to_vec().unwrap(),
+            scale,
+            "({n}, {k}, group {group}) scales"
+        );
+        assert_eq!(
+            qw.zero().to_vec().unwrap(),
+            zero,
+            "({n}, {k}, group {group}) zero points"
+        );
 
         // dequantize is q * scale + min, the same multiply-add on both sides
         let got = qw.dequantize().unwrap().to_vec().unwrap();
@@ -95,7 +119,11 @@ fn quantized_values_follow_torchaos_formula_exactly() {
             for i in 0..k {
                 let (s, z) = (scale[r * groups + i / group], zero[r * groups + i / group]);
                 let want = (q[r * k + i] as f32).mul_add(s, z - 8.0 * s);
-                assert_eq!(got[r * k + i].to_bits(), want.to_bits(), "({n}, {k}) dequantize [{r}][{i}]");
+                assert_eq!(
+                    got[r * k + i].to_bits(),
+                    want.to_bits(),
+                    "({n}, {k}) dequantize [{r}][{i}]"
+                );
             }
         }
     }
@@ -110,8 +138,16 @@ fn int4_is_half_the_bytes_of_int8() {
     let four = Int4Weight::quantize(&t, 128).unwrap();
     let eight = grilly_infer::Int8Weight::quantize(&t).unwrap();
     // int4: k/2 bytes per row plus 8 bytes per group; int8: k plus 4
-    assert_eq!(four.nbytes(), n * (k.div_ceil(32) * 16 + 8 * k.div_ceil(128)));
-    println!("int4 {} bytes, int8 {} bytes: {:.2}x", four.nbytes(), eight.nbytes(), eight.nbytes() as f64 / four.nbytes() as f64);
+    assert_eq!(
+        four.nbytes(),
+        n * (k.div_ceil(32) * 16 + 8 * k.div_ceil(128))
+    );
+    println!(
+        "int4 {} bytes, int8 {} bytes: {:.2}x",
+        four.nbytes(),
+        eight.nbytes(),
+        eight.nbytes() as f64 / four.nbytes() as f64
+    );
     assert!((four.nbytes() as f64) < 0.6 * eight.nbytes() as f64);
 }
 
@@ -119,11 +155,19 @@ fn int4_is_half_the_bytes_of_int8() {
 fn linear_matches_a_float64_reference_within_its_bound() {
     let dev = dev();
     let mut worst = 0.0f64;
-    for (m, n, k, group) in [(1, 1, 32, 32), (1, 5, 128, 128), (3, 4, 130, 128), (8, 7, 256, 64), (2, 64, 896, 128), (9, 6, 4864, 128)] {
+    for (m, n, k, group) in [
+        (1, 1, 32, 32),
+        (1, 5, 128, 128),
+        (3, 4, 130, 128),
+        (8, 7, 256, 64),
+        (2, 64, 896, 128),
+        (9, 6, 4864, 128),
+    ] {
         let w = data(n * k, (m + n + k) as u64, -1.0, 1.0);
         let x = data(m * k, (m * n * k) as u64 + 7, -2.0, 2.0);
         let b = data(n, 99, -0.5, 0.5);
-        let qw = Int4Weight::quantize(&Tensor::from_slice(&dev, &w, &[n, k]).unwrap(), group).unwrap();
+        let qw =
+            Int4Weight::quantize(&Tensor::from_slice(&dev, &w, &[n, k]).unwrap(), group).unwrap();
         let (q, scale, zero) = reference(&w, k, group);
         let groups = k.div_ceil(group);
         // each lane chains its groups' products, then a 64-lane tree
@@ -137,7 +181,10 @@ fn linear_matches_a_float64_reference_within_its_bound() {
                 for c in 0..n {
                     let (mut dot, mut mag) = (0.0f64, 0.0f64);
                     for i in 0..k {
-                        let (s, z) = (scale[c * groups + i / group] as f64, zero[c * groups + i / group] as f64);
+                        let (s, z) = (
+                            scale[c * groups + i / group] as f64,
+                            zero[c * groups + i / group] as f64,
+                        );
                         let wv = q[c * k + i] as f64 * s + (z - 8.0 * s);
                         let p = x[r * k + i] as f64 * wv;
                         dot += p;
@@ -161,7 +208,10 @@ fn refusals() {
     let dev = dev();
     let t = Tensor::from_slice(&dev, &[1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
     assert!(Int4Weight::quantize(&t, 0).is_err(), "group_size 0");
-    assert!(Int4Weight::quantize(&t, 12).is_err(), "group_size not a multiple of 32");
+    assert!(
+        Int4Weight::quantize(&t, 12).is_err(),
+        "group_size not a multiple of 32"
+    );
     let w = Int4Weight::quantize(&t, 32).unwrap();
     let x = Tensor::from_slice(&dev, &[1.0, 2.0, 3.0], &[1, 3]).unwrap();
     assert!(w.linear(&x, None).is_err(), "k mismatch");

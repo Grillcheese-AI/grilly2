@@ -13,53 +13,209 @@ use crate::tensor::Tensor;
 
 const MAX_DIMS: usize = 6;
 
-pub const UNARY: Kernel = Kernel { shader: "g2-unary", bindings: 2, push_words: 6, local_size: [256, 1, 1] };
-pub const BINARY: Kernel = Kernel { shader: "g2-binary", bindings: 3, push_words: 6 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
-pub const REDUCE: Kernel = Kernel { shader: "g2-reduce", bindings: 2, push_words: 11, local_size: [256, 1, 1] };
-pub const REDUCE_ROWS: Kernel = Kernel { shader: "g2-reduce-rows", bindings: 2, push_words: 10, local_size: [256, 1, 1] };
-pub const COPY: Kernel = Kernel { shader: "g2-copy", bindings: 2, push_words: 4 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
+pub const UNARY: Kernel = Kernel {
+    shader: "g2-unary",
+    bindings: 2,
+    push_words: 6,
+    local_size: [256, 1, 1],
+};
+pub const BINARY: Kernel = Kernel {
+    shader: "g2-binary",
+    bindings: 3,
+    push_words: 6 + 3 * MAX_DIMS as u32,
+    local_size: [256, 1, 1],
+};
+pub const REDUCE: Kernel = Kernel {
+    shader: "g2-reduce",
+    bindings: 2,
+    push_words: 11,
+    local_size: [256, 1, 1],
+};
+pub const REDUCE_ROWS: Kernel = Kernel {
+    shader: "g2-reduce-rows",
+    bindings: 2,
+    push_words: 10,
+    local_size: [256, 1, 1],
+};
+pub const COPY: Kernel = Kernel {
+    shader: "g2-copy",
+    bindings: 2,
+    push_words: 4 + 3 * MAX_DIMS as u32,
+    local_size: [256, 1, 1],
+};
 
-pub const CAST: Kernel = Kernel { shader: "g2-cast", bindings: 2, push_words: 5, local_size: [256, 1, 1] };
+pub const CAST: Kernel = Kernel {
+    shader: "g2-cast",
+    bindings: 2,
+    push_words: 5,
+    local_size: [256, 1, 1],
+};
 /// Push: n, dtype, start (2 words), step (2 words), dst offset.
-pub const ARANGE: Kernel = Kernel { shader: "g2-arange", bindings: 1, push_words: 7, local_size: [256, 1, 1] };
+pub const ARANGE: Kernel = Kernel {
+    shader: "g2-arange",
+    bindings: 1,
+    push_words: 7,
+    local_size: [256, 1, 1],
+};
 /// Push: n, out offset, key (2 words), stream (2 words), std bits.
-pub const PHILOX_NORMAL: Kernel =
-    Kernel { shader: "g2-philox-normal", bindings: 1, push_words: 7, local_size: [256, 1, 1] };
-pub const BINARY_INT: Kernel = Kernel { shader: "g2-binary-int", bindings: 3, push_words: 7 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
-pub const WHERE: Kernel = Kernel { shader: "g2-where", bindings: 4, push_words: 7 + 4 * MAX_DIMS as u32, local_size: [256, 1, 1] };
-pub const REDUCE_INT: Kernel = Kernel { shader: "g2-reduce-int", bindings: 2, push_words: 6, local_size: [256, 1, 1] };
+pub const PHILOX_NORMAL: Kernel = Kernel {
+    shader: "g2-philox-normal",
+    bindings: 1,
+    push_words: 7,
+    local_size: [256, 1, 1],
+};
+pub const BINARY_INT: Kernel = Kernel {
+    shader: "g2-binary-int",
+    bindings: 3,
+    push_words: 7 + 3 * MAX_DIMS as u32,
+    local_size: [256, 1, 1],
+};
+pub const WHERE: Kernel = Kernel {
+    shader: "g2-where",
+    bindings: 4,
+    push_words: 7 + 4 * MAX_DIMS as u32,
+    local_size: [256, 1, 1],
+};
+pub const REDUCE_INT: Kernel = Kernel {
+    shader: "g2-reduce-int",
+    bindings: 2,
+    push_words: 6,
+    local_size: [256, 1, 1],
+};
 /// Contiguous int64 rows, a workgroup each. Push: rows, len, chunk, chunks, op, in_off, out_off.
-pub const REDUCE_INT_ROWS: Kernel =
-    Kernel { shader: "g2-reduce-int-rows", bindings: 2, push_words: 7, local_size: [256, 1, 1] };
+pub const REDUCE_INT_ROWS: Kernel = Kernel {
+    shader: "g2-reduce-int-rows",
+    bindings: 2,
+    push_words: 7,
+    local_size: [256, 1, 1],
+};
 
-pub const INDEX: Kernel = Kernel { shader: "g2-index", bindings: 3, push_words: 9 + 2 * MAX_DIMS as u32, local_size: [256, 1, 1] };
-pub const INDEX_ADD: Kernel = Kernel { shader: "g2-index-add", bindings: 3, push_words: 9 + 2 * MAX_DIMS as u32, local_size: [256, 1, 1] };
-pub const INDEX_ADD_ATOMIC: Kernel = Kernel { shader: "g2-index-add-atomic", bindings: 3, push_words: 9 + 2 * MAX_DIMS as u32, local_size: [256, 1, 1] };
+pub const INDEX: Kernel = Kernel {
+    shader: "g2-index",
+    bindings: 3,
+    push_words: 9 + 2 * MAX_DIMS as u32,
+    local_size: [256, 1, 1],
+};
+pub const INDEX_ADD: Kernel = Kernel {
+    shader: "g2-index-add",
+    bindings: 3,
+    push_words: 9 + 2 * MAX_DIMS as u32,
+    local_size: [256, 1, 1],
+};
+pub const INDEX_ADD_ATOMIC: Kernel = Kernel {
+    shader: "g2-index-add-atomic",
+    bindings: 3,
+    push_words: 9 + 2 * MAX_DIMS as u32,
+    local_size: [256, 1, 1],
+};
 
-pub const ARG_REDUCE: Kernel = Kernel { shader: "g2-argreduce", bindings: 2, push_words: 7, local_size: [256, 1, 1] };
+pub const ARG_REDUCE: Kernel = Kernel {
+    shader: "g2-argreduce",
+    bindings: 2,
+    push_words: 7,
+    local_size: [256, 1, 1],
+};
 /// Contiguous rows, a workgroup each. Push: rows, len, is_max, is_int, in_off, out_off.
-pub const ARG_REDUCE_ROWS: Kernel = Kernel { shader: "g2-argreduce-rows", bindings: 2, push_words: 6, local_size: [256, 1, 1] };
-pub const SORT_INIT: Kernel = Kernel { shader: "g2-sort-init", bindings: 3, push_words: 5, local_size: [256, 1, 1] };
-pub const SORT_STEP: Kernel = Kernel { shader: "g2-sort-step", bindings: 2, push_words: 7, local_size: [256, 1, 1] };
-pub const SORT_TAKE: Kernel = Kernel { shader: "g2-sort-take", bindings: 2, push_words: 3, local_size: [256, 1, 1] };
+pub const ARG_REDUCE_ROWS: Kernel = Kernel {
+    shader: "g2-argreduce-rows",
+    bindings: 2,
+    push_words: 6,
+    local_size: [256, 1, 1],
+};
+pub const SORT_INIT: Kernel = Kernel {
+    shader: "g2-sort-init",
+    bindings: 3,
+    push_words: 5,
+    local_size: [256, 1, 1],
+};
+pub const SORT_STEP: Kernel = Kernel {
+    shader: "g2-sort-step",
+    bindings: 2,
+    push_words: 7,
+    local_size: [256, 1, 1],
+};
+pub const SORT_TAKE: Kernel = Kernel {
+    shader: "g2-sort-take",
+    bindings: 2,
+    push_words: 3,
+    local_size: [256, 1, 1],
+};
 /// Small-k top-k, a workgroup per (row, chunk). Push: rows, n, k, chunk,
 /// chunks, in_off, descending, merging.
-pub const TOPK: Kernel = Kernel { shader: "g2-topk", bindings: 4, push_words: 8, local_size: [64, 1, 1] };
+pub const TOPK: Kernel = Kernel {
+    shader: "g2-topk",
+    bindings: 4,
+    push_words: 8,
+    local_size: [64, 1, 1],
+};
 
-pub const SCATTER: Kernel = Kernel { shader: "g2-scatter", bindings: 3, push_words: 8 + 3 * MAX_DIMS as u32, local_size: [256, 1, 1] };
-pub const SCAN: Kernel = Kernel { shader: "g2-scan", bindings: 2, push_words: 8, local_size: [256, 1, 1] };
+pub const SCATTER: Kernel = Kernel {
+    shader: "g2-scatter",
+    bindings: 3,
+    push_words: 8 + 3 * MAX_DIMS as u32,
+    local_size: [256, 1, 1],
+};
+pub const SCAN: Kernel = Kernel {
+    shader: "g2-scan",
+    bindings: 2,
+    push_words: 8,
+    local_size: [256, 1, 1],
+};
 
-pub const BMM: Kernel = Kernel { shader: "g2-bmm", bindings: 3, push_words: 9 + 3 * MAX_BATCH_DIMS as u32, local_size: [16, 16, 1] };
+pub const BMM: Kernel = Kernel {
+    shader: "g2-bmm",
+    bindings: 3,
+    push_words: 9 + 3 * MAX_BATCH_DIMS as u32,
+    local_size: [16, 16, 1],
+};
 
-pub const LAYER_NORM: Kernel = Kernel { shader: "g2-layer-norm", bindings: 5, push_words: 7, local_size: [256, 1, 1] };
+pub const LAYER_NORM: Kernel = Kernel {
+    shader: "g2-layer-norm",
+    bindings: 5,
+    push_words: 7,
+    local_size: [256, 1, 1],
+};
 /// Bindings: x, residual, weight, y, h. Push: rows, n, eps, flags, x_off, r_off, w_off.
-pub const RMS_NORM: Kernel = Kernel { shader: "g2-rms-norm", bindings: 5, push_words: 7, local_size: [256, 1, 1] };
-pub const LAYER_NORM_BACKWARD: Kernel =
-    Kernel { shader: "g2-layer-norm-backward", bindings: 6, push_words: 7, local_size: [256, 1, 1] };
+pub const RMS_NORM: Kernel = Kernel {
+    shader: "g2-rms-norm",
+    bindings: 5,
+    push_words: 7,
+    local_size: [256, 1, 1],
+};
+pub const LAYER_NORM_BACKWARD: Kernel = Kernel {
+    shader: "g2-layer-norm-backward",
+    bindings: 6,
+    push_words: 7,
+    local_size: [256, 1, 1],
+};
 
 pub const ALL: &[Kernel] = &[
-    UNARY, BINARY, REDUCE, COPY, CAST, ARANGE, PHILOX_NORMAL, BINARY_INT, WHERE, REDUCE_INT, INDEX, INDEX_ADD, INDEX_ADD_ATOMIC,
-    REDUCE_INT_ROWS, ARG_REDUCE, ARG_REDUCE_ROWS, RMS_NORM, SORT_INIT, SORT_STEP, SORT_TAKE, TOPK, SCATTER, SCAN, BMM, REDUCE_ROWS, LAYER_NORM,
+    UNARY,
+    BINARY,
+    REDUCE,
+    COPY,
+    CAST,
+    ARANGE,
+    PHILOX_NORMAL,
+    BINARY_INT,
+    WHERE,
+    REDUCE_INT,
+    INDEX,
+    INDEX_ADD,
+    INDEX_ADD_ATOMIC,
+    REDUCE_INT_ROWS,
+    ARG_REDUCE,
+    ARG_REDUCE_ROWS,
+    RMS_NORM,
+    SORT_INIT,
+    SORT_STEP,
+    SORT_TAKE,
+    TOPK,
+    SCATTER,
+    SCAN,
+    BMM,
+    REDUCE_ROWS,
+    LAYER_NORM,
     LAYER_NORM_BACKWARD,
 ];
 
@@ -212,8 +368,16 @@ pub fn broadcast_shape(a: &[usize], b: &[usize]) -> Result<Vec<usize>> {
     let n = a.len().max(b.len());
     let mut out = vec![0; n];
     for i in 0..n {
-        let da = if i + a.len() >= n { a[i + a.len() - n] } else { 1 };
-        let db = if i + b.len() >= n { b[i + b.len() - n] } else { 1 };
+        let da = if i + a.len() >= n {
+            a[i + a.len() - n]
+        } else {
+            1
+        };
+        let db = if i + b.len() >= n {
+            b[i + b.len() - n]
+        } else {
+            1
+        };
         out[i] = match (da, db) {
             (x, y) if x == y => x,
             (1, y) => y,
@@ -235,13 +399,21 @@ pub(crate) fn broadcast_strides(shape: &[usize], out_shape: &[usize]) -> Vec<usi
     let own = contiguous_strides(shape);
     let lead = out_shape.len() - shape.len();
     (0..out_shape.len())
-        .map(|i| if i < lead || shape[i - lead] == 1 { 0 } else { own[i - lead] })
+        .map(|i| {
+            if i < lead || shape[i - lead] == 1 {
+                0
+            } else {
+                own[i - lead]
+            }
+        })
         .collect()
 }
 
 fn padded(v: &[usize], what: &str) -> Result<[u32; MAX_DIMS]> {
     if v.len() > MAX_DIMS {
-        return Err(Error::NotImplemented(format!("{what} with more than {MAX_DIMS} dimensions")));
+        return Err(Error::NotImplemented(format!(
+            "{what} with more than {MAX_DIMS} dimensions"
+        )));
     }
     let mut out = [1u32; MAX_DIMS];
     for (o, &x) in out.iter_mut().zip(v) {
@@ -254,8 +426,20 @@ fn padded(v: &[usize], what: &str) -> Result<[u32; MAX_DIMS]> {
 pub fn unary(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<Tensor> {
     require_float("elementwise math", x.dtype())?;
     let out = Tensor::empty(x.device(), x.shape())?;
-    let push = [u32_of(x.numel(), "numel")?, op as u32, a.to_bits(), b.to_bits(), u32_of(x.offset(), "offset")?, 0];
-    UNARY.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], x.numel(), &push)?;
+    let push = [
+        u32_of(x.numel(), "numel")?,
+        op as u32,
+        a.to_bits(),
+        b.to_bits(),
+        u32_of(x.offset(), "offset")?,
+        0,
+    ];
+    UNARY.launch_flat(
+        x.device(),
+        &[Arg::Storage(x), Arg::Storage(&out)],
+        x.numel(),
+        &push,
+    )?;
     Ok(out)
 }
 
@@ -263,8 +447,20 @@ pub fn unary(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<Tensor> {
 pub fn unary_inplace(x: &Tensor, op: Unary, a: f32, b: f32) -> Result<()> {
     require_float("elementwise math", x.dtype())?;
     let off = u32_of(x.offset(), "offset")?;
-    let push = [u32_of(x.numel(), "numel")?, op as u32, a.to_bits(), b.to_bits(), off, off];
-    UNARY.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(x)], x.numel(), &push)?;
+    let push = [
+        u32_of(x.numel(), "numel")?,
+        op as u32,
+        a.to_bits(),
+        b.to_bits(),
+        off,
+        off,
+    ];
+    UNARY.launch_flat(
+        x.device(),
+        &[Arg::Storage(x), Arg::Storage(x)],
+        x.numel(),
+        &push,
+    )?;
     x.bump_version();
     Ok(())
 }
@@ -286,7 +482,12 @@ pub fn binary(a: &Tensor, b: &Tensor, op: Binary) -> Result<Tensor> {
     push.extend(padded(&shape, "binary op")?);
     push.extend(padded(&broadcast_strides(a.shape(), &shape), "binary op")?);
     push.extend(padded(&broadcast_strides(b.shape(), &shape), "binary op")?);
-    BINARY.launch_flat(a.device(), &[Arg::Storage(a), Arg::Storage(b), Arg::Storage(&out)], out.numel(), &push)?;
+    BINARY.launch_flat(
+        a.device(),
+        &[Arg::Storage(a), Arg::Storage(b), Arg::Storage(&out)],
+        out.numel(),
+        &push,
+    )?;
     Ok(out)
 }
 
@@ -295,7 +496,9 @@ pub fn reduce(x: &Tensor, dim: usize, op: Reduce, keepdim: bool) -> Result<Tenso
     require_float("reductions", x.dtype())?;
     let shape = x.shape();
     if dim >= shape.len() {
-        return Err(Error::Shape(format!("reduce: dim {dim} out of range for shape {shape:?}")));
+        return Err(Error::Shape(format!(
+            "reduce: dim {dim} out of range for shape {shape:?}"
+        )));
     }
     let outer: usize = shape[..dim].iter().product();
     let len = shape[dim];
@@ -332,23 +535,60 @@ const COLUMN_THREADS: usize = 65_536;
 /// per (output, chunk). With few outputs the axis is split into chunks
 /// whose (hi, lo) partials are reduced the same way, pass after pass (each
 /// shortens the axis at least 64-fold), until one chunk is left.
-fn reduce_columns(x: &Tensor, outer: usize, len: usize, inner: usize, op: Reduce, out: &Tensor) -> Result<()> {
+fn reduce_columns(
+    x: &Tensor,
+    outer: usize,
+    len: usize,
+    inner: usize,
+    op: Reduce,
+    out: &Tensor,
+) -> Result<()> {
     let outputs = outer * inner;
-    let (o32, i32_, count) = (u32_of(outer, "outer")?, u32_of(inner, "inner")?, u32_of(len, "len")?);
+    let (o32, i32_, count) = (
+        u32_of(outer, "outer")?,
+        u32_of(inner, "inner")?,
+        u32_of(len, "len")?,
+    );
     let out_off = u32_of(out.offset(), "offset")?;
-    let (mut src, mut len, mut pairs_in, mut off) = (x.clone(), len, 0, u32_of(x.offset(), "offset")?);
+    let (mut src, mut len, mut pairs_in, mut off) =
+        (x.clone(), len, 0, u32_of(x.offset(), "offset")?);
     loop {
-        let wanted = if outputs >= COLUMN_THREADS { 1 } else { COLUMN_THREADS.div_ceil(outputs).min(len.div_ceil(64)).max(1) };
+        let wanted = if outputs >= COLUMN_THREADS {
+            1
+        } else {
+            COLUMN_THREADS
+                .div_ceil(outputs)
+                .min(len.div_ceil(64))
+                .max(1)
+        };
         let chunk = len.div_ceil(wanted).max(1);
         let chunks = len.div_ceil(chunk).max(1);
-        let (l32, c32, k32) = (u32_of(len, "len")?, u32_of(chunks, "chunks")?, u32_of(chunk, "chunk")?);
+        let (l32, c32, k32) = (
+            u32_of(len, "len")?,
+            u32_of(chunks, "chunks")?,
+            u32_of(chunk, "chunk")?,
+        );
         if chunks == 1 {
-            let push = [o32, l32, i32_, op as u32, off, out_off, k32, 1, pairs_in, 0, count];
-            return REDUCE.launch_flat(x.device(), &[Arg::Storage(&src), Arg::Storage(out)], outputs, &push);
+            let push = [
+                o32, l32, i32_, op as u32, off, out_off, k32, 1, pairs_in, 0, count,
+            ];
+            return REDUCE.launch_flat(
+                x.device(),
+                &[Arg::Storage(&src), Arg::Storage(out)],
+                outputs,
+                &push,
+            );
         }
         let partial = Tensor::empty(x.device(), &[outputs * chunks * 2])?;
-        let push = [o32, l32, i32_, op as u32, off, 0, k32, c32, pairs_in, 1, count];
-        REDUCE.launch_flat(x.device(), &[Arg::Storage(&src), Arg::Storage(&partial)], outputs * chunks, &push)?;
+        let push = [
+            o32, l32, i32_, op as u32, off, 0, k32, c32, pairs_in, 1, count,
+        ];
+        REDUCE.launch_flat(
+            x.device(),
+            &[Arg::Storage(&src), Arg::Storage(&partial)],
+            outputs * chunks,
+            &push,
+        )?;
         (src, len, pairs_in, off) = (partial, chunks, 1, 0);
     }
 }
@@ -359,31 +599,73 @@ const TARGET_GROUPS: usize = 512;
 /// Reduce `rows` contiguous rows of `len` floats starting at element
 /// `offset` of `x`'s storage into `out` (one value per row). Rows too long
 /// for the row count are split into chunks and finished by a second pass.
-fn reduce_rows(x: &Tensor, offset: usize, rows: usize, len: usize, op: Reduce, out: &Tensor) -> Result<()> {
-    let wanted = if rows >= TARGET_GROUPS { 1 } else { (TARGET_GROUPS / rows).min(len.div_ceil(2048)).max(1) };
+fn reduce_rows(
+    x: &Tensor,
+    offset: usize,
+    rows: usize,
+    len: usize,
+    op: Reduce,
+    out: &Tensor,
+) -> Result<()> {
+    let wanted = if rows >= TARGET_GROUPS {
+        1
+    } else {
+        (TARGET_GROUPS / rows).min(len.div_ceil(2048)).max(1)
+    };
     let chunk = len.div_ceil(wanted);
     let chunks = len.div_ceil(chunk);
     let groups = rows * chunks;
     let gx = groups.min(65_535);
-    let threads = [u32_of(gx * 256, "workgroups")?, u32_of(groups.div_ceil(gx), "workgroups")?, 1];
+    let threads = [
+        u32_of(gx * 256, "workgroups")?,
+        u32_of(groups.div_ceil(gx), "workgroups")?,
+        1,
+    ];
     let launch = |src: &Tensor, push: [u32; 10], dst: &Tensor| {
-        REDUCE_ROWS.launch(x.device(), &[Arg::Storage(src), Arg::Storage(dst)], threads, &push)
+        REDUCE_ROWS.launch(
+            x.device(),
+            &[Arg::Storage(src), Arg::Storage(dst)],
+            threads,
+            &push,
+        )
     };
-    let (rows32, len32, count) = (u32_of(rows, "rows")?, u32_of(len, "len")?, u32_of(len, "len")?);
+    let (rows32, len32, count) = (
+        u32_of(rows, "rows")?,
+        u32_of(len, "len")?,
+        u32_of(len, "len")?,
+    );
     let off = u32_of(offset, "offset")?;
     let out_off = u32_of(out.offset(), "offset")?;
     if chunks == 1 {
-        return launch(x, [rows32, len32, len32, 1, op as u32, off, out_off, 0, 0, count], out);
+        return launch(
+            x,
+            [
+                rows32, len32, len32, 1, op as u32, off, out_off, 0, 0, count,
+            ],
+            out,
+        );
     }
     let partial = Tensor::empty(x.device(), &[groups * 2])?;
     let (chunk32, chunks32) = (u32_of(chunk, "chunk")?, u32_of(chunks, "chunks")?);
-    launch(x, [rows32, len32, chunk32, chunks32, op as u32, off, 0, 0, 1, count], &partial)?;
-    let threads2 = [u32_of(rows.min(65_535) * 256, "workgroups")?, u32_of(rows.div_ceil(65_535), "workgroups")?, 1];
+    launch(
+        x,
+        [
+            rows32, len32, chunk32, chunks32, op as u32, off, 0, 0, 1, count,
+        ],
+        &partial,
+    )?;
+    let threads2 = [
+        u32_of(rows.min(65_535) * 256, "workgroups")?,
+        u32_of(rows.div_ceil(65_535), "workgroups")?,
+        1,
+    ];
     REDUCE_ROWS.launch(
         x.device(),
         &[Arg::Storage(&partial), Arg::Storage(out)],
         threads2,
-        &[rows32, chunks32, chunks32, 1, op as u32, 0, out_off, 1, 0, count],
+        &[
+            rows32, chunks32, chunks32, 1, op as u32, 0, out_off, 1, 0, count,
+        ],
     )
 }
 
@@ -409,7 +691,10 @@ pub fn sum_to_shape(g: &Tensor, shape: &[usize]) -> Result<Tensor> {
         }
     }
     if t.shape() != shape {
-        return Err(Error::Shape(format!("cannot sum shape {:?} down to {shape:?}", g.shape())));
+        return Err(Error::Shape(format!(
+            "cannot sum shape {:?} down to {shape:?}",
+            g.shape()
+        )));
     }
     Ok(t)
 }
@@ -428,7 +713,9 @@ pub fn copy_strided(
     shape: &[usize],
 ) -> Result<()> {
     if src_strides.len() != shape.len() || dst_strides.len() != shape.len() {
-        return Err(Error::Invalid("copy_strided: strides must match the shape's rank".into()));
+        return Err(Error::Invalid(
+            "copy_strided: strides must match the shape's rank".into(),
+        ));
     }
     if src.dtype() != dst.dtype() {
         return Err(Error::Invalid(format!(
@@ -450,11 +737,21 @@ pub fn copy_strided(
         ds.push(1);
     }
     let n: usize = shape.iter().product();
-    let mut push = vec![u32_of(n, "numel")?, shape.len() as u32, u32_of(src_off * w, "offset")?, u32_of(dst_off * w, "offset")?];
+    let mut push = vec![
+        u32_of(n, "numel")?,
+        shape.len() as u32,
+        u32_of(src_off * w, "offset")?,
+        u32_of(dst_off * w, "offset")?,
+    ];
     push.extend(padded(&shape, "strided copy")?);
     push.extend(padded(&ss, "strided copy")?);
     push.extend(padded(&ds, "strided copy")?);
-    COPY.launch_flat(src.device(), &[Arg::Storage(src), Arg::Storage(dst)], n, &push)
+    COPY.launch_flat(
+        src.device(),
+        &[Arg::Storage(src), Arg::Storage(dst)],
+        n,
+        &push,
+    )
 }
 
 /// [`copy_strided`] as an in-place write into an existing tensor: bumps
@@ -484,7 +781,12 @@ pub fn cast(x: &Tensor, dtype: DType) -> Result<Tensor> {
         u32_of(x.offset() * x.dtype().words(), "offset")?,
         0,
     ];
-    CAST.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], x.numel(), &push)?;
+    CAST.launch_flat(
+        x.device(),
+        &[Arg::Storage(x), Arg::Storage(&out)],
+        x.numel(),
+        &push,
+    )?;
     Ok(out)
 }
 
@@ -495,7 +797,13 @@ pub fn cast(x: &Tensor, dtype: DType) -> Result<Tensor> {
 /// `arange(n) < length` mask in a decode step went through that, so the
 /// step could not be recorded. Integer starts and steps travel as two
 /// words so the whole int64 range survives the push constant.
-pub fn arange(device: &crate::Device, n: usize, start: i64, step: i64, dtype: DType) -> Result<Tensor> {
+pub fn arange(
+    device: &crate::Device,
+    n: usize,
+    start: i64,
+    step: i64,
+    dtype: DType,
+) -> Result<Tensor> {
     let out = Tensor::empty_typed(device, &[n], dtype)?;
     if n == 0 {
         return Ok(out);
@@ -508,9 +816,22 @@ pub fn arange(device: &crate::Device, n: usize, start: i64, step: i64, dtype: DT
             step as u64 as u32,
             (step as u64 >> 32) as u32,
         ),
-        _ => return Err(Error::Invalid(format!("arange: no {} sequence", dtype.name()))),
+        _ => {
+            return Err(Error::Invalid(format!(
+                "arange: no {} sequence",
+                dtype.name()
+            )))
+        }
     };
-    let push = [u32_of(n, "numel")?, dtype.code(), start_lo, start_hi, step_lo, step_hi, 0];
+    let push = [
+        u32_of(n, "numel")?,
+        dtype.code(),
+        start_lo,
+        start_hi,
+        step_lo,
+        step_hi,
+        0,
+    ];
     ARANGE.launch_flat(device, &[Arg::Storage(&out)], n, &push)?;
     Ok(out)
 }
@@ -579,7 +900,15 @@ pub fn arange_f32(device: &crate::Device, n: usize, start: f32, step: f32) -> Re
     if n == 0 {
         return Ok(out);
     }
-    let push = [u32_of(n, "numel")?, DType::F32.code(), start.to_bits(), 0, step.to_bits(), 0, 0];
+    let push = [
+        u32_of(n, "numel")?,
+        DType::F32.code(),
+        start.to_bits(),
+        0,
+        step.to_bits(),
+        0,
+        0,
+    ];
     ARANGE.launch_flat(device, &[Arg::Storage(&out)], n, &push)?;
     Ok(out)
 }
@@ -588,7 +917,11 @@ fn require(dtype: DType, want: DType, what: &str) -> Result<()> {
     if dtype == want {
         Ok(())
     } else {
-        Err(Error::Invalid(format!("{what}: expected {} operands, got {}", want.name(), dtype.name())))
+        Err(Error::Invalid(format!(
+            "{what}: expected {} operands, got {}",
+            want.name(),
+            dtype.name()
+        )))
     }
 }
 
@@ -599,9 +932,21 @@ pub fn binary_int(a: &Tensor, b: &Tensor, op: IntBinary, out_bool: bool) -> Resu
     require(a.dtype(), DType::I64, "integer op")?;
     require(b.dtype(), DType::I64, "integer op")?;
     let shape = broadcast_shape(a.shape(), b.shape())?;
-    let comparison = matches!(op, IntBinary::Eq | IntBinary::Ne | IntBinary::Gt | IntBinary::Ge | IntBinary::Lt | IntBinary::Le);
+    let comparison = matches!(
+        op,
+        IntBinary::Eq
+            | IntBinary::Ne
+            | IntBinary::Gt
+            | IntBinary::Ge
+            | IntBinary::Lt
+            | IntBinary::Le
+    );
     let to_bool = out_bool || comparison;
-    let out = Tensor::empty_typed(a.device(), &shape, if to_bool { DType::Bool } else { DType::I64 })?;
+    let out = Tensor::empty_typed(
+        a.device(),
+        &shape,
+        if to_bool { DType::Bool } else { DType::I64 },
+    )?;
     let mut push = vec![
         u32_of(out.numel(), "numel")?,
         op as u32,
@@ -614,7 +959,12 @@ pub fn binary_int(a: &Tensor, b: &Tensor, op: IntBinary, out_bool: bool) -> Resu
     push.extend(padded(&shape, "integer op")?);
     push.extend(padded(&broadcast_strides(a.shape(), &shape), "integer op")?);
     push.extend(padded(&broadcast_strides(b.shape(), &shape), "integer op")?);
-    BINARY_INT.launch_flat(a.device(), &[Arg::Storage(a), Arg::Storage(b), Arg::Storage(&out)], out.numel(), &push)?;
+    BINARY_INT.launch_flat(
+        a.device(),
+        &[Arg::Storage(a), Arg::Storage(b), Arg::Storage(&out)],
+        out.numel(),
+        &push,
+    )?;
     Ok(out)
 }
 
@@ -623,7 +973,11 @@ pub fn binary_int(a: &Tensor, b: &Tensor, op: IntBinary, out_bool: bool) -> Resu
 pub fn where_select(cond: &Tensor, a: &Tensor, b: &Tensor) -> Result<Tensor> {
     require(cond.dtype(), DType::Bool, "where condition")?;
     if a.dtype() != b.dtype() {
-        return Err(Error::Invalid(format!("where: {} and {} values", a.dtype().name(), b.dtype().name())));
+        return Err(Error::Invalid(format!(
+            "where: {} and {} values",
+            a.dtype().name(),
+            b.dtype().name()
+        )));
     }
     let shape = broadcast_shape(&broadcast_shape(cond.shape(), a.shape())?, b.shape())?;
     let out = Tensor::empty_typed(a.device(), &shape, a.dtype())?;
@@ -640,7 +994,17 @@ pub fn where_select(cond: &Tensor, a: &Tensor, b: &Tensor) -> Result<Tensor> {
     push.extend(padded(&broadcast_strides(cond.shape(), &shape), "where")?);
     push.extend(padded(&broadcast_strides(a.shape(), &shape), "where")?);
     push.extend(padded(&broadcast_strides(b.shape(), &shape), "where")?);
-    WHERE.launch_flat(a.device(), &[Arg::Storage(cond), Arg::Storage(a), Arg::Storage(b), Arg::Storage(&out)], out.numel(), &push)?;
+    WHERE.launch_flat(
+        a.device(),
+        &[
+            Arg::Storage(cond),
+            Arg::Storage(a),
+            Arg::Storage(b),
+            Arg::Storage(&out),
+        ],
+        out.numel(),
+        &push,
+    )?;
     Ok(out)
 }
 
@@ -652,11 +1016,19 @@ pub fn reduce_int(x: &Tensor, dim: usize, op: Reduce, keepdim: bool) -> Result<T
     }
     let shape = x.shape();
     if dim >= shape.len() {
-        return Err(Error::Shape(format!("reduce: dim {dim} out of range for shape {shape:?}")));
+        return Err(Error::Shape(format!(
+            "reduce: dim {dim} out of range for shape {shape:?}"
+        )));
     }
-    let (outer, len, inner): (usize, usize, usize) = (shape[..dim].iter().product(), shape[dim], shape[dim + 1..].iter().product());
+    let (outer, len, inner): (usize, usize, usize) = (
+        shape[..dim].iter().product(),
+        shape[dim],
+        shape[dim + 1..].iter().product(),
+    );
     if len == 0 && op != Reduce::Sum {
-        return Err(Error::Invalid(format!("max(): Expected reduction dim {dim} to have non-zero size.")));
+        return Err(Error::Invalid(format!(
+            "max(): Expected reduction dim {dim} to have non-zero size."
+        )));
     }
     let mut out_shape = shape.to_vec();
     if keepdim {
@@ -671,8 +1043,20 @@ pub fn reduce_int(x: &Tensor, dim: usize, op: Reduce, keepdim: bool) -> Result<T
         reduce_int_rows(x, x.offset(), outer, len, op, &out)?;
         return Ok(out);
     }
-    let push = [u32_of(outer, "outer")?, u32_of(len, "len")?, u32_of(inner, "inner")?, op as u32, u32_of(x.offset(), "offset")?, 0];
-    REDUCE_INT.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], outer * inner, &push)?;
+    let push = [
+        u32_of(outer, "outer")?,
+        u32_of(len, "len")?,
+        u32_of(inner, "inner")?,
+        op as u32,
+        u32_of(x.offset(), "offset")?,
+        0,
+    ];
+    REDUCE_INT.launch_flat(
+        x.device(),
+        &[Arg::Storage(x), Arg::Storage(&out)],
+        outer * inner,
+        &push,
+    )?;
     Ok(out)
 }
 
@@ -684,13 +1068,28 @@ pub fn reduce_int(x: &Tensor, dim: usize, op: Reduce, keepdim: bool) -> Result<T
 /// `any()` over a 127996-element mask took 7.8 ms that way. Partials are
 /// exact here, so there is no compensated pair to carry and the second
 /// pass is this kernel again over plain int64.
-fn reduce_int_rows(x: &Tensor, offset: usize, rows: usize, len: usize, op: Reduce, out: &Tensor) -> Result<()> {
-    let wanted = if rows >= TARGET_GROUPS { 1 } else { (TARGET_GROUPS / rows).min(len.div_ceil(2048)).max(1) };
+fn reduce_int_rows(
+    x: &Tensor,
+    offset: usize,
+    rows: usize,
+    len: usize,
+    op: Reduce,
+    out: &Tensor,
+) -> Result<()> {
+    let wanted = if rows >= TARGET_GROUPS {
+        1
+    } else {
+        (TARGET_GROUPS / rows).min(len.div_ceil(2048)).max(1)
+    };
     let chunk = len.div_ceil(wanted).max(1);
     let chunks = len.div_ceil(chunk).max(1);
     let groups = rows * chunks;
     let gx = groups.min(65_535);
-    let threads = [u32_of(gx * 256, "workgroups")?, u32_of(groups.div_ceil(gx), "workgroups")?, 1];
+    let threads = [
+        u32_of(gx * 256, "workgroups")?,
+        u32_of(groups.div_ceil(gx), "workgroups")?,
+        1,
+    ];
     let (rows32, len32) = (u32_of(rows, "rows")?, u32_of(len, "len")?);
     let (off, out_off) = (u32_of(offset, "offset")?, u32_of(out.offset(), "offset")?);
     if chunks == 1 {
@@ -709,7 +1108,11 @@ fn reduce_int_rows(x: &Tensor, offset: usize, rows: usize, len: usize, op: Reduc
         threads,
         &[rows32, len32, chunk32, chunks32, op as u32, off, 0],
     )?;
-    let threads2 = [u32_of(rows.min(65_535) * 256, "workgroups")?, u32_of(rows.div_ceil(65_535), "workgroups")?, 1];
+    let threads2 = [
+        u32_of(rows.min(65_535) * 256, "workgroups")?,
+        u32_of(rows.div_ceil(65_535), "workgroups")?,
+        1,
+    ];
     REDUCE_INT_ROWS.launch(
         x.device(),
         &[Arg::Storage(&partial), Arg::Storage(out)],
@@ -737,14 +1140,22 @@ pub fn index_bounds(index: &Tensor) -> Result<Option<(i64, i64)>> {
     let flat = index.detach().reshape(&[index.numel()])?;
     let lo = reduce_int(&flat, 0, Reduce::Min, false)?;
     let hi = reduce_int(&flat, 0, Reduce::Max, false)?;
-    let read = |t: &Tensor| -> Result<i64> { Ok(i64::from_le_bytes(t.to_bytes()?.try_into().unwrap())) };
+    let read =
+        |t: &Tensor| -> Result<i64> { Ok(i64::from_le_bytes(t.to_bytes()?.try_into().unwrap())) };
     Ok(Some((read(&lo)?, read(&hi)?)))
 }
 
-fn index_shape(src_shape: &[usize], dim: usize, index: &Tensor, mode: IndexMode) -> Result<Vec<usize>> {
+fn index_shape(
+    src_shape: &[usize],
+    dim: usize,
+    index: &Tensor,
+    mode: IndexMode,
+) -> Result<Vec<usize>> {
     require(index.dtype(), DType::I64, "index")?;
     if dim >= src_shape.len().max(1) {
-        return Err(Error::Shape(format!("index: dim {dim} out of range for shape {src_shape:?}")));
+        return Err(Error::Shape(format!(
+            "index: dim {dim} out of range for shape {src_shape:?}"
+        )));
     }
     match mode {
         IndexMode::Gather => {
@@ -767,7 +1178,9 @@ fn index_shape(src_shape: &[usize], dim: usize, index: &Tensor, mode: IndexMode)
         }
         IndexMode::Select => {
             if index.dim() > 1 {
-                return Err(Error::Shape("index_select(): Index is supposed to be a vector".into()));
+                return Err(Error::Shape(
+                    "index_select(): Index is supposed to be a vector".into(),
+                ));
             }
             let mut shape = src_shape.to_vec();
             shape[dim] = index.numel();
@@ -794,14 +1207,25 @@ pub fn index_gather(src: &Tensor, dim: usize, index: &Tensor, mode: IndexMode) -
     ];
     push.extend(padded(&shape, "index")?);
     push.extend(padded(&contiguous_strides(src.shape()), "index")?);
-    INDEX.launch_flat(src.device(), &[Arg::Storage(src), Arg::Storage(index), Arg::Storage(&out)], out.numel(), &push)?;
+    INDEX.launch_flat(
+        src.device(),
+        &[Arg::Storage(src), Arg::Storage(index), Arg::Storage(&out)],
+        out.numel(),
+        &push,
+    )?;
     Ok(out)
 }
 
 /// The backward of [`index_gather`] for float32: the gradient `g` summed
 /// into a zero tensor of `in_shape` at the indexed positions. Fixed-order
 /// when [`deterministic`] is on, atomic (hardware order) otherwise.
-pub fn index_add_backward(g: &Tensor, dim: usize, index: &Tensor, mode: IndexMode, in_shape: &[usize]) -> Result<Tensor> {
+pub fn index_add_backward(
+    g: &Tensor,
+    dim: usize,
+    index: &Tensor,
+    mode: IndexMode,
+    in_shape: &[usize],
+) -> Result<Tensor> {
     require_float("index backward", g.dtype())?;
     let det = deterministic();
     let out = Tensor::full(g.device(), in_shape, 0.0)?;
@@ -821,7 +1245,12 @@ pub fn index_add_backward(g: &Tensor, dim: usize, index: &Tensor, mode: IndexMod
     push.extend(padded(in_shape, "index backward")?);
     push.extend(padded(g.shape(), "index backward")?);
     let kernel = if det { INDEX_ADD } else { INDEX_ADD_ATOMIC };
-    kernel.launch_flat(g.device(), &[Arg::Storage(g), Arg::Storage(index), Arg::Storage(&out)], n, &push)?;
+    kernel.launch_flat(
+        g.device(),
+        &[Arg::Storage(g), Arg::Storage(index), Arg::Storage(&out)],
+        n,
+        &push,
+    )?;
     Ok(out)
 }
 
@@ -835,13 +1264,24 @@ pub fn arg_reduce(x: &Tensor, dim: usize, max: bool) -> Result<Tensor> {
     let is_int = match x.dtype() {
         DType::F32 => 0,
         DType::I64 => 1,
-        other => return Err(Error::Invalid(format!("arg reduction: expected float32 or int64, got {}", other.name()))),
+        other => {
+            return Err(Error::Invalid(format!(
+                "arg reduction: expected float32 or int64, got {}",
+                other.name()
+            )))
+        }
     };
     let shape = x.shape();
     if dim >= shape.len() {
-        return Err(Error::Shape(format!("arg reduction: dim {dim} out of range for shape {shape:?}")));
+        return Err(Error::Shape(format!(
+            "arg reduction: dim {dim} out of range for shape {shape:?}"
+        )));
     }
-    let (outer, len, inner): (usize, usize, usize) = (shape[..dim].iter().product(), shape[dim], shape[dim + 1..].iter().product());
+    let (outer, len, inner): (usize, usize, usize) = (
+        shape[..dim].iter().product(),
+        shape[dim],
+        shape[dim + 1..].iter().product(),
+    );
     if len == 0 {
         return Err(Error::Invalid(format!(
             "{}(): Expected reduction dim {dim} to have non-zero size.",
@@ -854,14 +1294,39 @@ pub fn arg_reduce(x: &Tensor, dim: usize, max: bool) -> Result<Tensor> {
     if inner == 1 && len >= ARG_ROWS_MIN_LEN {
         // A thread per output would scan a whole row alone: 11 ms for one
         // 152K-vocabulary row, against ~0.1 ms for a workgroup per row.
-        let push = [u32_of(outer, "rows")?, u32_of(len, "len")?, max as u32, is_int, u32_of(x.offset(), "offset")?, 0];
+        let push = [
+            u32_of(outer, "rows")?,
+            u32_of(len, "len")?,
+            max as u32,
+            is_int,
+            u32_of(x.offset(), "offset")?,
+            0,
+        ];
         if outer > 0 {
-            ARG_REDUCE_ROWS.launch(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], row_grid(outer)?, &push)?;
+            ARG_REDUCE_ROWS.launch(
+                x.device(),
+                &[Arg::Storage(x), Arg::Storage(&out)],
+                row_grid(outer)?,
+                &push,
+            )?;
         }
         return Ok(out);
     }
-    let push = [u32_of(outer, "outer")?, u32_of(len, "len")?, u32_of(inner, "inner")?, max as u32, is_int, u32_of(x.offset(), "offset")?, 0];
-    ARG_REDUCE.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], outer * inner, &push)?;
+    let push = [
+        u32_of(outer, "outer")?,
+        u32_of(len, "len")?,
+        u32_of(inner, "inner")?,
+        max as u32,
+        is_int,
+        u32_of(x.offset(), "offset")?,
+        0,
+    ];
+    ARG_REDUCE.launch_flat(
+        x.device(),
+        &[Arg::Storage(x), Arg::Storage(&out)],
+        outer * inner,
+        &push,
+    )?;
     Ok(out)
 }
 
@@ -878,11 +1343,20 @@ pub fn sort_positions(x: &Tensor, descending: bool, take: usize) -> Result<Tenso
     let words = match x.dtype() {
         DType::F32 => 1u32,
         DType::I64 => 2,
-        other => return Err(Error::Invalid(format!("sort: expected float32 or int64, got {}", other.name()))),
+        other => {
+            return Err(Error::Invalid(format!(
+                "sort: expected float32 or int64, got {}",
+                other.name()
+            )))
+        }
     };
     let (n, lead) = match x.shape().split_last() {
         Some((&n, lead)) => (n, lead),
-        None => return Err(Error::Shape("sort: a 0-d tensor has no dimension to sort".into())),
+        None => {
+            return Err(Error::Shape(
+                "sort: a 0-d tensor has no dimension to sort".into(),
+            ))
+        }
     };
     if take > n {
         return Err(Error::Invalid(format!("sort: take {take} > {n}")));
@@ -895,24 +1369,49 @@ pub fn sort_positions(x: &Tensor, descending: bool, take: usize) -> Result<Tenso
         return Ok(out);
     }
     let padded = n.next_power_of_two();
-    let total = rows.checked_mul(padded).filter(|&t| t <= u32::MAX as usize)
+    let total = rows
+        .checked_mul(padded)
+        .filter(|&t| t <= u32::MAX as usize)
         .ok_or_else(|| Error::Shape(format!("sort: {rows} rows of {padded} exceed u32")))?;
     let keys = Tensor::empty_typed(x.device(), &[total], x.dtype())?;
     let idx = Tensor::empty_typed(x.device(), &[total], DType::I32)?;
     let (rows32, n32, p32) = (rows as u32, u32_of(n, "sort length")?, padded as u32);
     let dev = x.device();
-    SORT_INIT.launch_flat(dev, &[Arg::Storage(x), Arg::Storage(&keys), Arg::Storage(&idx)], total, &[rows32, n32, p32, u32_of(x.offset(), "offset")?, words])?;
+    SORT_INIT.launch_flat(
+        dev,
+        &[Arg::Storage(x), Arg::Storage(&keys), Arg::Storage(&idx)],
+        total,
+        &[rows32, n32, p32, u32_of(x.offset(), "offset")?, words],
+    )?;
     let mut k = 2;
     while k <= padded {
         let mut j = k / 2;
         while j > 0 {
-            let push = [rows32, n32, p32, j as u32, k as u32, descending as u32, words];
-            SORT_STEP.launch_flat(dev, &[Arg::Storage(&keys), Arg::Storage(&idx)], total, &push)?;
+            let push = [
+                rows32,
+                n32,
+                p32,
+                j as u32,
+                k as u32,
+                descending as u32,
+                words,
+            ];
+            SORT_STEP.launch_flat(
+                dev,
+                &[Arg::Storage(&keys), Arg::Storage(&idx)],
+                total,
+                &push,
+            )?;
             j /= 2;
         }
         k *= 2;
     }
-    SORT_TAKE.launch_flat(dev, &[Arg::Storage(&idx), Arg::Storage(&out)], rows * take, &[rows32, take as u32, p32])?;
+    SORT_TAKE.launch_flat(
+        dev,
+        &[Arg::Storage(&idx), Arg::Storage(&out)],
+        rows * take,
+        &[rows32, take as u32, p32],
+    )?;
     Ok(out)
 }
 
@@ -932,7 +1431,9 @@ pub const TOPK_MAX_K: usize = 64;
 /// is chosen so every chunk has at least `take` elements, which is what
 /// lets the merge assume each list can fill.
 fn topk_positions(x: &Tensor, descending: bool, take: usize) -> Result<Option<Tensor>> {
-    let Some((&n, lead)) = x.shape().split_last() else { return Ok(None) };
+    let Some((&n, lead)) = x.shape().split_last() else {
+        return Ok(None);
+    };
     let rows: usize = lead.iter().product();
     if x.dtype() != DType::F32 || take == 0 || take > TOPK_MAX_K || take > n || rows == 0 {
         return Ok(None);
@@ -946,19 +1447,31 @@ fn topk_positions(x: &Tensor, descending: bool, take: usize) -> Result<Option<Te
     // split moves the whole problem into that workgroup: at k=64 an
     // earlier version cut 16384 into 256 chunks and pass two then had the
     // original row back, 3.2 ms against the bitonic path's 1.0.
-    let by_size = n.div_ceil(TOPK_CHUNK).max(1);        // ~TOPK_CHUNK elements each
-    let by_merge = (TOPK_MERGE / take).max(1);          // pass two's input
-    let chunks = if rows >= TOPK_GROUPS { 1 } else { by_size.min(by_merge).min(n / take).max(1) };
+    let by_size = n.div_ceil(TOPK_CHUNK).max(1); // ~TOPK_CHUNK elements each
+    let by_merge = (TOPK_MERGE / take).max(1); // pass two's input
+    let chunks = if rows >= TOPK_GROUPS {
+        1
+    } else {
+        by_size.min(by_merge).min(n / take).max(1)
+    };
     let chunk = n.div_ceil(chunks);
     let chunks = n.div_ceil(chunk);
     let dev = x.device();
-    let (rows32, n32, k32) = (u32_of(rows, "rows")?, u32_of(n, "sort length")?, take as u32);
+    let (rows32, n32, k32) = (
+        u32_of(rows, "rows")?,
+        u32_of(n, "sort length")?,
+        take as u32,
+    );
     let in_off = u32_of(x.offset(), "offset")?;
     let desc = u32::from(descending);
 
     let launch = |groups: usize, args: &[Arg], push: [u32; 8]| -> Result<()> {
         let gx = groups.min(65_535);
-        let threads = [u32_of(gx * 64, "workgroups")?, u32_of(groups.div_ceil(gx), "workgroups")?, 1];
+        let threads = [
+            u32_of(gx * 64, "workgroups")?,
+            u32_of(groups.div_ceil(gx), "workgroups")?,
+            1,
+        ];
         TOPK.launch(dev, args, threads, &push)
     };
 
@@ -966,7 +1479,12 @@ fn topk_positions(x: &Tensor, descending: bool, take: usize) -> Result<Option<Te
         let values = Tensor::empty_typed(dev, &out_shape, DType::F32)?;
         return launch(
             rows,
-            &[Arg::Storage(x), Arg::Storage(&out), Arg::Storage(&values), Arg::Storage(&out)],
+            &[
+                Arg::Storage(x),
+                Arg::Storage(&out),
+                Arg::Storage(&values),
+                Arg::Storage(&out),
+            ],
             [rows32, n32, k32, n32, 1, in_off, desc, 0],
         )
         .map(|()| Some(out));
@@ -977,8 +1495,22 @@ fn topk_positions(x: &Tensor, descending: bool, take: usize) -> Result<Option<Te
     let part_idx = Tensor::empty_typed(dev, &[rows * chunks * take], DType::I64)?;
     launch(
         rows * chunks,
-        &[Arg::Storage(x), Arg::Storage(&part_idx), Arg::Storage(&part_val), Arg::Storage(&part_idx)],
-        [rows32, n32, k32, u32_of(chunk, "chunk")?, u32_of(chunks, "chunks")?, in_off, desc, 0],
+        &[
+            Arg::Storage(x),
+            Arg::Storage(&part_idx),
+            Arg::Storage(&part_val),
+            Arg::Storage(&part_idx),
+        ],
+        [
+            rows32,
+            n32,
+            k32,
+            u32_of(chunk, "chunk")?,
+            u32_of(chunks, "chunks")?,
+            in_off,
+            desc,
+            0,
+        ],
     )?;
 
     // pass two: merge the chunks, reading the positions pass one recorded
@@ -986,7 +1518,12 @@ fn topk_positions(x: &Tensor, descending: bool, take: usize) -> Result<Option<Te
     let values = Tensor::empty_typed(dev, &out_shape, DType::F32)?;
     launch(
         rows,
-        &[Arg::Storage(&part_val), Arg::Storage(&part_idx), Arg::Storage(&values), Arg::Storage(&out)],
+        &[
+            Arg::Storage(&part_val),
+            Arg::Storage(&part_idx),
+            Arg::Storage(&values),
+            Arg::Storage(&out),
+        ],
         [rows32, merged, k32, merged, 1, 0, desc, 1],
     )?;
     Ok(Some(out))
@@ -1032,7 +1569,14 @@ pub fn index_copy(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor) -> Res
     scatter_inner(dst, dim, index, src, src.shape(), true)
 }
 
-fn scatter_inner(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor, shape: &[usize], select: bool) -> Result<()> {
+fn scatter_inner(
+    dst: &Tensor,
+    dim: usize,
+    index: &Tensor,
+    src: &Tensor,
+    shape: &[usize],
+    select: bool,
+) -> Result<()> {
     require(index.dtype(), DType::I64, "scatter index")?;
     require(src.dtype(), dst.dtype(), "scatter source")?;
     let n: usize = shape.iter().product();
@@ -1049,7 +1593,12 @@ fn scatter_inner(dst: &Tensor, dim: usize, index: &Tensor, src: &Tensor, shape: 
     push.extend(padded(shape, "scatter")?);
     push.extend(padded(&contiguous_strides(src.shape()), "scatter")?);
     push.extend(padded(&contiguous_strides(dst.shape()), "scatter")?);
-    SCATTER.launch_flat(dst.device(), &[Arg::Storage(src), Arg::Storage(index), Arg::Storage(dst)], n, &push)?;
+    SCATTER.launch_flat(
+        dst.device(),
+        &[Arg::Storage(src), Arg::Storage(index), Arg::Storage(dst)],
+        n,
+        &push,
+    )?;
     dst.bump_version();
     Ok(())
 }
@@ -1060,13 +1609,24 @@ pub fn scan(x: &Tensor, dim: usize, op: Scan, reverse: bool) -> Result<Tensor> {
     let is_int = match (x.dtype(), op) {
         (DType::F32, _) => 0,
         (DType::I64, Scan::Cumsum) => 1,
-        (other, _) => return Err(Error::Invalid(format!("{op:?}: unsupported dtype {}", other.name()))),
+        (other, _) => {
+            return Err(Error::Invalid(format!(
+                "{op:?}: unsupported dtype {}",
+                other.name()
+            )))
+        }
     };
     let shape = x.shape();
     if dim >= shape.len() {
-        return Err(Error::Shape(format!("scan: dim {dim} out of range for shape {shape:?}")));
+        return Err(Error::Shape(format!(
+            "scan: dim {dim} out of range for shape {shape:?}"
+        )));
     }
-    let (outer, len, inner): (usize, usize, usize) = (shape[..dim].iter().product(), shape[dim], shape[dim + 1..].iter().product());
+    let (outer, len, inner): (usize, usize, usize) = (
+        shape[..dim].iter().product(),
+        shape[dim],
+        shape[dim + 1..].iter().product(),
+    );
     let out = Tensor::empty_typed(x.device(), shape, x.dtype())?;
     let push = [
         u32_of(outer, "outer")?,
@@ -1078,7 +1638,12 @@ pub fn scan(x: &Tensor, dim: usize, op: Scan, reverse: bool) -> Result<Tensor> {
         u32_of(x.offset(), "offset")?,
         0,
     ];
-    SCAN.launch_flat(x.device(), &[Arg::Storage(x), Arg::Storage(&out)], outer * inner, &push)?;
+    SCAN.launch_flat(
+        x.device(),
+        &[Arg::Storage(x), Arg::Storage(&out)],
+        outer * inner,
+        &push,
+    )?;
     Ok(out)
 }
 
@@ -1090,7 +1655,9 @@ pub fn bmm(a: &Tensor, b: &Tensor, trans_a: bool, trans_b: bool) -> Result<Tenso
     require_float("matmul", a.dtype())?;
     require_float("matmul", b.dtype())?;
     if a.dim() < 2 || b.dim() < 2 {
-        return Err(Error::Shape("bmm: both operands need at least 2 dims".into()));
+        return Err(Error::Shape(
+            "bmm: both operands need at least 2 dims".into(),
+        ));
     }
     let (ra, ca) = (a.shape()[a.dim() - 2], a.shape()[a.dim() - 1]);
     let (rb, cb) = (b.shape()[b.dim() - 2], b.shape()[b.dim() - 1]);
@@ -1107,7 +1674,9 @@ pub fn bmm(a: &Tensor, b: &Tensor, trans_a: bool, trans_b: bool) -> Result<Tenso
     let (a_batch, b_batch) = (&a.shape()[..a.dim() - 2], &b.shape()[..b.dim() - 2]);
     let batch_shape = broadcast_shape(a_batch, b_batch)?;
     if batch_shape.len() > MAX_BATCH_DIMS {
-        return Err(Error::NotImplemented(format!("matmul with more than {MAX_BATCH_DIMS} batch dimensions")));
+        return Err(Error::NotImplemented(format!(
+            "matmul with more than {MAX_BATCH_DIMS} batch dimensions"
+        )));
     }
     let batch: usize = batch_shape.iter().product();
     let mut out_shape = batch_shape.clone();
@@ -1120,7 +1689,9 @@ pub fn bmm(a: &Tensor, b: &Tensor, trans_a: bool, trans_b: bool) -> Result<Tenso
         return Tensor::zeros(a.device(), &out_shape);
     }
     if batch > 65_535 {
-        return Err(Error::NotImplemented(format!("matmul over {batch} batch elements (the limit is 65535)")));
+        return Err(Error::NotImplemented(format!(
+            "matmul over {batch} batch elements (the limit is 65535)"
+        )));
     }
     // element strides of each operand's batch dims, 0 where it broadcasts
     let strides = |own: &[usize], matrix: usize| -> Vec<usize> {
@@ -1138,7 +1709,10 @@ pub fn bmm(a: &Tensor, b: &Tensor, trans_a: bool, trans_b: bool) -> Result<Tenso
     };
     let (sa, sb) = (strides(a_batch, ra * ca), strides(b_batch, rb * cb));
     let pad = |v: &[usize], fill: usize| -> Result<Vec<u32>> {
-        let mut out = v.iter().map(|&x| u32_of(x, "matmul")).collect::<Result<Vec<_>>>()?;
+        let mut out = v
+            .iter()
+            .map(|&x| u32_of(x, "matmul"))
+            .collect::<Result<Vec<_>>>()?;
         out.resize(MAX_BATCH_DIMS, fill as u32);
         Ok(out)
     };
@@ -1156,24 +1730,43 @@ pub fn bmm(a: &Tensor, b: &Tensor, trans_a: bool, trans_b: bool) -> Result<Tenso
     push.extend(pad(&batch_shape, 1)?);
     push.extend(pad(&sa, 0)?);
     push.extend(pad(&sb, 0)?);
-    let threads = [u32_of(n.next_multiple_of(16), "N")?, u32_of(m.next_multiple_of(16), "M")?, batch as u32];
-    BMM.launch(a.device(), &[Arg::Storage(a), Arg::Storage(b), Arg::Storage(&out)], threads, &push)?;
+    let threads = [
+        u32_of(n.next_multiple_of(16), "N")?,
+        u32_of(m.next_multiple_of(16), "M")?,
+        batch as u32,
+    ];
+    BMM.launch(
+        a.device(),
+        &[Arg::Storage(a), Arg::Storage(b), Arg::Storage(&out)],
+        threads,
+        &push,
+    )?;
     Ok(out)
 }
 
 /// A workgroup per row, for `rows` rows (a 2-D grid past 65535).
 fn row_grid(rows: usize) -> Result<[u32; 3]> {
     let gx = rows.min(65_535);
-    Ok([u32_of(gx * 256, "rows")?, u32_of(rows.div_ceil(gx), "rows")?, 1])
+    Ok([
+        u32_of(gx * 256, "rows")?,
+        u32_of(rows.div_ceil(gx), "rows")?,
+        1,
+    ])
 }
 
 /// layer_norm over the last `n` elements of each row of float32 `x`:
 /// `(x - mean) * rstd * weight + bias`, with the biased variance and
 /// `rstd = 1 / sqrt(var + eps)`, as torch. Returns the output and the
 /// per-row `(mean, rstd)` pairs, (rows, 2), for [`layer_norm_backward`].
-pub fn layer_norm(x: &Tensor, n: usize, weight: Option<&Tensor>, bias: Option<&Tensor>, eps: f32) -> Result<(Tensor, Tensor)> {
+pub fn layer_norm(
+    x: &Tensor,
+    n: usize,
+    weight: Option<&Tensor>,
+    bias: Option<&Tensor>,
+    eps: f32,
+) -> Result<(Tensor, Tensor)> {
     require_float("layer_norm", x.dtype())?;
-    let rows = if n == 0 { 0 } else { x.numel() / n };
+    let rows = x.numel().checked_div(n).unwrap_or(0);
     let y = Tensor::empty(x.device(), x.shape())?;
     let stats = Tensor::empty(x.device(), &[rows, 2])?;
     if rows == 0 {
@@ -1183,7 +1776,10 @@ pub fn layer_norm(x: &Tensor, n: usize, weight: Option<&Tensor>, bias: Option<&T
         if let Some(t) = t {
             require_float("layer_norm", t.dtype())?;
             if t.numel() != n {
-                return Err(Error::Shape(format!("layer_norm: {what} has {} elements, expected {n}", t.numel())));
+                return Err(Error::Shape(format!(
+                    "layer_norm: {what} has {} elements, expected {n}",
+                    t.numel()
+                )));
             }
         }
     }
@@ -1198,7 +1794,13 @@ pub fn layer_norm(x: &Tensor, n: usize, weight: Option<&Tensor>, bias: Option<&T
         u32_of(w.offset(), "offset")?,
         u32_of(b.offset(), "offset")?,
     ];
-    let args = [Arg::Storage(x), Arg::Storage(w), Arg::Storage(b), Arg::Storage(&y), Arg::Storage(&stats)];
+    let args = [
+        Arg::Storage(x),
+        Arg::Storage(w),
+        Arg::Storage(b),
+        Arg::Storage(&y),
+        Arg::Storage(&stats),
+    ];
     LAYER_NORM.launch(x.device(), &args, row_grid(rows)?, &push)?;
     Ok((y, stats))
 }
@@ -1217,23 +1819,35 @@ pub fn rms_norm(
 ) -> Result<(Tensor, Option<Tensor>)> {
     require_float("rms_norm", x.dtype())?;
     if n == 0 || !x.numel().is_multiple_of(n) {
-        return Err(Error::Shape(format!("rms_norm: {:?} is not rows of {n}", x.shape())));
+        return Err(Error::Shape(format!(
+            "rms_norm: {:?} is not rows of {n}",
+            x.shape()
+        )));
     }
     if let Some(r) = residual {
         require_float("rms_norm", r.dtype())?;
         if r.shape() != x.shape() {
-            return Err(Error::Shape(format!("rms_norm: residual {:?} does not match input {:?}", r.shape(), x.shape())));
+            return Err(Error::Shape(format!(
+                "rms_norm: residual {:?} does not match input {:?}",
+                r.shape(),
+                x.shape()
+            )));
         }
     }
     if let Some(w) = weight {
         require_float("rms_norm", w.dtype())?;
         if w.numel() != n {
-            return Err(Error::Shape(format!("rms_norm: weight has {} elements, expected {n}", w.numel())));
+            return Err(Error::Shape(format!(
+                "rms_norm: weight has {} elements, expected {n}",
+                w.numel()
+            )));
         }
     }
     let rows = x.numel() / n;
     let y = Tensor::empty(x.device(), x.shape())?;
-    let h = residual.map(|_| Tensor::empty(x.device(), x.shape())).transpose()?;
+    let h = residual
+        .map(|_| Tensor::empty(x.device(), x.shape()))
+        .transpose()?;
     if rows == 0 {
         return Ok((y, h));
     }
@@ -1248,7 +1862,13 @@ pub fn rms_norm(
         u32_of(r.offset(), "offset")?,
         u32_of(w.offset(), "offset")?,
     ];
-    let args = [Arg::Storage(x), Arg::Storage(r), Arg::Storage(w), Arg::Tensor(&y), Arg::Tensor(h.as_ref().unwrap_or(&y))];
+    let args = [
+        Arg::Storage(x),
+        Arg::Storage(r),
+        Arg::Storage(w),
+        Arg::Tensor(&y),
+        Arg::Tensor(h.as_ref().unwrap_or(&y)),
+    ];
     RMS_NORM.launch(x.device(), &args, row_grid(rows)?, &push)?;
     Ok((y, h))
 }
@@ -1266,7 +1886,11 @@ pub fn layer_norm_backward(
 ) -> Result<(Tensor, Option<Tensor>)> {
     let rows = stats.shape()[0];
     let dx = Tensor::empty(x.device(), x.shape())?;
-    let gxhat = if want_gxhat { Some(Tensor::empty(x.device(), x.shape())?) } else { None };
+    let gxhat = if want_gxhat {
+        Some(Tensor::empty(x.device(), x.shape())?)
+    } else {
+        None
+    };
     if rows == 0 {
         return Ok((dx, gxhat));
     }
@@ -1281,7 +1905,14 @@ pub fn layer_norm_backward(
         u32_of(w.offset(), "offset")?,
     ];
     let gx_arg = gxhat.as_ref().unwrap_or(&dx);
-    let args = [Arg::Storage(g), Arg::Storage(x), Arg::Storage(w), Arg::Storage(stats), Arg::Storage(&dx), Arg::Storage(gx_arg)];
+    let args = [
+        Arg::Storage(g),
+        Arg::Storage(x),
+        Arg::Storage(w),
+        Arg::Storage(stats),
+        Arg::Storage(&dx),
+        Arg::Storage(gx_arg),
+    ];
     LAYER_NORM_BACKWARD.launch(x.device(), &args, row_grid(rows)?, &push)?;
     Ok((dx, gxhat))
 }

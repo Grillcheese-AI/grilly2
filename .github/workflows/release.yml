@@ -2,23 +2,35 @@
 #
 # The point of this file is that a user installs grilly2 with pip and needs
 # none of what building it needs. Building needs Rust, a C++17 compiler and
-# the ~1 GB LunarG SDK; running needs a GPU driver, which the user already
-# has. All of the first list happens here, once, on a runner.
+# the LunarG SDK; running needs a GPU driver, which the user already has.
+# All of the first list happens here, once, on a runner.
 #
 # `grilly2` on PyPI, `import grilly` in code — see pyproject.toml for why.
+# The extension is abi3 (pyo3 `abi3-py310`), so one wheel per platform
+# serves every CPython from 3.10 up.
 #
-# Two things are deliberate and easy to "fix" wrongly:
+# Things that are deliberate and easy to "fix" wrongly:
 #
-#   * auditwheel does NOT bundle libvulkan. The Vulkan loader must be the
-#     one the user's GPU driver installed, because it is what dispatches to
-#     that driver; a copy baked into the wheel would find no devices. This
-#     is the same reason torch and cupy skip repair for their GPU runtime
-#     libraries, and it is why the Linux leg forces the manylinux tag
-#     instead of letting auditwheel earn it.
+#   * the wheel does NOT bundle libvulkan (`--auditwheel skip`). The Vulkan
+#     loader must be the one the user's GPU driver installed, matched to
+#     that driver; torch and cupy skip repair for their GPU runtimes for
+#     the same reason.
+#
+#   * the Linux wheel is built on ubuntu-22.04 and tagged manylinux_2_34,
+#     not in a manylinux_2_28 container. shaderc is not packaged for the
+#     manylinux images and building it there is a slow, fragile detour; the
+#     LunarG SDK's own Linux build targets 22.04. The cost is that glibc
+#     older than 2.34 (RHEL 8, Ubuntu 20.04) gets the sdist instead. The
+#     `auditwheel show` step prints what the binary actually requires, so
+#     that tag is checked rather than asserted.
 #
 #   * the sdist is published, but building from it still needs the SDK.
 #     pip falls back to it on any platform without a wheel, so build.rs's
 #     error message is a user-facing string, not a developer note.
+#
+# Publishing uses PyPI trusted publishing (OIDC): no token is stored in
+# this repository. It needs a one-time publisher entry on pypi.org naming
+# this repository, `release.yml` and the `pypi` environment.
 
 name: release
 
@@ -33,7 +45,7 @@ on:
         default: false
 
 env:
-  VULKAN_SDK_VERSION: 1.3.280.0
+  VULKAN_SDK_VERSION: 1.4.335.0
 
 jobs:
   windows:
@@ -45,53 +57,86 @@ jobs:
       - uses: actions/checkout@v4
         with: { submodules: recursive }
       - uses: dtolnay/rust-toolchain@stable
+      - uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: ${{ env.VULKAN_SDK_VERSION }}
+          cache: true
+          stripdown: true
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - uses: humbletim/setup-vulkan-sdk@v1.2.1
-        with:
-          vulkan-query-version: ${{ env.VULKAN_SDK_VERSION }}
-          vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang, SPIRV-Tools, Shaderc
-          vulkan-use-cache: true
       - name: build
         run: |
           python -m pip install --upgrade pip maturin
-          maturin build --release --out dist --interpreter 3.10 3.11 3.12 3.13
+          maturin build --release --out dist --auditwheel skip
       - name: the wheel must not reference this runner
-        shell: bash
         run: python .github/scripts/check_relocatable.py dist
       - uses: actions/upload-artifact@v4
         with: { name: wheels-windows, path: dist/*.whl }
 
   linux:
-    # UNVERIFIED until this first runs: shaderc is not packaged for
-    # manylinux, so `before-script-linux` builds it. Expect this leg to need
-    # a round of iteration; the Windows leg above does not depend on it.
-    name: wheel (manylinux x86_64)
-    runs-on: ubuntu-latest
+    name: wheel (linux x86_64)
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with: { submodules: recursive }
-      - uses: PyO3/maturin-action@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: jakoch/install-vulkan-sdk-action@v1
         with:
-          target: x86_64
-          manylinux: "2_28"
-          # auditwheel repair would vendor libvulkan.so.1 into the wheel and
-          # break dispatch to the real driver; see the header
-          args: --release --out dist --auditwheel skip --interpreter 3.10 3.11 3.12 3.13
-          before-script-linux: |
-            dnf install -y epel-release
-            dnf install -y vulkan-headers vulkan-loader-devel cmake python3 git ninja-build
-            git clone --depth 1 https://github.com/google/shaderc /tmp/shaderc
-            cd /tmp/shaderc && ./utils/git-sync-deps
-            cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
-              -DSHADERC_SKIP_TESTS=ON -DSHADERC_SKIP_EXAMPLES=ON \
-              -DCMAKE_INSTALL_PREFIX=/usr/local
-            cmake --build build --target install
-            echo "VULKAN_SDK=/usr/local" >> $GITHUB_ENV
+          vulkan_version: ${{ env.VULKAN_SDK_VERSION }}
+          cache: true
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: build
+        run: |
+          python -m pip install --upgrade pip maturin auditwheel
+          maturin build --release --out dist --auditwheel skip --compatibility manylinux_2_34
       - name: the wheel must not reference this runner
         run: python .github/scripts/check_relocatable.py dist
+      # The tag is a claim; this checks it. auditwheel names the newest glibc
+      # the binary needs (2_34 when first measured: GLIBC_2.34,
+      # GLIBCXX_3.4.29). It also calls the wheel plain linux_x86_64, only
+      # because libvulkan.so.1 is external on purpose (see the header).
+      - name: the manylinux tag is true
+        run: |
+          auditwheel show dist/*.whl | tee show.txt
+          python - <<'EOF'
+          import re
+          text = " ".join(open("show.txt").read().split())
+          m = re.search(r'constrains the platform tag to "manylinux_2_(\d+)_x86_64"', text)
+          need = int(m.group(1)) if m else 17
+          assert need <= 34, f"binary needs glibc 2.{need}; the wheel claims manylinux_2_34"
+          print(f"binary needs glibc 2.{need}; tag manylinux_2_34 holds")
+          EOF
       - uses: actions/upload-artifact@v4
         with: { name: wheels-linux, path: dist/*.whl }
+
+  smoke:
+    # install each wheel on a clean runner and run real kernels on lavapipe;
+    # a wheel that builds but cannot import must never reach PyPI
+    name: smoke test (linux wheel on lavapipe)
+    needs: linux
+    runs-on: ubuntu-latest
+    env:
+      ALLOW_CPU_VULKAN: "1"
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.10" }   # the oldest the abi3 tag claims
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq mesa-vulkan-drivers
+      - uses: actions/download-artifact@v4
+        with: { name: wheels-linux, path: dist }
+      - name: install and run
+        run: |
+          python -m pip install dist/*.whl
+          python -m grilly.doctor
+          python - <<'EOF'
+          import grilly as torch
+          x = torch.randn(64, 32, requires_grad=True)
+          lin = torch.nn.Linear(32, 8)
+          loss = torch.nn.functional.relu(lin(x)).sum()
+          loss.backward()
+          assert x.grad.shape == (64, 32), x.grad.shape
+          print("forward + backward ok:", float(loss))
+          EOF
 
   sdist:
     name: sdist
@@ -99,24 +144,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { submodules: recursive }
-      - uses: PyO3/maturin-action@v1
-        with: { command: sdist, args: --out dist }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: |
+          python -m pip install --upgrade pip maturin
+          maturin sdist --out dist
+      # VMA is a submodule; an sdist without its header cannot build
+      - name: the sdist carries the VulkanMemoryAllocator header
+        run: tar tzf dist/*.tar.gz | grep -q "third_party/VulkanMemoryAllocator/include/vk_mem_alloc.h"
       - uses: actions/upload-artifact@v4
         with: { name: sdist, path: dist/*.tar.gz }
 
   publish:
     name: publish to PyPI
-    # the Linux leg is new; a failure there must not block the platform the
-    # project is actually for
-    needs: [windows, sdist]
+    needs: [windows, linux, smoke, sdist]
     if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write          # trusted publishing: no API token to leak
     steps:
+      - uses: actions/checkout@v4
+      # a version on PyPI can never be re-uploaded, so a tag that disagrees
+      # with pyproject.toml must stop here, not after the upload
+      - name: the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          [ "${GITHUB_REF_NAME#v}" = "$version" ] || { echo "tag $GITHUB_REF_NAME != pyproject $version"; exit 1; }
       - uses: actions/download-artifact@v4
         with: { path: dist, merge-multiple: true }
+      - run: ls -la dist
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist

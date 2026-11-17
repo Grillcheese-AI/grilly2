@@ -4,7 +4,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use grilly_infer::{ops, sampling, Heads, Int4Weight, Int8Weight, KvCache, LoadError, Rotary, SafeTensorsFile, Sampling};
+use grilly_infer::{
+    ops, sampling, Heads, Int4Weight, Int8Weight, KvCache, LoadError, Rotary, SafeTensorsFile,
+    Sampling,
+};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyFileNotFoundError, PyOSError};
 use pyo3::prelude::*;
@@ -50,7 +53,9 @@ impl PySafeFile {
     #[staticmethod]
     fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PySafeFile> {
         let data = data.to_vec();
-        py.detach(|| SafeTensorsFile::from_bytes(data)).map(|inner| PySafeFile { inner }).map_err(|e| load_err(e, None))
+        py.detach(|| SafeTensorsFile::from_bytes(data))
+            .map(|inner| PySafeFile { inner })
+            .map_err(|e| load_err(e, None))
     }
 
     fn keys(&self) -> Vec<String> {
@@ -68,7 +73,9 @@ impl PySafeFile {
     /// Upload one tensor to the default device.
     fn get(&self, py: Python<'_>, name: &str) -> PyResult<PyTensor> {
         let dev = device()?;
-        py.detach(|| self.inner.tensor(&dev, name)).map(wrap).map_err(|e| load_err(e, None))
+        py.detach(|| self.inner.tensor(&dev, name))
+            .map(wrap)
+            .map_err(|e| load_err(e, None))
     }
 }
 
@@ -82,7 +89,9 @@ struct PyInt8Weight {
 impl PyInt8Weight {
     #[staticmethod]
     fn quantize(py: Python<'_>, weight: &PyTensor) -> PyResult<PyInt8Weight> {
-        py.detach(|| Int8Weight::quantize(&weight.inner)).map(|inner| PyInt8Weight { inner }).map_err(err)
+        py.detach(|| Int8Weight::quantize(&weight.inner))
+            .map(|inner| PyInt8Weight { inner })
+            .map_err(err)
     }
 
     /// (out_features, in_features)
@@ -104,7 +113,10 @@ impl PyInt8Weight {
     /// The int8 values, row-major, as bytes.
     fn qdata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let q = py.detach(|| self.inner.qdata()).map_err(err)?;
-        Ok(PyBytes::new(py, &q.iter().map(|&v| v as u8).collect::<Vec<u8>>()))
+        Ok(PyBytes::new(
+            py,
+            &q.iter().map(|&v| v as u8).collect::<Vec<u8>>(),
+        ))
     }
 
     /// One weight holding several weights' rows: a fused q/k/v or gate/up
@@ -112,7 +124,9 @@ impl PyInt8Weight {
     #[staticmethod]
     fn cat(py: Python<'_>, parts: Vec<PyRef<'_, PyInt8Weight>>) -> PyResult<PyInt8Weight> {
         let parts: Vec<&Int8Weight> = parts.iter().map(|p| &p.inner).collect();
-        py.detach(|| Int8Weight::cat(&parts)).map(|inner| PyInt8Weight { inner }).map_err(err)
+        py.detach(|| Int8Weight::cat(&parts))
+            .map(|inner| PyInt8Weight { inner })
+            .map_err(err)
     }
 
     fn dequantize(&self, py: Python<'_>) -> PyResult<PyTensor> {
@@ -120,8 +134,15 @@ impl PyInt8Weight {
     }
 
     #[pyo3(signature = (input, bias=None))]
-    fn linear(&self, py: Python<'_>, input: &PyTensor, bias: Option<&PyTensor>) -> PyResult<PyTensor> {
-        py.detach(|| self.inner.linear(&input.inner, bias.map(|b| &b.inner))).map(wrap).map_err(err)
+    fn linear(
+        &self,
+        py: Python<'_>,
+        input: &PyTensor,
+        bias: Option<&PyTensor>,
+    ) -> PyResult<PyTensor> {
+        py.detach(|| self.inner.linear(&input.inner, bias.map(|b| &b.inner)))
+            .map(wrap)
+            .map_err(err)
     }
 }
 
@@ -135,7 +156,9 @@ struct PyInt4Weight {
 impl PyInt4Weight {
     #[staticmethod]
     fn quantize(py: Python<'_>, weight: &PyTensor, group_size: usize) -> PyResult<PyInt4Weight> {
-        py.detach(|| Int4Weight::quantize(&weight.inner, group_size)).map(|inner| PyInt4Weight { inner }).map_err(err)
+        py.detach(|| Int4Weight::quantize(&weight.inner, group_size))
+            .map(|inner| PyInt4Weight { inner })
+            .map_err(err)
     }
 
     /// (out_features, in_features)
@@ -181,9 +204,11 @@ impl PyInt4Weight {
         in_features: usize,
         group_size: usize,
     ) -> PyResult<PyInt4Weight> {
-        py.detach(|| Int4Weight::from_parts(&q.inner, &scale.inner, &zero.inner, in_features, group_size))
-            .map(|inner| PyInt4Weight { inner })
-            .map_err(err)
+        py.detach(|| {
+            Int4Weight::from_parts(&q.inner, &scale.inner, &zero.inner, in_features, group_size)
+        })
+        .map(|inner| PyInt4Weight { inner })
+        .map_err(err)
     }
 
     /// One weight holding several weights' rows: a fused q/k/v or gate/up
@@ -191,7 +216,9 @@ impl PyInt4Weight {
     #[staticmethod]
     fn cat(py: Python<'_>, parts: Vec<PyRef<'_, PyInt4Weight>>) -> PyResult<PyInt4Weight> {
         let parts: Vec<&Int4Weight> = parts.iter().map(|p| &p.inner).collect();
-        py.detach(|| Int4Weight::cat(&parts)).map(|inner| PyInt4Weight { inner }).map_err(err)
+        py.detach(|| Int4Weight::cat(&parts))
+            .map(|inner| PyInt4Weight { inner })
+            .map_err(err)
     }
 
     fn dequantize(&self, py: Python<'_>) -> PyResult<PyTensor> {
@@ -199,14 +226,33 @@ impl PyInt4Weight {
     }
 
     #[pyo3(signature = (input, bias=None))]
-    fn linear(&self, py: Python<'_>, input: &PyTensor, bias: Option<&PyTensor>) -> PyResult<PyTensor> {
-        py.detach(|| self.inner.linear(&input.inner, bias.map(|b| &b.inner))).map(wrap).map_err(err)
+    fn linear(
+        &self,
+        py: Python<'_>,
+        input: &PyTensor,
+        bias: Option<&PyTensor>,
+    ) -> PyResult<PyTensor> {
+        py.detach(|| self.inner.linear(&input.inner, bias.map(|b| &b.inner)))
+            .map(wrap)
+            .map_err(err)
     }
 }
 
 /// Sampling parameters from Python, as Hugging Face names them.
-fn sampling_of(do_sample: bool, temperature: f32, top_k: usize, top_p: f32, repetition_penalty: f32) -> Sampling {
-    Sampling { do_sample, temperature, top_k, top_p, repetition_penalty }
+fn sampling_of(
+    do_sample: bool,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    repetition_penalty: f32,
+) -> Sampling {
+    Sampling {
+        do_sample,
+        temperature,
+        top_k,
+        top_p,
+        repetition_penalty,
+    }
 }
 
 /// The next token per row (grilly_infer::sampling::next_tokens).
@@ -226,7 +272,9 @@ fn next_tokens(
     let s = sampling_of(do_sample, temperature, top_k, top_p, repetition_penalty);
     let mut g = generator.borrow_mut();
     let gen = &mut g.inner;
-    py.detach(|| sampling::next_tokens(&logits.inner, input_ids.map(|t| &t.inner), &s, gen)).map(wrap).map_err(err)
+    py.detach(|| sampling::next_tokens(&logits.inner, input_ids.map(|t| &t.inner), &s, gen))
+        .map(wrap)
+        .map_err(err)
 }
 
 #[pyfunction]
@@ -239,7 +287,9 @@ fn processed_scores(
     repetition_penalty: f32,
 ) -> PyResult<PyTensor> {
     let s = sampling_of(do_sample, temperature, 0, 1.0, repetition_penalty);
-    py.detach(|| sampling::processed_scores(&logits.inner, input_ids.map(|t| &t.inner), &s)).map(wrap).map_err(err)
+    py.detach(|| sampling::processed_scores(&logits.inner, input_ids.map(|t| &t.inner), &s))
+        .map(wrap)
+        .map_err(err)
 }
 
 #[pyfunction]
@@ -253,15 +303,23 @@ fn sample_probabilities(
     repetition_penalty: f32,
 ) -> PyResult<PyTensor> {
     let s = sampling_of(true, temperature, top_k, top_p, repetition_penalty);
-    py.detach(|| sampling::probabilities(&logits.inner, input_ids.map(|t| &t.inner), &s)).map(wrap).map_err(err)
+    py.detach(|| sampling::probabilities(&logits.inner, input_ids.map(|t| &t.inner), &s))
+        .map(wrap)
+        .map_err(err)
 }
 
 /// torch.multinomial(weights, 1) for (batch, n) weights, as int64 (batch,).
 #[pyfunction]
-fn multinomial(py: Python<'_>, weights: &PyTensor, generator: &Bound<'_, PyGenerator>) -> PyResult<PyTensor> {
+fn multinomial(
+    py: Python<'_>,
+    weights: &PyTensor,
+    generator: &Bound<'_, PyGenerator>,
+) -> PyResult<PyTensor> {
     let mut g = generator.borrow_mut();
     let gen = &mut g.inner;
-    py.detach(|| sampling::multinomial(&weights.inner, gen)).map(wrap).map_err(err)
+    py.detach(|| sampling::multinomial(&weights.inner, gen))
+        .map(wrap)
+        .map_err(err)
 }
 
 /// Keys and values of every layer, on the device (grilly_infer::KvCache).
@@ -273,19 +331,43 @@ struct PyKvCache {
 #[pymethods]
 impl PyKvCache {
     #[new]
-    fn new(py: Python<'_>, layers: usize, batch: usize, kv_heads: usize, head_dim: usize, max_len: usize) -> PyResult<PyKvCache> {
+    fn new(
+        py: Python<'_>,
+        layers: usize,
+        batch: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        max_len: usize,
+    ) -> PyResult<PyKvCache> {
         let dev = device()?;
-        py.detach(|| KvCache::new(&dev, layers, batch, kv_heads, head_dim, max_len)).map(|inner| PyKvCache { inner }).map_err(err)
+        py.detach(|| KvCache::new(&dev, layers, batch, kv_heads, head_dim, max_len))
+            .map(|inner| PyKvCache { inner })
+            .map_err(err)
     }
 
-    fn append(&mut self, py: Python<'_>, layer: usize, keys: &PyTensor, values: &PyTensor) -> PyResult<()> {
+    fn append(
+        &mut self,
+        py: Python<'_>,
+        layer: usize,
+        keys: &PyTensor,
+        values: &PyTensor,
+    ) -> PyResult<()> {
         let inner = &mut self.inner;
-        py.detach(|| inner.append(layer, &keys.inner, &values.inner)).map_err(err)
+        py.detach(|| inner.append(layer, &keys.inner, &values.inner))
+            .map_err(err)
     }
 
     #[pyo3(signature = (layer, query, scale=None))]
-    fn attend(&self, py: Python<'_>, layer: usize, query: &PyTensor, scale: Option<f32>) -> PyResult<PyTensor> {
-        py.detach(|| self.inner.attend(layer, &query.inner, scale)).map(wrap).map_err(err)
+    fn attend(
+        &self,
+        py: Python<'_>,
+        layer: usize,
+        query: &PyTensor,
+        scale: Option<f32>,
+    ) -> PyResult<PyTensor> {
+        py.detach(|| self.inner.attend(layer, &query.inner, scale))
+            .map(wrap)
+            .map_err(err)
     }
 
     /// Rotate a step's keys into the cache and copy its values, taking both
@@ -308,9 +390,23 @@ impl PyKvCache {
         py.detach(|| {
             inner.append_rotary(
                 layer,
-                &Heads { src: &keys.inner, col: k_col, heads, dim },
-                &Heads { src: &values.inner, col: v_col, heads, dim },
-                &Rotary { cos: &cos.inner, sin: &sin.inner, pos0 },
+                &Heads {
+                    src: &keys.inner,
+                    col: k_col,
+                    heads,
+                    dim,
+                },
+                &Heads {
+                    src: &values.inner,
+                    col: v_col,
+                    heads,
+                    dim,
+                },
+                &Rotary {
+                    cos: &cos.inner,
+                    sin: &sin.inner,
+                    pos0,
+                },
             )
         })
         .map_err(err)
@@ -360,8 +456,17 @@ fn rope(
 ) -> PyResult<PyTensor> {
     py.detach(|| {
         ops::rope(
-            &Heads { src: &src.inner, col, heads, dim },
-            &Rotary { cos: &cos.inner, sin: &sin.inner, pos0 },
+            &Heads {
+                src: &src.inner,
+                col,
+                heads,
+                dim,
+            },
+            &Rotary {
+                cos: &cos.inner,
+                sin: &sin.inner,
+                pos0,
+            },
         )
     })
     .map(wrap)
@@ -370,8 +475,17 @@ fn rope(
 
 /// silu(gate) * up, each read from its source's columns.
 #[pyfunction]
-fn swiglu(py: Python<'_>, gate: &PyTensor, gate_col: usize, up: &PyTensor, up_col: usize, width: usize) -> PyResult<PyTensor> {
-    py.detach(|| ops::swiglu(&gate.inner, gate_col, &up.inner, up_col, width)).map(wrap).map_err(err)
+fn swiglu(
+    py: Python<'_>,
+    gate: &PyTensor,
+    gate_col: usize,
+    up: &PyTensor,
+    up_col: usize,
+    width: usize,
+) -> PyResult<PyTensor> {
+    py.detach(|| ops::swiglu(&gate.inner, gate_col, &up.inner, up_col, width))
+        .map(wrap)
+        .map_err(err)
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

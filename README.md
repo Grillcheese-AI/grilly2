@@ -63,9 +63,17 @@ Useful variables:
 | `GRILLY_PYTHON` | interpreter with torch and numpy, used by the op tests as the reference; default `python` |
 | `GRILLY_VERBOSE` | set to 1 to print the device bring-up log |
 | `GRILLY_LAUNCH_BLOCKING` | set to 1 to submit and wait after every kernel launch (as `CUDA_LAUNCH_BLOCKING`), for diagnosis |
+| `ALLOW_CPU_VULKAN` | set to 1 to accept a software Vulkan device (Mesa lavapipe / llvmpipe) when no GPU is present; how CI runs the kernels |
+| `VK_GPU_INDEX` | pick a Vulkan device by index, overriding the default (discrete first, then NVIDIA, then AMD) |
 
 The GPU tests need a Vulkan 1.2 device. The op tests compare every op against
 torch on CPU, so they also need torch installed for `GRILLY_PYTHON`.
+
+CI (`.github/workflows/ci.yml`) has no GPU, so it builds both wheels and runs
+both suites on lavapipe, a software Vulkan driver. That checks the numbers,
+not the speed: timing, memory placement and the fence timeout still need real
+hardware. Releases (`release.yml`) build a Windows and a Linux
+(`manylinux_2_34`) abi3 wheel and an sdist, and publish to PyPI on a `v*` tag.
 
 ## Python
 

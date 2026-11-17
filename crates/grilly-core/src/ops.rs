@@ -8,10 +8,20 @@ use crate::kernel::{Arg, Kernel};
 use crate::tensor::Tensor;
 
 /// `out[i] = a[i] + b[i]`. Bindings: a, b, out. Push: {n}.
-pub const ADD: Kernel = Kernel { shader: "g2-residual", bindings: 3, push_words: 1, local_size: [256, 1, 1] };
+pub const ADD: Kernel = Kernel {
+    shader: "g2-residual",
+    bindings: 3,
+    push_words: 1,
+    local_size: [256, 1, 1],
+};
 
 /// `a[i] += b[i]`. Bindings: a (read-write), b. Push: {n}.
-pub const ADD_INPLACE: Kernel = Kernel { shader: "g2-add-inplace", bindings: 2, push_words: 1, local_size: [256, 1, 1] };
+pub const ADD_INPLACE: Kernel = Kernel {
+    shader: "g2-add-inplace",
+    bindings: 2,
+    push_words: 1,
+    local_size: [256, 1, 1],
+};
 
 pub const ALL: &[Kernel] = &[ADD, ADD_INPLACE];
 
@@ -47,9 +57,16 @@ pub fn add(input: &Tensor, other: &Tensor) -> Result<Tensor> {
     let mut out = Tensor::empty(input.device(), input.shape())?;
     let n = numel_u32(input)?;
     if n > 0 {
-        ADD.launch(input.device(), &[Arg::Tensor(input), Arg::Tensor(other), Arg::Tensor(&out)], [n, 1, 1], &[n])?;
+        ADD.launch(
+            input.device(),
+            &[Arg::Tensor(input), Arg::Tensor(other), Arg::Tensor(&out)],
+            [n, 1, 1],
+            &[n],
+        )?;
     }
-    autograd::record("AddBackward0", &[input, other], &mut [&mut out], |_| Ok(AddBackward))?;
+    autograd::record("AddBackward0", &[input, other], &mut [&mut out], |_| {
+        Ok(AddBackward)
+    })?;
     Ok(out)
 }
 
@@ -61,7 +78,12 @@ pub(crate) fn add_into(dst: &Tensor, src: &Tensor) -> Result<()> {
     same_shape("add_", dst, src)?;
     let n = numel_u32(dst)?;
     if n > 0 {
-        ADD_INPLACE.launch(dst.device(), &[Arg::Tensor(dst), Arg::Tensor(src)], [n, 1, 1], &[n])?;
+        ADD_INPLACE.launch(
+            dst.device(),
+            &[Arg::Tensor(dst), Arg::Tensor(src)],
+            [n, 1, 1],
+            &[n],
+        )?;
     }
     dst.bump_version();
     Ok(())

@@ -30,7 +30,16 @@ fn data(n: usize, seed: u64) -> Vec<f32> {
 /// (batch, heads, 1, dim) attention over the first `len` positions of the
 /// host copies `k`, `v` (batch, kv_heads, len, dim), in float64.
 #[allow(clippy::too_many_arguments)]
-fn reference(q: &[f32], k: &[f32], v: &[f32], batch: usize, heads: usize, kv_heads: usize, len: usize, dim: usize) -> Vec<f64> {
+fn reference(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    batch: usize,
+    heads: usize,
+    kv_heads: usize,
+    len: usize,
+    dim: usize,
+) -> Vec<f64> {
     let scale = 1.0 / (dim as f64).sqrt();
     let mut out = vec![0.0; batch * heads * dim];
     for b in 0..batch {
@@ -40,14 +49,20 @@ fn reference(q: &[f32], k: &[f32], v: &[f32], batch: usize, heads: usize, kv_hea
             let s: Vec<f64> = (0..len)
                 .map(|j| {
                     let kr = &k[((b * kv_heads + g) * len + j) * dim..][..dim];
-                    qr.iter().zip(kr).map(|(a, c)| *a as f64 * *c as f64).sum::<f64>() * scale
+                    qr.iter()
+                        .zip(kr)
+                        .map(|(a, c)| *a as f64 * *c as f64)
+                        .sum::<f64>()
+                        * scale
                 })
                 .collect();
             let m = s.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let e: Vec<f64> = s.iter().map(|x| (x - m).exp()).collect();
             let z: f64 = e.iter().sum();
             for d in 0..dim {
-                let o: f64 = (0..len).map(|j| e[j] * v[((b * kv_heads + g) * len + j) * dim + d] as f64).sum();
+                let o: f64 = (0..len)
+                    .map(|j| e[j] * v[((b * kv_heads + g) * len + j) * dim + d] as f64)
+                    .sum();
                 out[(b * heads + h) * dim + d] = o / z;
             }
         }
@@ -59,7 +74,13 @@ fn reference(q: &[f32], k: &[f32], v: &[f32], batch: usize, heads: usize, kv_hea
 fn appends_then_decode_attention_match_float64() {
     let dev = dev();
     let mut worst = 0.0f64;
-    for (batch, heads, kv_heads, dim) in [(2, 6, 2, 64), (1, 14, 2, 64), (1, 4, 4, 128), (2, 3, 1, 80), (1, 2, 1, 1)] {
+    for (batch, heads, kv_heads, dim) in [
+        (2, 6, 2, 64),
+        (1, 14, 2, 64),
+        (1, 4, 4, 128),
+        (2, 3, 1, 80),
+        (1, 2, 1, 1),
+    ] {
         let (layers, max_len) = (2, 40);
         let mut cache = KvCache::new(&dev, layers, batch, kv_heads, dim, max_len).unwrap();
         // host copies, per layer, as (batch, kv_heads, len, dim) grown step by step
@@ -73,7 +94,11 @@ fn appends_then_decode_attention_match_float64() {
                 seed += 2;
                 let shape = [batch, kv_heads, step, dim];
                 cache
-                    .append(layer, &Tensor::from_slice(&dev, &kn, &shape).unwrap(), &Tensor::from_slice(&dev, &vn, &shape).unwrap())
+                    .append(
+                        layer,
+                        &Tensor::from_slice(&dev, &kn, &shape).unwrap(),
+                        &Tensor::from_slice(&dev, &vn, &shape).unwrap(),
+                    )
                     .unwrap();
                 for bh in 0..batch * kv_heads {
                     hk[layer][bh].extend_from_slice(&kn[bh * step * dim..][..step * dim]);
@@ -83,7 +108,13 @@ fn appends_then_decode_attention_match_float64() {
                 assert_eq!(len, hk[layer][0].len() / dim);
                 let q = data(batch * heads * dim, seed);
                 seed += 1;
-                let got = cache.attend(layer, &Tensor::from_slice(&dev, &q, &[batch, heads, 1, dim]).unwrap(), None).unwrap();
+                let got = cache
+                    .attend(
+                        layer,
+                        &Tensor::from_slice(&dev, &q, &[batch, heads, 1, dim]).unwrap(),
+                        None,
+                    )
+                    .unwrap();
                 assert_eq!(got.shape(), [batch, heads, 1, dim]);
                 let got = got.to_vec().unwrap();
                 let (fk, fv): (Vec<f32>, Vec<f32>) = (hk[layer].concat(), hv[layer].concat());
@@ -97,7 +128,10 @@ fn appends_then_decode_attention_match_float64() {
                 }
             }
         }
-        assert_eq!(cache.nbytes(), 2 * layers * batch * kv_heads * max_len * dim * 4);
+        assert_eq!(
+            cache.nbytes(),
+            2 * layers * batch * kv_heads * max_len * dim * 4
+        );
     }
     println!("kv cache attention: worst error / bound = {worst:.3}");
 }
@@ -111,10 +145,23 @@ fn refusals() {
     let kv = |t| Tensor::zeros(&dev, &[1, 2, t, 8]).unwrap();
     cache.append(0, &kv(3), &kv(3)).unwrap();
     assert!(cache.append(0, &kv(2), &kv(2)).is_err(), "past max_len");
-    assert!(cache.append(0, &Tensor::zeros(&dev, &[1, 3, 1, 8]).unwrap(), &kv(1)).is_err(), "wrong kv_heads");
+    assert!(
+        cache
+            .append(0, &Tensor::zeros(&dev, &[1, 3, 1, 8]).unwrap(), &kv(1))
+            .is_err(),
+        "wrong kv_heads"
+    );
     assert!(cache.append(1, &kv(1), &kv(1)).is_err(), "no such layer");
-    assert!(cache.attend(0, &Tensor::zeros(&dev, &[1, 3, 1, 8]).unwrap(), None).is_err(), "heads not a multiple");
-    assert!(KvCache::new(&dev, 1, 1, 1, 257, 4).is_err(), "head_dim over the kernel's limit");
+    assert!(
+        cache
+            .attend(0, &Tensor::zeros(&dev, &[1, 3, 1, 8]).unwrap(), None)
+            .is_err(),
+        "heads not a multiple"
+    );
+    assert!(
+        KvCache::new(&dev, 1, 1, 1, 257, 4).is_err(),
+        "head_dim over the kernel's limit"
+    );
     cache.reset().unwrap();
     assert!(cache.is_empty());
     cache.append(0, &kv(4), &kv(4)).unwrap();
@@ -134,7 +181,11 @@ fn split_decode_attention_matches_float64_at_every_split() {
     let (kn, vn) = (data(n, 5), data(n, 6));
     let shape = [batch, kv_heads, len, dim];
     cache
-        .append(0, &Tensor::from_slice(&dev, &kn, &shape).unwrap(), &Tensor::from_slice(&dev, &vn, &shape).unwrap())
+        .append(
+            0,
+            &Tensor::from_slice(&dev, &kn, &shape).unwrap(),
+            &Tensor::from_slice(&dev, &vn, &shape).unwrap(),
+        )
         .unwrap();
     let q = data(batch * heads * dim, 7);
     let qt = Tensor::from_slice(&dev, &q, &[batch, heads, 1, dim]).unwrap();
@@ -143,7 +194,11 @@ fn split_decode_attention_matches_float64_at_every_split() {
 
     let mut worst = 0.0f64;
     for splits in [1usize, 2, 3, 7, 16, 64, 256] {
-        let got = cache.attend_splits(0, &qt, None, splits).unwrap().to_vec().unwrap();
+        let got = cache
+            .attend_splits(0, &qt, None, splits)
+            .unwrap()
+            .to_vec()
+            .unwrap();
         for (i, (g, w)) in got.iter().zip(&want).enumerate() {
             let bound = 1e-5 * w.abs() + 1e-6 * vmax;
             let err = (*g as f64 - w).abs();
@@ -166,25 +221,41 @@ fn split_bench() {
     let (batch, heads, kv_heads, dim) = (1, 14, 2, 64);
     let max_len = 16_384;
     let mut cache = KvCache::new(&dev, 1, batch, kv_heads, dim, max_len).unwrap();
-    let q = Tensor::from_slice(&dev, &data(batch * heads * dim, 7), &[batch, heads, 1, dim]).unwrap();
+    let q =
+        Tensor::from_slice(&dev, &data(batch * heads * dim, 7), &[batch, heads, 1, dim]).unwrap();
     println!("      len |  splits=1       2       4       8      16      32      64     128 (ms)");
-    for (i, len) in [128usize, 256, 512, 1024, 2048, 4096, 8192, 12288, max_len].into_iter().enumerate() {
+    for (i, len) in [128usize, 256, 512, 1024, 2048, 4096, 8192, 12288, max_len]
+        .into_iter()
+        .enumerate()
+    {
         let step = len - cache.len(0);
         let n = batch * kv_heads * step * dim;
         let shape = [batch, kv_heads, step, dim];
         let (kn, vn) = (data(n, i as u64 * 2 + 1), data(n, i as u64 * 2 + 2));
         cache
-            .append(0, &Tensor::from_slice(&dev, &kn, &shape).unwrap(), &Tensor::from_slice(&dev, &vn, &shape).unwrap())
+            .append(
+                0,
+                &Tensor::from_slice(&dev, &kn, &shape).unwrap(),
+                &Tensor::from_slice(&dev, &vn, &shape).unwrap(),
+            )
             .unwrap();
         let mut line = format!("{len:9} |");
         for splits in [1usize, 2, 4, 8, 16, 32, 64, 128] {
             for _ in 0..3 {
-                cache.attend_splits(0, &q, None, splits).unwrap().to_vec().unwrap();
+                cache
+                    .attend_splits(0, &q, None, splits)
+                    .unwrap()
+                    .to_vec()
+                    .unwrap();
             }
             let runs = 20;
             let t = std::time::Instant::now();
             for _ in 0..runs {
-                cache.attend_splits(0, &q, None, splits).unwrap().to_vec().unwrap();
+                cache
+                    .attend_splits(0, &q, None, splits)
+                    .unwrap()
+                    .to_vec()
+                    .unwrap();
             }
             line += &format!(" {:7.3}", t.elapsed().as_secs_f64() * 1e3 / runs as f64);
         }

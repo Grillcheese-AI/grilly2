@@ -17,7 +17,14 @@ fn dev() -> Device {
 fn probe(x: &Tensor) -> Tensor {
     let out = Tensor::empty(x.device(), x.shape()).unwrap();
     let n = x.numel() as u32;
-    PROBE.launch(x.device(), &[Arg::Tensor(x), Arg::Tensor(&out)], [n, 1, 1], &[n]).unwrap();
+    PROBE
+        .launch(
+            x.device(),
+            &[Arg::Tensor(x), Arg::Tensor(&out)],
+            [n, 1, 1],
+            &[n],
+        )
+        .unwrap();
     out
 }
 
@@ -34,7 +41,10 @@ fn round_trip_and_reshape() {
     assert_eq!(r.shape(), &[6, 4]);
     assert_eq!(r.to_vec().unwrap(), x);
     assert!(matches!(t.reshape(&[5, 5]), Err(Error::Shape(_))));
-    assert!(matches!(Tensor::from_slice(&dev(), &x, &[5]), Err(Error::Shape(_))));
+    assert!(matches!(
+        Tensor::from_slice(&dev(), &x, &[5]),
+        Err(Error::Shape(_))
+    ));
 }
 
 #[test]
@@ -62,22 +72,39 @@ fn long_chain_with_dropped_intermediates() {
 fn launch_validates_interface() {
     let d = dev();
     let t = Tensor::zeros(&d, &[4]).unwrap();
-    let err = PROBE.launch(&d, &[Arg::Tensor(&t)], [4, 1, 1], &[4]).unwrap_err();
+    let err = PROBE
+        .launch(&d, &[Arg::Tensor(&t)], [4, 1, 1], &[4])
+        .unwrap_err();
     assert!(err.to_string().contains("takes 2 bindings"), "{err}");
-    let err = PROBE.launch(&d, &[Arg::Tensor(&t), Arg::Tensor(&t)], [4, 1, 1], &[]).unwrap_err();
+    let err = PROBE
+        .launch(&d, &[Arg::Tensor(&t), Arg::Tensor(&t)], [4, 1, 1], &[])
+        .unwrap_err();
     assert!(err.to_string().contains("push-constant"), "{err}");
 }
 
 #[test]
 fn unknown_kernel_is_an_error_not_a_crash() {
     let d = dev();
-    let bogus = Kernel { shader: "no-such-kernel", ..PROBE };
+    let bogus = Kernel {
+        shader: "no-such-kernel",
+        ..PROBE
+    };
     let t = Tensor::zeros(&d, &[4]).unwrap();
-    let err = bogus.launch(&d, &[Arg::Tensor(&t), Arg::Tensor(&t)], [4, 1, 1], &[4]).unwrap_err();
-    assert!(matches!(err, Error::Device(ref m) if m.contains("no-such-kernel")), "{err}");
+    let err = bogus
+        .launch(&d, &[Arg::Tensor(&t), Arg::Tensor(&t)], [4, 1, 1], &[4])
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Device(ref m) if m.contains("no-such-kernel")),
+        "{err}"
+    );
     assert!(!d.has_kernel("no-such-kernel").unwrap());
     // The device stays usable.
-    assert_eq!(probe(&Tensor::from_slice(&d, &[-1.0, 2.0], &[2]).unwrap()).to_vec().unwrap(), [0.0, 2.0]);
+    assert_eq!(
+        probe(&Tensor::from_slice(&d, &[-1.0, 2.0], &[2]).unwrap())
+            .to_vec()
+            .unwrap(),
+        [0.0, 2.0]
+    );
 }
 
 #[test]
@@ -88,7 +115,10 @@ fn buffers_round_trip_at_offsets() {
     let mut out = [0u8; 4];
     b.read(16, &mut out).unwrap();
     assert_eq!(out, [1, 2, 3, 4]);
-    assert!(matches!(d.alloc(0, MemClass::Device), Err(Error::Invalid(_))));
+    assert!(matches!(
+        d.alloc(0, MemClass::Device),
+        Err(Error::Invalid(_))
+    ));
 }
 
 #[test]

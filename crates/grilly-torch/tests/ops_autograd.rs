@@ -41,7 +41,16 @@ fn check(case: &Case) -> f32 {
         .enumerate()
         .map(|(i, s)| {
             let n = s.iter().product();
-            data(n, 100 + i as u32 * 7).into_iter().map(|v| if case.positive { v.abs() + 0.2 } else { v * 2.0 }).collect()
+            data(n, 100 + i as u32 * 7)
+                .into_iter()
+                .map(|v| {
+                    if case.positive {
+                        v.abs() + 0.2
+                    } else {
+                        v * 2.0
+                    }
+                })
+                .collect()
         })
         .collect();
     let leaves: Vec<Tensor> = inputs
@@ -63,13 +72,22 @@ fn check(case: &Case) -> f32 {
         "(lambda f: [f(*[v.double() for v in ({args},)])] + list(grads(lambda *xs: f(*[x.double() for x in xs]), ({args},), g.double())))({})",
         case.torch
     );
-    let mut torch_inputs: Vec<(&str, &[f32], &[usize])> =
-        names.iter().zip(&inputs).zip(case.shapes).map(|((n, d), s)| (n.as_str(), &d[..], *s)).collect();
+    let mut torch_inputs: Vec<(&str, &[f32], &[usize])> = names
+        .iter()
+        .zip(&inputs)
+        .zip(case.shapes)
+        .map(|((n, d), s)| (n.as_str(), &d[..], *s))
+        .collect();
     torch_inputs.push(("g", &g, out.shape()));
     let truth = torch_many(&expr, &torch_inputs);
 
     let mut got = vec![out.to_vec().unwrap()];
-    got.extend(leaves.iter().map(|l| l.grad().expect("every input requires grad").to_vec().unwrap()));
+    got.extend(leaves.iter().map(|l| {
+        l.grad()
+            .expect("every input requires grad")
+            .to_vec()
+            .unwrap()
+    }));
     let mut worst = 0f32;
     for (i, (a, b)) in got.iter().zip(&truth).enumerate() {
         assert_eq!(a.len(), b.len(), "{}: tensor {i} length", case.name);
@@ -77,7 +95,16 @@ fn check(case: &Case) -> f32 {
         let bound = 1e-6 * scale + 1e-7;
         for (j, (x, y)) in a.iter().zip(b).enumerate() {
             let r = (x - y).abs() / bound;
-            assert!(r <= 1.0, "{}: {} element {j}: grilly {x}, float64 torch {y}", case.name, if i == 0 { "output".to_string() } else { format!("grad of input {}", i - 1) });
+            assert!(
+                r <= 1.0,
+                "{}: {} element {j}: grilly {x}, float64 torch {y}",
+                case.name,
+                if i == 0 {
+                    "output".to_string()
+                } else {
+                    format!("grad of input {}", i - 1)
+                }
+            );
             worst = worst.max(r);
         }
     }
@@ -161,7 +188,10 @@ fn maximum_splits_tied_gradients_like_torch() {
     let (a, bb) = (t(&[1.0, 2.0, 3.0], &[3]), t(&[1.0, 5.0, 0.0], &[3]));
     a.set_requires_grad(true).unwrap();
     bb.set_requires_grad(true).unwrap();
-    math::binary(&a, &bb, Binary::Maximum).unwrap().backward(Some(&t(&[1.0; 3], &[3])), false).unwrap();
+    math::binary(&a, &bb, Binary::Maximum)
+        .unwrap()
+        .backward(Some(&t(&[1.0; 3], &[3])), false)
+        .unwrap();
     assert_eq!(a.grad().unwrap().to_vec().unwrap(), [0.5, 0.0, 1.0]);
     assert_eq!(bb.grad().unwrap().to_vec().unwrap(), [0.5, 1.0, 0.0]);
 }
@@ -171,7 +201,10 @@ fn view_copies_refuse_in_place_writes() {
     let x = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
     let tr = shape::transpose(&x, 0, 1).unwrap();
     assert!(tr.is_view_copy());
-    assert!(matches!(tr.fill_(0.0), Err(grilly_core::Error::NotImplemented(_))));
+    assert!(matches!(
+        tr.fill_(0.0),
+        Err(grilly_core::Error::NotImplemented(_))
+    ));
     // write_region is a real in-place write into the original
     shape::write_region(&x, 1, &[2], &[2], &t(&[9.0], &[])).unwrap();
     assert_eq!(x.to_vec().unwrap(), [1.0, 9.0, 3.0, 9.0]);
@@ -183,7 +216,10 @@ fn grad_fn_names_follow_torch() {
     x.set_requires_grad(true).unwrap();
     let names = [
         (math::binary(&x, &x, Binary::Mul).unwrap(), "MulBackward0"),
-        (math::unary(&x, Unary::Exp, 0.0, 0.0).unwrap(), "ExpBackward0"),
+        (
+            math::unary(&x, Unary::Exp, 0.0, 0.0).unwrap(),
+            "ExpBackward0",
+        ),
         (math::sum(&x, &[], false).unwrap(), "SumBackward0"),
         (math::sum(&x, &[1], false).unwrap(), "SumBackward1"),
         (shape::transpose(&x, 0, 1).unwrap(), "TransposeBackward0"),

@@ -16,7 +16,12 @@
 use grilly_core::rng::Generator;
 use grilly_core::{graph, Arg, Device, Kernel, Tensor};
 
-const RELU: Kernel = Kernel { shader: "g2-relu", bindings: 2, push_words: 1, local_size: [256, 1, 1] };
+const RELU: Kernel = Kernel {
+    shader: "g2-relu",
+    bindings: 2,
+    push_words: 1,
+    local_size: [256, 1, 1],
+};
 
 /// Serializes every test here. Capture is a property of the device, which
 /// is one process-wide singleton, so a second test running in parallel has
@@ -32,7 +37,13 @@ fn dev() -> Device {
 }
 
 fn relu(dev: &Device, x: &Tensor, y: &Tensor, n: usize) {
-    RELU.launch(dev, &[Arg::Tensor(x), Arg::Tensor(y)], [n as u32, 1, 1], &[n as u32]).unwrap();
+    RELU.launch(
+        dev,
+        &[Arg::Tensor(x), Arg::Tensor(y)],
+        [n as u32, 1, 1],
+        &[n as u32],
+    )
+    .unwrap();
 }
 
 /// Host write into an existing tensor: `uniform_(v, v)` is the one public
@@ -64,7 +75,11 @@ fn a_replay_recomputes_from_whatever_the_inputs_now_hold() {
     for value in [3.0f32, -2.0, 0.5] {
         fill_from_host(&x, value);
         captured.replay().unwrap();
-        assert_eq!(y.to_vec().unwrap(), vec![value.max(0.0); n], "replay with {value}");
+        assert_eq!(
+            y.to_vec().unwrap(),
+            vec![value.max(0.0); n],
+            "replay with {value}"
+        );
     }
 }
 
@@ -90,7 +105,11 @@ fn a_replay_issues_the_same_dispatches() {
     captured.replay().unwrap();
     dev.synchronize().unwrap();
     let after = dev.submit_stats().unwrap();
-    assert_eq!(after.dispatches - before.dispatches, 8, "a replay runs the same work");
+    assert_eq!(
+        after.dispatches - before.dispatches,
+        8,
+        "a replay runs the same work"
+    );
 }
 
 #[test]
@@ -106,10 +125,14 @@ fn a_graph_outlives_the_tensors_it_was_captured_from() {
             Ok(())
         })
         .unwrap();
-        captured  // x is dropped here; the graph still names its buffer
+        captured // x is dropped here; the graph still names its buffer
     };
     captured.replay().unwrap();
-    assert_eq!(y.to_vec().unwrap(), vec![2.0f32; n], "the captured input's buffer was freed");
+    assert_eq!(
+        y.to_vec().unwrap(),
+        vec![2.0f32; n],
+        "the captured input's buffer was freed"
+    );
 }
 
 #[test]
@@ -129,7 +152,7 @@ fn reading_or_writing_from_the_host_during_a_capture_is_refused() {
 
     let write = graph::capture(&dev, || {
         relu(&dev, &x, &y, n);
-        let mut generator = Generator::new(0);  // not fill_from_host: the error must propagate
+        let mut generator = Generator::new(0); // not fill_from_host: the error must propagate
         x.uniform_(2.0, 2.0, &mut generator).map(|_| ())
     });
     assert!(write.is_err(), "a host write during capture was allowed");

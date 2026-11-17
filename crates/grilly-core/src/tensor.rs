@@ -30,9 +30,10 @@ pub struct Tensor {
 }
 
 fn numel_of(shape: &[usize]) -> Result<usize> {
-    shape.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d)).ok_or_else(|| {
-        Error::Shape(format!("shape {shape:?} has too many elements"))
-    })
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| Error::Shape(format!("shape {shape:?} has too many elements")))
 }
 
 fn as_bytes(data: &[f32]) -> &[u8] {
@@ -61,7 +62,14 @@ impl Backward for CloneBackward {
 
 impl Tensor {
     fn from_parts(storage: Arc<Buffer>, shape: Vec<usize>, offset: usize, dtype: DType) -> Tensor {
-        Tensor { storage, shape, offset, dtype, meta: Arc::new(Meta::leaf()), view_copy: false }
+        Tensor {
+            storage,
+            shape,
+            offset,
+            dtype,
+            meta: Arc::new(Meta::leaf()),
+            view_copy: false,
+        }
     }
 
     /// A float32 tensor with undefined contents.
@@ -77,13 +85,23 @@ impl Tensor {
     /// A tensor of `dtype` with undefined contents, in `mem`: `Device` for
     /// working tensors, `Persistent` for ones that live as long as the
     /// program (weights).
-    pub fn empty_in(device: &Device, shape: &[usize], dtype: DType, mem: MemClass) -> Result<Tensor> {
+    pub fn empty_in(
+        device: &Device,
+        shape: &[usize],
+        dtype: DType,
+        mem: MemClass,
+    ) -> Result<Tensor> {
         let bytes = numel_of(shape)?
             .checked_mul(dtype.size())
             .ok_or_else(|| Error::Shape(format!("shape {shape:?} is too large")))?;
         // Zero-element tensors still get a minimal allocation.
         let storage = device.alloc(bytes.max(8) as u64, mem)?;
-        Ok(Tensor::from_parts(Arc::new(storage), shape.to_vec(), 0, dtype))
+        Ok(Tensor::from_parts(
+            Arc::new(storage),
+            shape.to_vec(),
+            0,
+            dtype,
+        ))
     }
 
     /// Copy float32 `data` (row-major) to a new tensor of the given shape.
@@ -93,7 +111,12 @@ impl Tensor {
 
     /// A new tensor from its elements as stored (little-endian; bool as one
     /// u32 0/1 per element), row-major.
-    pub fn from_bytes(device: &Device, data: &[u8], shape: &[usize], dtype: DType) -> Result<Tensor> {
+    pub fn from_bytes(
+        device: &Device,
+        data: &[u8],
+        shape: &[usize],
+        dtype: DType,
+    ) -> Result<Tensor> {
         Tensor::from_bytes_in(device, data, shape, dtype, MemClass::Device)
     }
 
@@ -102,7 +125,12 @@ impl Tensor {
     ///
     /// See [`Buffer::write_constant`] for what that promise means and why it
     /// is not the general rule. The only caller is `crate::fusion`.
-    pub(crate) fn constant_from_bytes(device: &Device, data: &[u8], shape: &[usize], dtype: DType) -> Result<Tensor> {
+    pub(crate) fn constant_from_bytes(
+        device: &Device,
+        data: &[u8],
+        shape: &[usize],
+        dtype: DType,
+    ) -> Result<Tensor> {
         let t = Tensor::empty_in(device, shape, dtype, MemClass::Device)?;
         if !data.is_empty() {
             t.storage.write_constant(0, data)?;
@@ -111,7 +139,13 @@ impl Tensor {
     }
 
     /// [`Tensor::from_bytes`] into memory of class `mem` (see [`Tensor::empty_in`]).
-    pub fn from_bytes_in(device: &Device, data: &[u8], shape: &[usize], dtype: DType, mem: MemClass) -> Result<Tensor> {
+    pub fn from_bytes_in(
+        device: &Device,
+        data: &[u8],
+        shape: &[usize],
+        dtype: DType,
+        mem: MemClass,
+    ) -> Result<Tensor> {
         let n = numel_of(shape)?;
         if data.len() != n * dtype.size() {
             return Err(Error::Shape(format!(
@@ -136,7 +170,12 @@ impl Tensor {
     }
 
     /// Every element `value` converted to `dtype` (torch's `full(..., dtype=)`).
-    pub fn full_typed(device: &Device, shape: &[usize], value: f64, dtype: DType) -> Result<Tensor> {
+    pub fn full_typed(
+        device: &Device,
+        shape: &[usize],
+        value: f64,
+        dtype: DType,
+    ) -> Result<Tensor> {
         let t = Tensor::empty_typed(device, shape, dtype)?;
         t.fill_raw(value)?;
         Ok(t)
@@ -151,7 +190,12 @@ impl Tensor {
         let pattern = self.dtype.encode(value);
         if pattern.len() == 4 {
             let word = u32::from_le_bytes(pattern.try_into().unwrap());
-            return self.device().record_fill(&self.storage, self.byte_offset(), self.byte_len(), word);
+            return self.device().record_fill(
+                &self.storage,
+                self.byte_offset(),
+                self.byte_len(),
+                word,
+            );
         }
         // A multi-word element — int64. Filling it by uploading one and
         // broadcasting would be a host write, which a capture refuses, so
@@ -162,8 +206,16 @@ impl Tensor {
     /// A copy of the data in new storage (torch's `clone()`); differentiable.
     pub fn clone_data(&self) -> Result<Tensor> {
         let mut out = Tensor::empty_typed(self.device(), &self.shape, self.dtype)?;
-        self.device().record_copy(&self.storage, self.byte_offset(), &out.storage, 0, self.byte_len())?;
-        autograd::record("CloneBackward0", &[self], &mut [&mut out], |_| Ok(CloneBackward))?;
+        self.device().record_copy(
+            &self.storage,
+            self.byte_offset(),
+            &out.storage,
+            0,
+            self.byte_len(),
+        )?;
+        autograd::record("CloneBackward0", &[self], &mut [&mut out], |_| {
+            Ok(CloneBackward)
+        })?;
         Ok(out)
     }
 
@@ -174,7 +226,12 @@ impl Tensor {
 
     /// The same data, cut off from the graph (torch's `detach()`).
     pub fn detach(&self) -> Tensor {
-        Tensor::from_parts(self.storage.clone(), self.shape.clone(), self.offset, self.dtype)
+        Tensor::from_parts(
+            self.storage.clone(),
+            self.shape.clone(),
+            self.offset,
+            self.dtype,
+        )
     }
 
     /// The element type.
@@ -196,7 +253,12 @@ impl Tensor {
     pub fn to_vec(&self) -> Result<Vec<f32>> {
         require_float("to_vec", self.dtype)?;
         let bytes = self.to_bytes()?;
-        Ok(bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect())
+        Ok(bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
+            .collect())
     }
 
     /// The elements as stored (see [`Tensor::from_bytes`]). Waits for pending work.
@@ -236,10 +298,17 @@ impl Tensor {
                 self.numel()
             )));
         }
-        let mut out = Tensor::from_parts(self.storage.clone(), shape.to_vec(), self.offset, self.dtype);
+        let mut out = Tensor::from_parts(
+            self.storage.clone(),
+            shape.to_vec(),
+            self.offset,
+            self.dtype,
+        );
         out.view_copy = self.view_copy;
         let input_shape = self.shape.clone();
-        autograd::record("ViewBackward0", &[self], &mut [&mut out], |_| Ok(ViewBackward { input_shape }))?;
+        autograd::record("ViewBackward0", &[self], &mut [&mut out], |_| {
+            Ok(ViewBackward { input_shape })
+        })?;
         Ok(out)
     }
 
@@ -252,7 +321,9 @@ impl Tensor {
     /// torch's `requires_grad_()`: only leaves can change it.
     pub fn set_requires_grad(&self, value: bool) -> Result<()> {
         if value && !self.dtype.is_floating() {
-            return Err(Error::Invalid("only Tensors of floating point and complex dtype can require gradients".into()));
+            return Err(Error::Invalid(
+                "only Tensors of floating point and complex dtype can require gradients".into(),
+            ));
         }
         autograd::set_requires_grad(&self.meta, value)
     }
@@ -327,13 +398,20 @@ impl Tensor {
         }
         if self.requires_grad() {
             return Err(if self.is_leaf() {
-                Error::Invalid("a leaf Variable that requires grad is being used in an in-place operation.".into())
+                Error::Invalid(
+                    "a leaf Variable that requires grad is being used in an in-place operation."
+                        .into(),
+                )
             } else {
-                Error::NotImplemented("in-place operations on tensors that are part of an autograd graph".into())
+                Error::NotImplemented(
+                    "in-place operations on tensors that are part of an autograd graph".into(),
+                )
             });
         }
         if operands.iter().any(|t| t.requires_grad()) {
-            return Err(Error::NotImplemented("in-place operations with an operand that requires grad".into()));
+            return Err(Error::NotImplemented(
+                "in-place operations with an operand that requires grad".into(),
+            ));
         }
         Ok(())
     }
@@ -369,7 +447,13 @@ impl Tensor {
         }
         self.check_inplace(&[src])?;
         let src = src.cast(self.dtype)?; // torch converts to the destination's dtype
-        self.device().record_copy(&src.storage, src.byte_offset(), &self.storage, self.byte_offset(), self.byte_len())?;
+        self.device().record_copy(
+            &src.storage,
+            src.byte_offset(),
+            &self.storage,
+            self.byte_offset(),
+            self.byte_len(),
+        )?;
         self.bump_version();
         Ok(self)
     }
@@ -391,7 +475,11 @@ impl Tensor {
     pub fn normal_(&self, mean: f32, std: f32, generator: &mut Generator) -> Result<&Tensor> {
         require_float("normal_", self.dtype)?;
         self.check_inplace(&[])?;
-        let values: Vec<f32> = generator.normal(self.numel()).into_iter().map(|z| mean + std * z).collect();
+        let values: Vec<f32> = generator
+            .normal(self.numel())
+            .into_iter()
+            .map(|z| mean + std * z)
+            .collect();
         self.overwrite(&values)
     }
 
@@ -399,7 +487,11 @@ impl Tensor {
     pub fn uniform_(&self, from: f32, to: f32, generator: &mut Generator) -> Result<&Tensor> {
         require_float("uniform_", self.dtype)?;
         self.check_inplace(&[])?;
-        let values: Vec<f32> = generator.uniform(self.numel()).into_iter().map(|u| from + (to - from) * u).collect();
+        let values: Vec<f32> = generator
+            .uniform(self.numel())
+            .into_iter()
+            .map(|u| from + (to - from) * u)
+            .collect();
         self.overwrite(&values)
     }
 
@@ -457,7 +549,12 @@ impl Tensor {
 
 impl std::fmt::Debug for Tensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Tensor(shape={:?}, device={:?}", self.shape, self.device())?;
+        write!(
+            f,
+            "Tensor(shape={:?}, device={:?}",
+            self.shape,
+            self.device()
+        )?;
         match self.grad_fn_name() {
             Some(name) => write!(f, ", grad_fn={name})"),
             None if self.requires_grad() => write!(f, ", requires_grad=True)"),

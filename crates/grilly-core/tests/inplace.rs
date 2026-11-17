@@ -53,7 +53,10 @@ fn torch_inplace_rules() {
 
     // a leaf that requires grad: error outside no_grad, fine inside
     let e = w.zero_().unwrap_err();
-    assert!(e.to_string().contains("leaf Variable that requires grad"), "{e}");
+    assert!(
+        e.to_string().contains("leaf Variable that requires grad"),
+        "{e}"
+    );
     {
         let _g = no_grad();
         w.fill_(0.5).unwrap();

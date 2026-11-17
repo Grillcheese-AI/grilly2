@@ -24,7 +24,9 @@ fn vectors(n: usize, seed: u64) -> (Vec<Vec<u8>>, Tensor) {
         s ^= s << 17;
         s
     };
-    let bits: Vec<Vec<u8>> = (0..n).map(|_| (0..DIM).map(|_| (next() & 1) as u8).collect()).collect();
+    let bits: Vec<Vec<u8>> = (0..n)
+        .map(|_| (0..DIM).map(|_| (next() & 1) as u8).collect())
+        .collect();
     let mut words = vec![0i32; n * WORDS];
     for (v, row) in bits.iter().enumerate() {
         for (i, &bit) in row.iter().enumerate() {
@@ -35,7 +37,10 @@ fn vectors(n: usize, seed: u64) -> (Vec<Vec<u8>>, Tensor) {
     }
     let packed = Tensor::from_bytes(
         &dev(),
-        &words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>(),
+        &words
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect::<Vec<u8>>(),
         &[n, WORDS],
         DType::I32,
     )
@@ -44,13 +49,17 @@ fn vectors(n: usize, seed: u64) -> (Vec<Vec<u8>>, Tensor) {
 }
 
 fn as_i32(t: &Tensor) -> Vec<i32> {
-    t.to_bytes().unwrap().chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect()
+    t.to_bytes()
+        .unwrap()
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 #[test]
 fn hamming_counts_every_differing_bit() {
     let (bits, x) = vectors(64, 1);
-    let (_, one) = vectors(1, 1);                 // the same seed: row 0 again
+    let (_, one) = vectors(1, 1); // the same seed: row 0 again
     let query = one.reshape(&[WORDS]).unwrap();
     let got = as_i32(&packed::hamming(&query, &x).unwrap());
     let want: Vec<i32> = bits
@@ -83,11 +92,18 @@ fn permuting_rotates_the_bits_and_reverses() {
         for i in 0..DIM {
             let from = (i as i64 - shift).rem_euclid(DIM as i64) as usize;
             let have = (got[i / 32] as u32 >> (i % 32)) & 1;
-            assert_eq!(have, u32::from(bits[0][from] == 1), "shift {shift}, bit {i}");
+            assert_eq!(
+                have,
+                u32::from(bits[0][from] == 1),
+                "shift {shift}, bit {i}"
+            );
         }
     }
     let rotated = packed::permute(&x, DIM, 7).unwrap();
-    assert_eq!(as_i32(&packed::permute(&rotated, DIM, -7).unwrap()), as_i32(&x));
+    assert_eq!(
+        as_i32(&packed::permute(&rotated, DIM, -7).unwrap()),
+        as_i32(&x)
+    );
 }
 
 #[test]

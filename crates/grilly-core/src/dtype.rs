@@ -77,6 +77,9 @@ pub fn require_float(op: &str, dtype: DType) -> Result<()> {
     if dtype.is_floating() {
         Ok(())
     } else {
-        Err(Error::NotImplemented(format!("{op} for dtype {}", dtype.name())))
+        Err(Error::NotImplemented(format!(
+            "{op} for dtype {}",
+            dtype.name()
+        )))
     }
 }

@@ -41,9 +41,25 @@ use crate::error::{Error, Result};
 
 /// One recorded command, with everything the shim needs to re-issue it.
 pub(crate) enum Command {
-    Dispatch { shader: CString, bindings: Vec<sys::gc_binding>, groups: [u32; 3], push: Vec<u32> },
-    Copy { src: sys::gc_buf, src_offset: u64, dst: sys::gc_buf, dst_offset: u64, bytes: u64 },
-    Fill { dst: sys::gc_buf, offset: u64, bytes: u64, word: u32 },
+    Dispatch {
+        shader: CString,
+        bindings: Vec<sys::gc_binding>,
+        groups: [u32; 3],
+        push: Vec<u32>,
+    },
+    Copy {
+        src: sys::gc_buf,
+        src_offset: u64,
+        dst: sys::gc_buf,
+        dst_offset: u64,
+        bytes: u64,
+    },
+    Fill {
+        dst: sys::gc_buf,
+        offset: u64,
+        bytes: u64,
+        word: u32,
+    },
 }
 
 /// Commands recorded so far, and the buffers they reference.
@@ -66,7 +82,11 @@ pub struct CommandGraph {
 
 impl CommandGraph {
     pub fn new(device: Device, recorder: Recorder) -> CommandGraph {
-        CommandGraph { device, commands: recorder.commands, _retained: recorder.retained }
+        CommandGraph {
+            device,
+            commands: recorder.commands,
+            _retained: recorder.retained,
+        }
     }
 
     /// Commands in the graph.
@@ -83,13 +103,30 @@ impl CommandGraph {
     pub fn replay(&self) -> Result<()> {
         for command in &self.commands {
             match command {
-                Command::Dispatch { shader, bindings, groups, push } => {
+                Command::Dispatch {
+                    shader,
+                    bindings,
+                    groups,
+                    push,
+                } => {
                     self.device.record(shader, bindings, *groups, push)?;
                 }
-                Command::Copy { src, src_offset, dst, dst_offset, bytes } => {
-                    self.device.record_copy_raw(*src, *src_offset, *dst, *dst_offset, *bytes)?;
+                Command::Copy {
+                    src,
+                    src_offset,
+                    dst,
+                    dst_offset,
+                    bytes,
+                } => {
+                    self.device
+                        .record_copy_raw(*src, *src_offset, *dst, *dst_offset, *bytes)?;
                 }
-                Command::Fill { dst, offset, bytes, word } => {
+                Command::Fill {
+                    dst,
+                    offset,
+                    bytes,
+                    word,
+                } => {
                     self.device.record_fill_raw(*dst, *offset, *bytes, *word)?;
                 }
             }

@@ -38,19 +38,50 @@ use crate::ops::{Heads, Rotary};
 
 /// Bindings: q, k cache, v cache, scratch, out. Push: heads, kv_heads,
 /// max_len, len, dim, scale, q_off, rows.
-const ATTN_DECODE: Kernel = Kernel { shader: "g2-attn-decode", bindings: 6, push_words: 8, local_size: [256, 1, 1] };
+const ATTN_DECODE: Kernel = Kernel {
+    shader: "g2-attn-decode",
+    bindings: 6,
+    push_words: 8,
+    local_size: [256, 1, 1],
+};
 /// Bindings: q, k cache, v cache, scratch, (m, l), partial out. Push: heads,
 /// kv_heads, max_len, len, dim, scale, q_off, splits.
-const ATTN_DECODE_SPLIT: Kernel = Kernel { shader: "g2-attn-decode-split", bindings: 7, push_words: 8, local_size: [256, 1, 1] };
+const ATTN_DECODE_SPLIT: Kernel = Kernel {
+    shader: "g2-attn-decode-split",
+    bindings: 7,
+    push_words: 8,
+    local_size: [256, 1, 1],
+};
 /// Bindings: (m, l), partial out, out. Push: rows, splits, dim.
-const ATTN_DECODE_MERGE: Kernel = Kernel { shader: "g2-attn-decode-merge", bindings: 3, push_words: 3, local_size: [256, 1, 1] };
+const ATTN_DECODE_MERGE: Kernel = Kernel {
+    shader: "g2-attn-decode-merge",
+    bindings: 3,
+    push_words: 3,
+    local_size: [256, 1, 1],
+};
 /// Bindings: source, cos, sin, cache, cursor. Push: n, T, heads, dim, layer,
 /// max_len, src_off, rope, the source's and the cache's three strides, and
 /// the absolute position of the cache's slot 0.
-const KV_WRITE: Kernel = Kernel { shader: "g2-kv-write", bindings: 5, push_words: 15, local_size: [256, 1, 1] };
+const KV_WRITE: Kernel = Kernel {
+    shader: "g2-kv-write",
+    bindings: 5,
+    push_words: 15,
+    local_size: [256, 1, 1],
+};
 /// Bindings: cursor. Push: layer, T, max_len.
-const KV_ADVANCE: Kernel = Kernel { shader: "g2-kv-advance", bindings: 1, push_words: 3, local_size: [1, 1, 1] };
-pub const KERNELS: &[Kernel] = &[ATTN_DECODE, ATTN_DECODE_SPLIT, ATTN_DECODE_MERGE, KV_WRITE, KV_ADVANCE];
+const KV_ADVANCE: Kernel = Kernel {
+    shader: "g2-kv-advance",
+    bindings: 1,
+    push_words: 3,
+    local_size: [1, 1, 1],
+};
+pub const KERNELS: &[Kernel] = &[
+    ATTN_DECODE,
+    ATTN_DECODE_SPLIT,
+    ATTN_DECODE_MERGE,
+    KV_WRITE,
+    KV_ADVANCE,
+];
 
 /// Cache positions per slice, at least: with fewer, a workgroup's 256
 /// threads run dry and the split costs more than it wins. Measured: at 256
@@ -66,7 +97,9 @@ const MAX_SPLITS: usize = 256;
 /// How many slices to cut `len` positions into for `rows` (batch * head)
 /// queries. 1 means the single-workgroup kernel.
 fn splits_for(rows: usize, len: usize) -> usize {
-    TARGET_GROUPS.div_ceil(rows.max(1)).clamp(1, (len / MIN_CHUNK).clamp(1, MAX_SPLITS))
+    TARGET_GROUPS
+        .div_ceil(rows.max(1))
+        .clamp(1, (len / MIN_CHUNK).clamp(1, MAX_SPLITS))
 }
 
 /// Largest head dimension g2-attn-decode takes (its lanes per group).
@@ -93,12 +126,23 @@ pub struct KvCache {
 impl KvCache {
     /// An empty cache for `layers` layers of `(batch, kv_heads, max_len,
     /// head_dim)` keys and values.
-    pub fn new(device: &Device, layers: usize, batch: usize, kv_heads: usize, head_dim: usize, max_len: usize) -> Result<KvCache> {
+    pub fn new(
+        device: &Device,
+        layers: usize,
+        batch: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        max_len: usize,
+    ) -> Result<KvCache> {
         if kv_heads == 0 || head_dim == 0 || max_len == 0 || batch == 0 {
-            return Err(Error::Shape("KV cache: batch, kv_heads, head_dim and max_len must be positive".into()));
+            return Err(Error::Shape(
+                "KV cache: batch, kv_heads, head_dim and max_len must be positive".into(),
+            ));
         }
         if head_dim > MAX_HEAD_DIM {
-            return Err(Error::NotImplemented(format!("a KV cache with head_dim {head_dim} (at most {MAX_HEAD_DIM})")));
+            return Err(Error::NotImplemented(format!(
+                "a KV cache with head_dim {head_dim} (at most {MAX_HEAD_DIM})"
+            )));
         }
         let shape = [batch, kv_heads, max_len, head_dim];
         let alloc = || Tensor::empty_in(device, &shape, DType::F32, MemClass::Persistent);
@@ -108,7 +152,16 @@ impl KvCache {
             v.push(alloc()?);
         }
         let cursor = Tensor::full_typed(device, &[layers], 0.0, DType::I32)?;
-        Ok(KvCache { k, v, cursor, lens: vec![0; layers], batch, kv_heads, head_dim, max_len })
+        Ok(KvCache {
+            k,
+            v,
+            cursor,
+            lens: vec![0; layers],
+            batch,
+            kv_heads,
+            head_dim,
+            max_len,
+        })
     }
 
     pub fn layers(&self) -> usize {
@@ -174,6 +227,7 @@ impl KvCache {
     /// Write `T` positions into `dst` at the layer's cursor, rotating them
     /// first when `rot` is given, and advance the cursor. `src_strides` and
     /// `dst_strides` are (batch, head, position) in elements.
+    #[allow(clippy::too_many_arguments)] // private; each is one stride or offset of a strided copy
     fn write_at_cursor(
         &self,
         layer: usize,
@@ -196,7 +250,13 @@ impl KvCache {
         let (cos, sin, pos_base) = rot.unwrap_or((src, src, 0));
         KV_WRITE.launch_flat(
             dev,
-            &[Arg::Storage(src), Arg::Storage(cos), Arg::Storage(sin), Arg::Storage(dst), Arg::Storage(&self.cursor)],
+            &[
+                Arg::Storage(src),
+                Arg::Storage(cos),
+                Arg::Storage(sin),
+                Arg::Storage(dst),
+                Arg::Storage(&self.cursor),
+            ],
             n,
             &[
                 u32_of(n, "elements")?,
@@ -226,7 +286,11 @@ impl KvCache {
             device,
             &[Arg::Storage(&self.cursor)],
             [1, 1, 1],
-            &[u32_of(layer, "layer")?, u32_of(t, "T")?, u32_of(self.max_len, "max_len")?],
+            &[
+                u32_of(layer, "layer")?,
+                u32_of(t, "T")?,
+                u32_of(self.max_len, "max_len")?,
+            ],
         )
     }
 
@@ -246,7 +310,10 @@ impl KvCache {
 
     fn layer(&self, layer: usize) -> Result<()> {
         if layer >= self.layers() {
-            return Err(Error::Index(format!("KV cache: layer {layer} out of range for {} layers", self.layers())));
+            return Err(Error::Index(format!(
+                "KV cache: layer {layer} out of range for {} layers",
+                self.layers()
+            )));
         }
         Ok(())
     }
@@ -270,14 +337,35 @@ impl KvCache {
         }
         let t = keys.shape()[2];
         if values.shape()[2] != t {
-            return Err(Error::Shape(format!("KV cache append: {t} keys but {} values", values.shape()[2])));
+            return Err(Error::Shape(format!(
+                "KV cache append: {t} keys but {} values",
+                values.shape()[2]
+            )));
         }
         let pos = self.room_for(layer, t)?;
         let m = self.max_len;
         let src = [h * t * d, t * d, d];
         let dst = [h * m * d, m * d, d];
-        self.write_at_cursor(layer, keys, keys.offset(), src, None, &self.k[layer], dst, t)?;
-        self.write_at_cursor(layer, values, values.offset(), src, None, &self.v[layer], dst, t)?;
+        self.write_at_cursor(
+            layer,
+            keys,
+            keys.offset(),
+            src,
+            None,
+            &self.k[layer],
+            dst,
+            t,
+        )?;
+        self.write_at_cursor(
+            layer,
+            values,
+            values.offset(),
+            src,
+            None,
+            &self.v[layer],
+            dst,
+            t,
+        )?;
         self.advance(keys.device(), layer, t)?;
         self.lens[layer] = pos + t;
         Ok(())
@@ -287,12 +375,22 @@ impl KvCache {
     /// taking them from projections in their own `(batch, T, row)` layout:
     /// the keys are rotated into the cache by the rotary kernel and the
     /// values copied, with no transpose or slice in between. Two dispatches.
-    pub fn append_rotary(&mut self, layer: usize, keys: &Heads<'_>, values: &Heads<'_>, rot: &Rotary<'_>) -> Result<()> {
+    pub fn append_rotary(
+        &mut self,
+        layer: usize,
+        keys: &Heads<'_>,
+        values: &Heads<'_>,
+        rot: &Rotary<'_>,
+    ) -> Result<()> {
         self.layer(layer)?;
         let (b, t, v_row) = values.layout()?;
         let (kb, kt, _) = keys.layout()?;
         let (h, d, m) = (self.kv_heads, self.head_dim, self.max_len);
-        if (kb, kt) != (b, t) || (keys.heads, keys.dim) != (h, d) || (values.heads, values.dim) != (h, d) || b != self.batch {
+        if (kb, kt) != (b, t)
+            || (keys.heads, keys.dim) != (h, d)
+            || (values.heads, values.dim) != (h, d)
+            || b != self.batch
+        {
             return Err(Error::Shape(format!(
                 "KV cache append: expected {h} heads of {d} for batch {}, got keys {}x{} and values {}x{} for batch {b}",
                 self.batch, keys.heads, keys.dim, values.heads, values.dim
@@ -343,11 +441,23 @@ impl KvCache {
 
     /// [`KvCache::attend`] with the number of slices forced, for tests and
     /// the benchmark that set [`splits_for`].
-    pub fn attend_splits(&self, layer: usize, q: &Tensor, scale: Option<f32>, splits: usize) -> Result<Tensor> {
+    pub fn attend_splits(
+        &self,
+        layer: usize,
+        q: &Tensor,
+        scale: Option<f32>,
+        splits: usize,
+    ) -> Result<Tensor> {
         self.attend_in(layer, q, scale, Some(splits))
     }
 
-    fn attend_in(&self, layer: usize, q: &Tensor, scale: Option<f32>, splits: Option<usize>) -> Result<Tensor> {
+    fn attend_in(
+        &self,
+        layer: usize,
+        q: &Tensor,
+        scale: Option<f32>,
+        splits: Option<usize>,
+    ) -> Result<Tensor> {
         self.layer(layer)?;
         require_float("KV cache attention", q.dtype())?;
         let (b, d) = (self.batch, self.head_dim);
@@ -363,7 +473,9 @@ impl KvCache {
         };
         let len = self.lens[layer];
         if len == 0 {
-            return Err(Error::Invalid(format!("KV cache attention: layer {layer} is empty")));
+            return Err(Error::Invalid(format!(
+                "KV cache attention: layer {layer} is empty"
+            )));
         }
         let dev = q.device();
         let rows = b * heads;
@@ -376,9 +488,15 @@ impl KvCache {
         // than the current length is what makes that stable — an early step
         // simply leaves the later slices empty, and they return at once.
         let splits = match splits {
-            Some(0) => return Err(Error::Invalid("KV cache attention: splits must be at least 1".into())),
+            Some(0) => {
+                return Err(Error::Invalid(
+                    "KV cache attention: splits must be at least 1".into(),
+                ))
+            }
             Some(n) if n > MAX_SPLITS => {
-                return Err(Error::Invalid(format!("KV cache attention: at most {MAX_SPLITS} splits, got {n}")))
+                return Err(Error::Invalid(format!(
+                    "KV cache attention: at most {MAX_SPLITS} splits, got {n}"
+                )))
             }
             Some(n) => n,
             None => splits_for(rows, self.max_len),
@@ -405,7 +523,11 @@ impl KvCache {
                     Arg::Tensor(&out),
                     Arg::Storage(&self.cursor),
                 ],
-                [u32_of(gx * 256, "rows")?, u32_of(rows.div_ceil(gx), "rows")?, 1],
+                [
+                    u32_of(gx * 256, "rows")?,
+                    u32_of(rows.div_ceil(gx), "rows")?,
+                    1,
+                ],
                 &push,
             )?;
             return Ok(out);
@@ -431,8 +553,16 @@ impl KvCache {
         ATTN_DECODE_MERGE.launch(
             dev,
             &[Arg::Tensor(&ml), Arg::Tensor(&partial), Arg::Tensor(&out)],
-            [u32_of(gx * 256, "rows")?, u32_of(rows.div_ceil(gx), "rows")?, 1],
-            &[u32_of(rows, "rows")?, u32_of(splits, "splits")?, u32_of(d, "head_dim")?],
+            [
+                u32_of(gx * 256, "rows")?,
+                u32_of(rows.div_ceil(gx), "rows")?,
+                1,
+            ],
+            &[
+                u32_of(rows, "rows")?,
+                u32_of(splits, "splits")?,
+                u32_of(d, "head_dim")?,
+            ],
         )?;
         Ok(out)
     }

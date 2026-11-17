@@ -48,7 +48,13 @@ impl Kernel {
     /// Record a launch of one invocation per element for `n` elements, over a
     /// 2-D grid so large `n` stays within dispatch limits. The kernel must
     /// compute its index as `y * num_groups_x * local_x + x` (g2-common.glsl).
-    pub fn launch_flat(&self, device: &Device, args: &[Arg<'_>], n: usize, push: &[u32]) -> Result<()> {
+    pub fn launch_flat(
+        &self,
+        device: &Device,
+        args: &[Arg<'_>],
+        n: usize,
+        push: &[u32],
+    ) -> Result<()> {
         if n == 0 {
             return Ok(());
         }
@@ -56,15 +62,23 @@ impl Kernel {
         let groups = n.div_ceil(local);
         let gx = groups.min(65_535);
         let gy = groups.div_ceil(gx);
-        let (gx, gy) = (u32::try_from(gx).unwrap(), u32::try_from(gy).map_err(|_| {
-            Error::Shape(format!("{n} elements exceed the dispatch limit"))
-        })?);
+        let (gx, gy) = (
+            u32::try_from(gx).unwrap(),
+            u32::try_from(gy)
+                .map_err(|_| Error::Shape(format!("{n} elements exceed the dispatch limit")))?,
+        );
         self.launch(device, args, [gx * self.local_size[0], gy, 1], push)
     }
 
     /// Record a launch covering `threads` invocations. Arguments bind in
     /// order to bindings 0..n; `push` is the push-constant block.
-    pub fn launch(&self, device: &Device, args: &[Arg<'_>], threads: [u32; 3], push: &[u32]) -> Result<()> {
+    pub fn launch(
+        &self,
+        device: &Device,
+        args: &[Arg<'_>],
+        threads: [u32; 3],
+        push: &[u32],
+    ) -> Result<()> {
         if args.len() != self.bindings as usize {
             return Err(Error::Invalid(format!(
                 "kernel {} takes {} bindings, got {}",
@@ -94,10 +108,10 @@ impl Kernel {
                     Arg::Tensor(t) | Arg::Storage(t) => retain.push(t.storage_arc()),
                     Arg::Buffer(_) => {
                         return Err(Error::Invalid(format!(
-                            "kernel {}: capturing a launch that binds a raw buffer is not supported \
+                        "kernel {}: capturing a launch that binds a raw buffer is not supported \
                              (the graph could not keep it alive)",
-                            self.shader
-                        )))
+                        self.shader
+                    )))
                     }
                 }
             }
@@ -113,7 +127,11 @@ impl Kernel {
                 )));
             }
             // A zero range would mean "to the end of the buffer" to the shim.
-            bindings.push(sys::gc_binding { buf: buffer.handle(), offset, range: range.max(4) });
+            bindings.push(sys::gc_binding {
+                buf: buffer.handle(),
+                offset,
+                range: range.max(4),
+            });
         }
         let name = CString::new(self.shader)
             .map_err(|_| Error::Invalid(format!("bad kernel name {:?}", self.shader)))?;

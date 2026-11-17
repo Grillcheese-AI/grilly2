@@ -18,10 +18,16 @@ fn device() -> Device {
     Device::default_device().expect("open GPU")
 }
 
-fn file(tensors: &[(&str, Dtype, Vec<usize>, Vec<u8>)], metadata: Option<HashMap<String, String>>) -> Vec<u8> {
-    let views = tensors
-        .iter()
-        .map(|(name, dtype, shape, data)| (name.to_string(), TensorView::new(*dtype, shape.clone(), data).unwrap()));
+fn file(
+    tensors: &[(&str, Dtype, Vec<usize>, Vec<u8>)],
+    metadata: Option<HashMap<String, String>>,
+) -> Vec<u8> {
+    let views = tensors.iter().map(|(name, dtype, shape, data)| {
+        (
+            name.to_string(),
+            TensorView::new(*dtype, shape.clone(), data).unwrap(),
+        )
+    });
     // the crate's own map type (hashbrown, without its std feature)
     serialize(views, metadata.map(|m| m.into_iter().collect())).unwrap()
 }
@@ -38,9 +44,18 @@ fn f32_bits(t: &grilly_core::Tensor) -> Vec<u32> {
 fn ints(t: &grilly_core::Tensor) -> Vec<i64> {
     let bytes = t.to_bytes().unwrap();
     match t.dtype() {
-        DType::I64 => bytes.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect(),
-        DType::I32 => bytes.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap()) as i64).collect(),
-        DType::Bool => bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap()) as i64).collect(),
+        DType::I64 => bytes
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect(),
+        DType::I32 => bytes
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes(c.try_into().unwrap()) as i64)
+            .collect(),
+        DType::Bool => bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as i64)
+            .collect(),
         other => panic!("not an integer dtype: {other:?}"),
     }
 }
@@ -48,7 +63,14 @@ fn ints(t: &grilly_core::Tensor) -> Vec<i64> {
 #[test]
 fn every_supported_dtype_loads_exactly() {
     let dev = device();
-    let f32s = [1.5f32, -0.0, f32::MIN_POSITIVE / 8.0, f32::INFINITY, 3.0e38, -7.25];
+    let f32s = [
+        1.5f32,
+        -0.0,
+        f32::MIN_POSITIVE / 8.0,
+        f32::INFINITY,
+        3.0e38,
+        -7.25,
+    ];
     // f16 bit patterns and their float32 values, computed by hand
     let f16s: [(u16, f32); 7] = [
         (0x3C00, 1.0),
@@ -66,12 +88,27 @@ fn every_supported_dtype_loads_exactly() {
     let bytes = file(
         &[
             ("f32", Dtype::F32, vec![2, 3], le(&f32s, f32::to_le_bytes)),
-            ("f16", Dtype::F16, vec![7], le(&f16s.map(|p| p.0), u16::to_le_bytes)),
-            ("bf16", Dtype::BF16, vec![5, 1], le(&bf16s, u16::to_le_bytes)),
+            (
+                "f16",
+                Dtype::F16,
+                vec![7],
+                le(&f16s.map(|p| p.0), u16::to_le_bytes),
+            ),
+            (
+                "bf16",
+                Dtype::BF16,
+                vec![5, 1],
+                le(&bf16s, u16::to_le_bytes),
+            ),
             ("i64", Dtype::I64, vec![4], le(&i64s, i64::to_le_bytes)),
             ("i32", Dtype::I32, vec![3], le(&i32s, i32::to_le_bytes)),
             ("bool", Dtype::BOOL, vec![5], bools.to_vec()),
-            ("scalar", Dtype::F32, vec![], le(&[2.5f32], f32::to_le_bytes)),
+            (
+                "scalar",
+                Dtype::F32,
+                vec![],
+                le(&[2.5f32], f32::to_le_bytes),
+            ),
             ("empty", Dtype::F32, vec![0, 3], vec![]),
         ],
         None,
@@ -106,7 +143,10 @@ fn every_supported_dtype_loads_exactly() {
     assert_eq!((t.shape(), t.to_vec().unwrap()), (&[][..], vec![2.5]));
 
     let t = f.tensor(&dev, "empty").unwrap();
-    assert_eq!((t.shape(), t.to_vec().unwrap().len()), (&[0usize, 3][..], 0));
+    assert_eq!(
+        (t.shape(), t.to_vec().unwrap().len()),
+        (&[0usize, 3][..], 0)
+    );
 }
 
 #[test]
@@ -133,31 +173,63 @@ fn open_maps_a_file_and_errors_are_classified() {
     let dir = std::env::temp_dir().join(format!("grilly-infer-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("t.safetensors");
-    std::fs::write(&path, file(&[("w", Dtype::F32, vec![2], le(&[1.0f32, 2.0], f32::to_le_bytes))], None)).unwrap();
+    std::fs::write(
+        &path,
+        file(
+            &[(
+                "w",
+                Dtype::F32,
+                vec![2],
+                le(&[1.0f32, 2.0], f32::to_le_bytes),
+            )],
+            None,
+        ),
+    )
+    .unwrap();
 
     let f = SafeTensorsFile::open(&path).unwrap();
     assert_eq!(f.tensor(&dev, "w").unwrap().to_vec().unwrap(), [1.0, 2.0]);
     assert!(f.metadata().is_none());
-    assert!(matches!(f.tensor(&dev, "missing"), Err(LoadError::Format(m)) if m == "File does not contain tensor missing"));
+    assert!(
+        matches!(f.tensor(&dev, "missing"), Err(LoadError::Format(m)) if m == "File does not contain tensor missing")
+    );
     drop(f);
 
-    let io = SafeTensorsFile::open(dir.join("absent.safetensors")).err().unwrap();
-    assert!(matches!(io, LoadError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound), "{io}");
+    let io = SafeTensorsFile::open(dir.join("absent.safetensors"))
+        .err()
+        .unwrap();
+    assert!(
+        matches!(io, LoadError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
+        "{io}"
+    );
 
     std::fs::write(dir.join("empty.safetensors"), b"").unwrap();
-    assert!(matches!(SafeTensorsFile::open(dir.join("empty.safetensors")), Err(LoadError::Format(_))));
+    assert!(matches!(
+        SafeTensorsFile::open(dir.join("empty.safetensors")),
+        Err(LoadError::Format(_))
+    ));
 
     let mut garbage = 5u64.to_le_bytes().to_vec();
     garbage.extend_from_slice(b"{bad}");
-    assert!(matches!(SafeTensorsFile::from_bytes(garbage), Err(LoadError::Format(_))));
+    assert!(matches!(
+        SafeTensorsFile::from_bytes(garbage),
+        Err(LoadError::Format(_))
+    ));
 
     let mut truncated = file(&[("w", Dtype::F32, vec![4], vec![0; 16])], None);
     truncated.truncate(truncated.len() - 4);
-    assert!(matches!(SafeTensorsFile::from_bytes(truncated), Err(LoadError::Format(_))));
+    assert!(matches!(
+        SafeTensorsFile::from_bytes(truncated),
+        Err(LoadError::Format(_))
+    ));
 
-    let f64s = SafeTensorsFile::from_bytes(file(&[("d", Dtype::F64, vec![1], vec![0; 8])], None)).unwrap();
+    let f64s =
+        SafeTensorsFile::from_bytes(file(&[("d", Dtype::F64, vec![1], vec![0; 8])], None)).unwrap();
     let e = f64s.tensor(&dev, "d").err().unwrap();
-    assert!(matches!(e, LoadError::Tensor(Error::NotImplemented(ref m)) if m.contains("\"d\"") && m.contains("F64")), "{e}");
+    assert!(
+        matches!(e, LoadError::Tensor(Error::NotImplemented(ref m)) if m.contains("\"d\"") && m.contains("F64")),
+        "{e}"
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

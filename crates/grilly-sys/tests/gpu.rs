@@ -53,7 +53,12 @@ void main() {
 
 fn compile(ctx: *mut gc_ctx, name: &str, src: &str) {
     let n = CString::new(name).unwrap();
-    ok!(gc_compile_shader(ctx, n.as_ptr(), src.as_ptr().cast(), src.len() as u64));
+    ok!(gc_compile_shader(
+        ctx,
+        n.as_ptr(),
+        src.as_ptr().cast(),
+        src.len() as u64
+    ));
 }
 
 struct Ctx(*mut gc_ctx);
@@ -75,17 +80,34 @@ impl Ctx {
 
     fn buffer(&self, bytes: usize) -> gc_buf {
         let mut b = 0;
-        ok!(gc_buffer_create(self.0, bytes as u64, GC_MEM_DEVICE, &mut b));
+        ok!(gc_buffer_create(
+            self.0,
+            bytes as u64,
+            GC_MEM_DEVICE,
+            &mut b
+        ));
         b
     }
 
     fn upload(&self, buf: gc_buf, offset: usize, data: &[f32]) {
-        ok!(gc_upload(self.0, buf, offset as u64, data.as_ptr() as *const c_void, (data.len() * 4) as u64));
+        ok!(gc_upload(
+            self.0,
+            buf,
+            offset as u64,
+            data.as_ptr() as *const c_void,
+            (data.len() * 4) as u64
+        ));
     }
 
     fn download(&self, buf: gc_buf, offset: usize, n: usize) -> Vec<f32> {
         let mut out = vec![0f32; n];
-        ok!(gc_download(self.0, buf, offset as u64, out.as_mut_ptr() as *mut c_void, (n * 4) as u64));
+        ok!(gc_download(
+            self.0,
+            buf,
+            offset as u64,
+            out.as_mut_ptr() as *mut c_void,
+            (n * 4) as u64
+        ));
         out
     }
 
@@ -93,8 +115,17 @@ impl Ctx {
         let name = CString::new(RELU).unwrap();
         let bindings = [input, output];
         unsafe {
-            gc_dispatch(self.0, name.as_ptr(), bindings.as_ptr(), 2, n.div_ceil(WG), 1, 1,
-                        &n as *const u32 as *const c_void, 4)
+            gc_dispatch(
+                self.0,
+                name.as_ptr(),
+                bindings.as_ptr(),
+                2,
+                n.div_ceil(WG),
+                1,
+                1,
+                &n as *const u32 as *const c_void,
+                4,
+            )
         }
     }
 }
@@ -106,7 +137,11 @@ impl Drop for Ctx {
 }
 
 fn whole(buf: gc_buf) -> gc_binding {
-    gc_binding { buf, offset: 0, range: 0 }
+    gc_binding {
+        buf,
+        offset: 0,
+        range: 0,
+    }
 }
 
 /// Deterministic values in [-1, 1) with both signs and exact zeros.
@@ -140,8 +175,11 @@ fn reports_device() {
     let name = unsafe { std::ffi::CStr::from_ptr(c.device_name.as_ptr()) };
     println!(
         "device={:?} coopmat={} fp16={} offset_align={} max_push={}",
-        name, c.has_cooperative_matrix, c.has_float16,
-        c.min_storage_buffer_offset_alignment, c.max_push_constants_size
+        name,
+        c.has_cooperative_matrix,
+        c.has_float16,
+        c.min_storage_buffer_offset_alignment,
+        c.max_push_constants_size
     );
     assert!(!name.to_bytes().is_empty());
 }
@@ -181,14 +219,22 @@ fn offset_bindings_do_not_alias() {
     let (input, output) = (ctx.buffer(bytes), ctx.buffer(bytes));
     ctx.upload(input, 0, &staging);
 
-    let seg = |buf, offset: usize| gc_binding { buf, offset: offset as u64, range: (n * 4) as u64 };
+    let seg = |buf, offset: usize| gc_binding {
+        buf,
+        offset: offset as u64,
+        range: (n * 4) as u64,
+    };
     ok!(gc_begin(ctx.0));
     ok!(ctx.relu(seg(input, 0), seg(output, 0), n as u32));
     ok!(ctx.relu(seg(input, off), seg(output, off), n as u32));
     ok!(gc_submit(ctx.0));
 
     assert_eq!(ctx.download(output, 0, n), relu_cpu(&x0), "first segment");
-    assert_eq!(ctx.download(output, off, n), relu_cpu(&x1), "second segment");
+    assert_eq!(
+        ctx.download(output, off, n),
+        relu_cpu(&x1),
+        "second segment"
+    );
 }
 
 #[test]
@@ -247,13 +293,31 @@ fn misuse_is_reported_not_thrown() {
     let three = [whole(b), whole(b), whole(b)];
     let n = 4u32;
     let rc = unsafe {
-        gc_dispatch(ctx.0, name.as_ptr(), three.as_ptr(), 3, 1, 1, 1, &n as *const u32 as *const c_void, 4)
+        gc_dispatch(
+            ctx.0,
+            name.as_ptr(),
+            three.as_ptr(),
+            3,
+            1,
+            1,
+            1,
+            &n as *const u32 as *const c_void,
+            4,
+        )
     };
     assert_eq!(rc, GC_ERR);
-    assert!(last_error().contains("different binding count"), "{}", last_error());
+    assert!(
+        last_error().contains("different binding count"),
+        "{}",
+        last_error()
+    );
 
     // out-of-bounds binding
-    let past = gc_binding { buf: b, offset: 0, range: 4096 };
+    let past = gc_binding {
+        buf: b,
+        offset: 0,
+        range: 4096,
+    };
     assert_eq!(ctx.relu(past, whole(b), 4), GC_ERR);
     assert!(last_error().contains("out of bounds"), "{}", last_error());
 
@@ -275,7 +339,7 @@ fn fill_and_copy_at_offsets() {
     ok!(gc_fill(ctx.0, a, 16, 8, (-1.0f32).to_bits()));
     ok!(gc_barrier(ctx.0));
     ok!(gc_copy(ctx.0, a, 8, b, 32, 24)); // a[2..8] -> b[8..14]
-    // unaligned fill and out-of-bounds copy are refused, not recorded
+                                          // unaligned fill and out-of-bounds copy are refused, not recorded
     assert_eq!(unsafe { gc_fill(ctx.0, a, 2, 8, 0) }, GC_ERR);
     assert_eq!(unsafe { gc_copy(ctx.0, a, 48, b, 0, 32) }, GC_ERR);
     ok!(gc_submit(ctx.0));

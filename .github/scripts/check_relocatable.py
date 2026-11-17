@@ -32,7 +32,14 @@ SUSPECT = [
     re.compile(rb"target[/\\](debug|release)[/\\]build[/\\]"),
     re.compile(rb"[/\\]home[/\\]runner[/\\]work[/\\]"),
     re.compile(rb"[A-Za-z]:[/\\]Users[/\\][^/\\]+[/\\]Documents[/\\]"),
+    # the GitHub Windows runner's workspace, D:\a\<repo>\<repo>
+    re.compile(rb"\b[A-Za-z]:[/\\]a[/\\][^/\\]+[/\\]"),
 ]
+
+#: maturin's CycloneDX SBOM names each workspace crate by its build-time
+#: `path+file://` URL. That is provenance metadata — nothing loads anything
+#: from it — so it cannot break an install, and it is skipped.
+SKIP = re.compile(r"\.dist-info/sboms/")
 
 # Rust panic messages legitimately embed source paths like
 # `crates/grilly-core/src/device.rs`; those are relative and harmless.
@@ -63,7 +70,7 @@ def main(argv: list) -> int:
         print(f"checking {wheel.name}")
         with zipfile.ZipFile(wheel) as zf:
             for info in zf.infolist():
-                if info.is_dir():
+                if info.is_dir() or SKIP.search(info.filename):
                     continue
                 hits = offenders(zf.read(info))
                 for hit in hits:

@@ -137,7 +137,10 @@ impl Device {
         let caps_rc = unsafe { sys::gc_caps_get(ctx, &mut raw) };
         let inner = Inner {
             ctx,
-            state: Mutex::new(State { open: false, launches: 0 }),
+            state: Mutex::new(State {
+                open: false,
+                launches: 0,
+            }),
             caps: Caps {
                 name: unsafe { CStr::from_ptr(raw.device_name.as_ptr()) }
                     .to_string_lossy()
@@ -151,7 +154,9 @@ impl Device {
             generated: Mutex::new(std::collections::HashMap::new()),
             capture: Mutex::new(None),
         };
-        let device = Device { inner: Arc::new(inner) };
+        let device = Device {
+            inner: Arc::new(inner),
+        };
         check(caps_rc)?;
 
         device.load_embedded_kernels()?;
@@ -166,15 +171,25 @@ impl Device {
     /// `source`, then looked up by the source text. Names live for the
     /// process (a kernel is compiled once per distinct source).
     pub fn generated_kernel(&self, source: &str) -> Result<&'static str> {
-        let mut generated = self.inner.generated.lock().unwrap_or_else(|e| e.into_inner());
+        let mut generated = self
+            .inner
+            .generated
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(name) = generated.get(source) {
             return Ok(name);
         }
-        let name: &'static str = Box::leak(format!("g2-fused-{}", generated.len()).into_boxed_str());
+        let name: &'static str =
+            Box::leak(format!("g2-fused-{}", generated.len()).into_boxed_str());
         let name_c = cstring(name)?;
         let _state = self.lock();
         check(unsafe {
-            sys::gc_compile_shader(self.inner.ctx, name_c.as_ptr(), source.as_ptr().cast(), source.len() as u64)
+            sys::gc_compile_shader(
+                self.inner.ctx,
+                name_c.as_ptr(),
+                source.as_ptr().cast(),
+                source.len() as u64,
+            )
         })?;
         generated.insert(source.to_owned(), name);
         Ok(name)
@@ -184,7 +199,11 @@ impl Device {
     /// on this device: whether a `torch.compile`d graph's *structure*, not
     /// its scalar values, changed since the last call is what this answers.
     pub fn generated_kernel_count(&self) -> usize {
-        self.inner.generated.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.inner
+            .generated
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// Register every kernel baked into the binary by build.rs.
@@ -225,7 +244,10 @@ impl Device {
         let _state = self.lock();
         check(unsafe { sys::gc_load_shader_dir(self.inner.ctx, dir_c.as_ptr(), &mut loaded) })?;
         if loaded == 0 {
-            return Err(Error::Device(format!("no .spv kernels in {}", dir.display())));
+            return Err(Error::Device(format!(
+                "no .spv kernels in {}",
+                dir.display()
+            )));
         }
         Ok(loaded)
     }
@@ -272,7 +294,12 @@ impl Device {
         let mut handle = 0;
         let _state = self.lock();
         check(unsafe { sys::gc_buffer_create(self.inner.ctx, bytes, class, &mut handle) })?;
-        Ok(Buffer { device: self.clone(), handle, bytes, version: AtomicU64::new(0) })
+        Ok(Buffer {
+            device: self.clone(),
+            handle,
+            bytes,
+            version: AtomicU64::new(0),
+        })
     }
 
     /// Submission counters since the device opened.
@@ -338,7 +365,9 @@ impl Device {
     pub fn begin_capture(&self) -> Result<()> {
         let mut capture = self.inner.capture.lock().unwrap_or_else(|e| e.into_inner());
         if capture.is_some() {
-            return Err(Error::Invalid("a capture is already running on this device".into()));
+            return Err(Error::Invalid(
+                "a capture is already running on this device".into(),
+            ));
         }
         *capture = Some(Recorder::default());
         Ok(())
@@ -346,11 +375,17 @@ impl Device {
 
     pub fn end_capture(&self) -> Result<Recorder> {
         let mut capture = self.inner.capture.lock().unwrap_or_else(|e| e.into_inner());
-        capture.take().ok_or_else(|| Error::Invalid("no capture is running on this device".into()))
+        capture
+            .take()
+            .ok_or_else(|| Error::Invalid("no capture is running on this device".into()))
     }
 
     pub fn capturing(&self) -> bool {
-        self.inner.capture.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.inner
+            .capture
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     /// Add a command to the open capture, if there is one.
@@ -381,11 +416,26 @@ impl Device {
     }
 
     /// Re-issue a recorded copy, by handle: the buffers are the graph's.
-    pub(crate) fn record_copy_raw(&self, src: sys::gc_buf, src_offset: u64, dst: sys::gc_buf, dst_offset: u64, bytes: u64) -> Result<()> {
-        self.record_command(move |ctx| unsafe { sys::gc_copy(ctx, src, src_offset, dst, dst_offset, bytes) })
+    pub(crate) fn record_copy_raw(
+        &self,
+        src: sys::gc_buf,
+        src_offset: u64,
+        dst: sys::gc_buf,
+        dst_offset: u64,
+        bytes: u64,
+    ) -> Result<()> {
+        self.record_command(move |ctx| unsafe {
+            sys::gc_copy(ctx, src, src_offset, dst, dst_offset, bytes)
+        })
     }
 
-    pub(crate) fn record_fill_raw(&self, dst: sys::gc_buf, offset: u64, bytes: u64, word: u32) -> Result<()> {
+    pub(crate) fn record_fill_raw(
+        &self,
+        dst: sys::gc_buf,
+        offset: u64,
+        bytes: u64,
+        word: u32,
+    ) -> Result<()> {
         self.record_command(move |ctx| unsafe { sys::gc_fill(ctx, dst, offset, bytes, word) })
     }
 
@@ -413,24 +463,54 @@ impl Device {
     }
 
     /// Record a device-side copy of `bytes` between buffers.
-    pub(crate) fn record_copy(&self, src: &Buffer, src_offset: u64, dst: &Buffer, dst_offset: u64, bytes: u64) -> Result<()> {
+    pub(crate) fn record_copy(
+        &self,
+        src: &Buffer,
+        src_offset: u64,
+        dst: &Buffer,
+        dst_offset: u64,
+        bytes: u64,
+    ) -> Result<()> {
         if bytes == 0 {
             return Ok(());
         }
         let (s, d) = (src.handle, dst.handle);
-        self.note(|| Command::Copy { src: s, src_offset, dst: d, dst_offset, bytes }, &[]);
+        self.note(
+            || Command::Copy {
+                src: s,
+                src_offset,
+                dst: d,
+                dst_offset,
+                bytes,
+            },
+            &[],
+        );
         self.record_command(|ctx| unsafe {
             sys::gc_copy(ctx, src.handle, src_offset, dst.handle, dst_offset, bytes)
         })
     }
 
     /// Record filling `bytes` at `offset` with the 32-bit pattern `word`.
-    pub(crate) fn record_fill(&self, dst: &Buffer, offset: u64, bytes: u64, word: u32) -> Result<()> {
+    pub(crate) fn record_fill(
+        &self,
+        dst: &Buffer,
+        offset: u64,
+        bytes: u64,
+        word: u32,
+    ) -> Result<()> {
         if bytes == 0 {
             return Ok(());
         }
         let d = dst.handle;
-        self.note(|| Command::Fill { dst: d, offset, bytes, word }, &[]);
+        self.note(
+            || Command::Fill {
+                dst: d,
+                offset,
+                bytes,
+                word,
+            },
+            &[],
+        );
         self.record_command(|ctx| unsafe { sys::gc_fill(ctx, dst.handle, offset, bytes, word) })
     }
 }

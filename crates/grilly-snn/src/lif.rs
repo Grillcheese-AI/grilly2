@@ -24,11 +24,21 @@ use grilly_core::{require_float, Arg, Error, Kernel, Result, Tensor};
 
 /// Bindings: v, x, spikes, v', h. Push: n, decay, in_scale, rest,
 /// threshold, soft, v_off, x_off, want_h.
-const STEP: Kernel = Kernel { shader: "g2-snn-lif-step", bindings: 5, push_words: 9, local_size: [256, 1, 1] };
+const STEP: Kernel = Kernel {
+    shader: "g2-snn-lif-step",
+    bindings: 5,
+    push_words: 9,
+    local_size: [256, 1, 1],
+};
 /// Bindings: h, spikes, dL/ds, dL/dv', dL/dx, dL/dv. Push: n, decay,
 /// in_scale, rest, threshold, soft, detach_reset, kind, alpha, has_gs,
 /// has_gv, pad.
-const BACKWARD: Kernel = Kernel { shader: "g2-snn-lif-step-backward", bindings: 6, push_words: 12, local_size: [256, 1, 1] };
+const BACKWARD: Kernel = Kernel {
+    shader: "g2-snn-lif-step-backward",
+    bindings: 6,
+    push_words: 12,
+    local_size: [256, 1, 1],
+};
 
 pub const KERNELS: &[Kernel] = &[STEP, BACKWARD];
 
@@ -113,22 +123,37 @@ pub fn step(v: &Tensor, x: &Tensor, config: StepConfig) -> Result<(Tensor, Tenso
     // `h` is only for the backward. Under inference the kernel is told not
     // to write it and the binding goes to a tensor it never touches.
     let wants_grad = autograd::is_grad_enabled() && (v.requires_grad() || x.requires_grad());
-    let h = if wants_grad { Tensor::empty(dev, v.shape())? } else { spikes.clone() };
+    let h = if wants_grad {
+        Tensor::empty(dev, v.shape())?
+    } else {
+        spikes.clone()
+    };
 
-    autograd::record("SnnLifStepBackward0", &[v, x], &mut [&mut spikes, &mut next], |outs| {
-        Ok(LifStepBackward {
-            h: SavedTensor::save(&h)?,
-            spikes: SavedTensor::save(outs[0])?,
-            shape: v.shape().to_vec(),
-            config,
-        })
-    })?;
+    autograd::record(
+        "SnnLifStepBackward0",
+        &[v, x],
+        &mut [&mut spikes, &mut next],
+        |outs| {
+            Ok(LifStepBackward {
+                h: SavedTensor::save(&h)?,
+                spikes: SavedTensor::save(outs[0])?,
+                shape: v.shape().to_vec(),
+                config,
+            })
+        },
+    )?;
     if n == 0 {
         return Ok((spikes, next));
     }
     STEP.launch_flat(
         dev,
-        &[Arg::Storage(v), Arg::Storage(x), Arg::Tensor(&spikes), Arg::Tensor(&next), Arg::Tensor(&h)],
+        &[
+            Arg::Storage(v),
+            Arg::Storage(x),
+            Arg::Tensor(&spikes),
+            Arg::Tensor(&next),
+            Arg::Tensor(&h),
+        ],
         n,
         &[
             n as u32,

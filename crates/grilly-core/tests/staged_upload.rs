@@ -20,7 +20,12 @@ use grilly_core::rng::Generator;
 use grilly_core::{Arg, DType, Device, Kernel, MemClass, Tensor};
 
 /// `y = max(x, 0)`, a v1 kernel: enough to observe what a dispatch read.
-const PROBE: Kernel = Kernel { shader: "g2-relu", bindings: 2, push_words: 1, local_size: [256, 1, 1] };
+const PROBE: Kernel = Kernel {
+    shader: "g2-relu",
+    bindings: 2,
+    push_words: 1,
+    local_size: [256, 1, 1],
+};
 
 /// Serializes these tests: the counters they read belong to the device.
 static COUNTERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -43,11 +48,20 @@ fn fill_from_host(t: &Tensor, value: f32) {
 
 fn bytemuck_cast(values: &[f32]) -> &[u8] {
     // SAFETY: f32 has no padding and any bit pattern is a valid u8.
-    unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, std::mem::size_of_val(values)) }
+    unsafe {
+        std::slice::from_raw_parts(values.as_ptr() as *const u8, std::mem::size_of_val(values))
+    }
 }
 
 fn relu_into(dev: &Device, x: &Tensor, y: &Tensor, n: usize) {
-    PROBE.launch(dev, &[Arg::Tensor(x), Arg::Tensor(y)], [n as u32, 1, 1], &[n as u32]).unwrap();
+    PROBE
+        .launch(
+            dev,
+            &[Arg::Tensor(x), Arg::Tensor(y)],
+            [n as u32, 1, 1],
+            &[n as u32],
+        )
+        .unwrap();
 }
 
 #[test]
@@ -66,12 +80,27 @@ fn a_small_write_is_recorded_in_order_and_costs_no_submit() {
     fill_from_host(&x, 7.0);
     relu_into(&dev, &x, &after_seen, n);
     let recorded = dev.submit_stats().unwrap();
-    assert_eq!(recorded.submits, start.submits, "the write closed the batch");
-    assert_eq!(recorded.staged_uploads - start.staged_uploads, 1, "the write was not staged");
+    assert_eq!(
+        recorded.submits, start.submits,
+        "the write closed the batch"
+    );
+    assert_eq!(
+        recorded.staged_uploads - start.staged_uploads,
+        1,
+        "the write was not staged"
+    );
 
     // the reads force the batch out; program order must have been kept
-    assert_eq!(before_seen.to_vec().unwrap(), vec![1.0f32; n], "the earlier dispatch saw the new data");
-    assert_eq!(after_seen.to_vec().unwrap(), vec![7.0f32; n], "the later dispatch saw the old data");
+    assert_eq!(
+        before_seen.to_vec().unwrap(),
+        vec![1.0f32; n],
+        "the earlier dispatch saw the new data"
+    );
+    assert_eq!(
+        after_seen.to_vec().unwrap(),
+        vec![7.0f32; n],
+        "the later dispatch saw the old data"
+    );
     assert_eq!(x.to_vec().unwrap(), vec![7.0f32; n]);
 }
 
@@ -81,7 +110,9 @@ fn many_small_writes_in_one_batch_all_land() {
     let dev = dev();
     let n = 256;
     let x = Tensor::from_slice(&dev, &vec![0.0f32; n], &[n]).unwrap();
-    let seen: Vec<Tensor> = (0..32).map(|_| Tensor::empty(&dev, &[n]).unwrap()).collect();
+    let seen: Vec<Tensor> = (0..32)
+        .map(|_| Tensor::empty(&dev, &[n]).unwrap())
+        .collect();
 
     dev.synchronize().unwrap();
     let start = dev.submit_stats().unwrap();
@@ -90,11 +121,18 @@ fn many_small_writes_in_one_batch_all_land() {
         relu_into(&dev, &x, out, n);
     }
     let recorded = dev.submit_stats().unwrap();
-    assert_eq!(recorded.submits, start.submits, "32 writes and 32 dispatches should be one batch");
+    assert_eq!(
+        recorded.submits, start.submits,
+        "32 writes and 32 dispatches should be one batch"
+    );
     assert_eq!(recorded.staged_uploads - start.staged_uploads, 32);
 
     for (i, out) in seen.iter().enumerate() {
-        assert_eq!(out.to_vec().unwrap(), vec![i as f32; n], "write {i} did not reach its dispatch");
+        assert_eq!(
+            out.to_vec().unwrap(),
+            vec![i as f32; n],
+            "write {i} did not reach its dispatch"
+        );
     }
 }
 
@@ -109,9 +147,19 @@ fn a_large_write_still_flushes_rather_than_staging_it() {
     let data = vec![3.5f32; n];
     dev.synchronize().unwrap();
     let start = dev.submit_stats().unwrap();
-    let x = Tensor::from_bytes_in(&dev, bytemuck_cast(&data), &[n], DType::F32, MemClass::Persistent).unwrap();
+    let x = Tensor::from_bytes_in(
+        &dev,
+        bytemuck_cast(&data),
+        &[n],
+        DType::F32,
+        MemClass::Persistent,
+    )
+    .unwrap();
     let after = dev.submit_stats().unwrap();
-    assert_eq!(after.staged_uploads, start.staged_uploads, "a weight-sized upload was staged");
+    assert_eq!(
+        after.staged_uploads, start.staged_uploads,
+        "a weight-sized upload was staged"
+    );
     assert_eq!(x.to_vec().unwrap()[..4], [3.5f32; 4]);
 }
 
@@ -126,6 +174,10 @@ fn a_staged_write_survives_a_batch_boundary() {
         fill_from_host(&x, round as f32 + 1.0);
         relu_into(&dev, &x, &out, n);
         // to_vec submits and waits, so the staging blocks are reused next round
-        assert_eq!(out.to_vec().unwrap(), vec![round as f32 + 1.0; n], "round {round}");
+        assert_eq!(
+            out.to_vec().unwrap(),
+            vec![round as f32 + 1.0; n],
+            "round {round}"
+        );
     }
 }

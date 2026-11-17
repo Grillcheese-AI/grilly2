@@ -72,12 +72,20 @@ pub fn torch_many(expr: &str, inputs: &[(&str, &[f32], &[usize])]) -> Vec<Vec<f3
         let dims: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
         cmd.arg(name).arg(&path).arg(dims.join(","));
     }
-    let result = cmd.output().unwrap_or_else(|e| panic!("could not run {:?}: {e}", python()));
+    let result = cmd
+        .output()
+        .unwrap_or_else(|e| panic!("could not run {:?}: {e}", python()));
     if !result.status.success() {
         let about = Command::new(python())
-            .args(["-c", "import sys, torch; print(sys.executable, torch.__version__)"])
+            .args([
+                "-c",
+                "import sys, torch; print(sys.executable, torch.__version__)",
+            ])
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr))
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout).into_owned()
+                    + &String::from_utf8_lossy(&o.stderr)
+            })
             .unwrap_or_default();
         panic!(
             "torch reference failed for `{expr}`
@@ -93,7 +101,11 @@ interpreter: {about}
     while !rest.is_empty() {
         let n = i64::from_le_bytes(rest[..8].try_into().unwrap()) as usize;
         let data = &rest[8..8 + n * 4];
-        tensors.push(data.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect());
+        tensors.push(
+            data.chunks_exact(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect(),
+        );
         rest = &rest[8 + n * 4..];
     }
     tensors
@@ -132,7 +144,10 @@ pub fn assert_within(got: &[f32], want: &[f32], bound: &[f32], what: &str) -> f3
     let mut worst = 0f32;
     for (i, ((g, w), b)) in got.iter().zip(want).zip(bound).enumerate() {
         let d = (g - w).abs();
-        assert!(d <= *b, "{what}: element {i}: got {g}, torch {w}, |diff| {d} > bound {b}");
+        assert!(
+            d <= *b,
+            "{what}: element {i}: got {g}, torch {w}, |diff| {d} > bound {b}"
+        );
         if *b > 0.0 {
             worst = worst.max(d / b);
         }

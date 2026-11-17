@@ -55,7 +55,9 @@ fn step(cache: &mut KvCache, k: &Tensor, v: &Tensor, q: &Tensor) -> grilly_core:
 fn seeded(dev: &Device) -> KvCache {
     let mut cache = KvCache::new(dev, 1, B, H, D, MAX).unwrap();
     for t in 0..2 {
-        cache.append(0, &token(dev, 100 + t), &token(dev, 200 + t)).unwrap();
+        cache
+            .append(0, &token(dev, 100 + t), &token(dev, 200 + t))
+            .unwrap();
     }
     cache
 }
@@ -70,7 +72,13 @@ fn a_replayed_decode_step_advances_the_cache_and_attends_over_all_of_it() {
     let mut eager = seeded(&dev);
     let want: Vec<Vec<f32>> = (0..STEPS)
         .map(|t| {
-            let out = step(&mut eager, &token(&dev, t), &token(&dev, 50 + t), &token(&dev, 80 + t)).unwrap();
+            let out = step(
+                &mut eager,
+                &token(&dev, t),
+                &token(&dev, 50 + t),
+                &token(&dev, 80 + t),
+            )
+            .unwrap();
             out.to_vec().unwrap()
         })
         .collect();
@@ -107,5 +115,9 @@ fn a_full_cache_saturates_under_replay_instead_of_writing_past_its_end() {
     for _ in 0..10 {
         captured.replay().unwrap();
     }
-    assert_eq!(cache.device_len(0).unwrap(), 4, "the cursor stops at max_len");
+    assert_eq!(
+        cache.device_len(0).unwrap(),
+        4,
+        "the cursor stops at max_len"
+    );
 }

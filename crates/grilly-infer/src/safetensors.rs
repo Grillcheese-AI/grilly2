@@ -105,7 +105,11 @@ impl SafeTensorsFile {
     fn parse(bytes: Bytes) -> Result<SafeTensorsFile, LoadError> {
         let (header_len, metadata) = SafeTensors::read_metadata(bytes.as_slice())
             .map_err(|e| LoadError::Format(format!("Error while deserializing header: {e}")))?;
-        Ok(SafeTensorsFile { bytes, data_start: 8 + header_len, metadata })
+        Ok(SafeTensorsFile {
+            bytes,
+            data_start: 8 + header_len,
+            metadata,
+        })
     }
 
     /// Tensor names, sorted (the safetensors package's `keys()`).
@@ -137,8 +141,13 @@ impl SafeTensorsFile {
         let (start, end) = info.data_offsets;
         let data = &self.bytes.as_slice()[self.data_start + start..self.data_start + end];
         let shape = &info.shape;
-        let upload = |bytes: &[u8], dtype| Tensor::from_bytes_in(device, bytes, shape, dtype, MemClass::Persistent);
-        let halves = || data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]));
+        let upload = |bytes: &[u8], dtype| {
+            Tensor::from_bytes_in(device, bytes, shape, dtype, MemClass::Persistent)
+        };
+        let halves = || {
+            data.chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        };
         Ok(match info.dtype {
             Dtype::F32 => upload(data, DType::F32)?,
             Dtype::I64 => upload(data, DType::I64)?,
