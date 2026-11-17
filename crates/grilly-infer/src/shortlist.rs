@@ -111,7 +111,7 @@ const PLAN_ORDER: usize = 16;
 const CONTEXT_ROWS: usize = 8; // centroids per workgroup, g2-shortlist-context
 const HAMMING_TILE: usize = 512; // rows per workgroup, g2-shortlist-hamming
 const SCORE_ROWS: usize = 64; // rows per workgroup, g2-shortlist-score
-const RANK_GROUP: usize = 256; // clusters per workgroup, g2-shortlist-rank
+const RANK_GROUP: usize = 64; // clusters per workgroup, g2-shortlist-rank
 const TIE_BLOCK: usize = 512; // rows per tie count, at least (g2-shortlist-mark)
 const NONE: u32 = u32::MAX;
 
