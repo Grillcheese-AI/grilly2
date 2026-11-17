@@ -21,11 +21,13 @@
 //! 1. `g2-shortlist-context` — the centroid scores; packs the state's bits
 //!    and clears the histogram;
 //! 2. `g2-shortlist-hamming` — every row's distance, and their histogram;
-//! 3. `g2-shortlist-plan` — the `near`-th distance and its ties, from the
-//!    histogram; the clusters ranked; where each ranked list starts;
-//! 4. `g2-shortlist-mark` — each listed token's first position;
+//! 3. `g2-shortlist-rank` — the clusters ranked, each finding its own rank
+//!    by counting; the `near`-th distance, from the histogram;
+//! 4. `g2-shortlist-mark` — each listed token's first position; the rows at
+//!    the `near`-th distance counted per block;
 //! 5. `g2-shortlist-count` — each cluster's new tokens;
-//! 6. `g2-shortlist-cut` — where the context list stops; the successors;
+//! 6. `g2-shortlist-cut` — where the context list stops; which tied rows
+//!    are taken (the lowest); the successors;
 //! 7. `g2-shortlist-score` — the union's rows scored, a best per workgroup;
 //! 8. `g2-shortlist-best` — the best overall (`torch.argmax`'s first index
 //!    on a tie).
@@ -59,16 +61,16 @@ const HAMMING: Kernel = Kernel {
     push_words: 3,
     local_size: [256, 1, 1],
 };
-const PLAN: Kernel = Kernel {
-    shader: "g2-shortlist-plan",
-    bindings: 5,
+const RANK: Kernel = Kernel {
+    shader: "g2-shortlist-rank",
+    bindings: 3,
     push_words: 5,
-    local_size: [1024, 1, 1],
+    local_size: [256, 1, 1],
 };
 const MARK: Kernel = Kernel {
     shader: "g2-shortlist-mark",
-    bindings: 4,
-    push_words: 1,
+    bindings: 6,
+    push_words: 3,
     local_size: [256, 1, 1],
 };
 const COUNT: Kernel = Kernel {
@@ -79,8 +81,8 @@ const COUNT: Kernel = Kernel {
 };
 const CUT: Kernel = Kernel {
     shader: "g2-shortlist-cut",
-    bindings: 6,
-    push_words: 6,
+    bindings: 8,
+    push_words: 8,
     local_size: [1024, 1, 1],
 };
 const SCORE: Kernel = Kernel {
@@ -95,7 +97,7 @@ const BEST: Kernel = Kernel {
     push_words: 1,
     local_size: [1024, 1, 1],
 };
-pub const KERNELS: &[Kernel] = &[PACK, CONTEXT, HAMMING, PLAN, MARK, COUNT, CUT, SCORE, BEST];
+pub const KERNELS: &[Kernel] = &[PACK, CONTEXT, HAMMING, RANK, MARK, COUNT, CUT, SCORE, BEST];
 
 /// The step's dispatches, in order (what [`ShortlistHead::profile`] counts).
 pub const STAGES: usize = 8;
@@ -109,6 +111,8 @@ const PLAN_ORDER: usize = 16;
 const CONTEXT_ROWS: usize = 8; // centroids per workgroup, g2-shortlist-context
 const HAMMING_TILE: usize = 512; // rows per workgroup, g2-shortlist-hamming
 const SCORE_ROWS: usize = 64; // rows per workgroup, g2-shortlist-score
+const RANK_GROUP: usize = 256; // clusters per workgroup, g2-shortlist-rank
+const TIE_BLOCK: usize = 512; // rows per tie count, at least (g2-shortlist-mark)
 const NONE: u32 = u32::MAX;
 
 /// One step's result.
@@ -152,8 +156,10 @@ pub struct ShortlistHead {
     hist: Tensor,
     plan: Tensor,
     cnt: Tensor,
+    tiecnt: Tensor,
     part: Tensor,
     out: Tensor,
+    tie_block: usize,
 }
 
 fn u32_of(v: usize, what: &str) -> Result<u32> {
@@ -245,18 +251,19 @@ impl ShortlistHead {
                 "shortlist head: cluster_ids must be tokens below {vocab}"
             )));
         }
-        let succ_width =
-            match successors {
-                None => 0,
-                Some(s) => match (s.dtype(), s.shape()) {
-                    (DType::I32, &[v, w]) if v == vocab => w,
-                    _ => return bad(format!(
+        let succ_width = match successors {
+            None => 0,
+            Some(s) => match (s.dtype(), s.shape()) {
+                (DType::I32, &[v, w]) if v == vocab => w,
+                _ => {
+                    return bad(format!(
                         "shortlist head: successors must be int32 ({vocab}, width), got {} {:?}",
                         s.dtype().name(),
                         s.shape()
-                    )),
-                },
-            };
+                    ))
+                }
+            },
+        };
         if succ_width > 1024 {
             return bad(format!(
                 "shortlist head: at most 1024 successors a token, got {succ_width}"
@@ -274,6 +281,8 @@ impl ShortlistHead {
             )));
         }
         let near = near.min(vocab);
+        // at most 1,024 blocks, so dispatch 6 scans their counts in one pass
+        let tie_block = TIE_BLOCK.max(vocab.div_ceil(1024));
         u32_of(vocab * dim, "vocab * dim")?;
         u32_of(cluster_ids.numel() + 1, "cluster_ids")?;
 
@@ -311,8 +320,10 @@ impl ShortlistHead {
             dist: i32s(vocab)?,
             firstpos: i32s(vocab)?,
             hist: i32s(dim + 1)?,
-            plan: i32s(PLAN_ORDER + 2 * clusters + 1)?,
+            plan: i32s(PLAN_ORDER + ranks)?,
             cnt: i32s(ranks)?,
+            tiecnt: i32s(vocab.div_ceil(tie_block))?,
+            tie_block,
             part: i32s(3 * vocab.div_ceil(SCORE_ROWS))?,
             out: i32s(4)?,
         })
@@ -354,6 +365,9 @@ impl ShortlistHead {
         };
         let succ = self.successors.as_ref().unwrap_or(&self.cnt);
         let score_groups = self.vocab.div_ceil(SCORE_ROWS);
+        let rank_groups = self.clusters.div_ceil(RANK_GROUP);
+        let blocks = self.vocab.div_ceil(self.tie_block);
+        let (near, ranks, tie_block) = (self.near as u32, self.ranks as u32, self.tie_block as u32);
         let launch = |k: &Kernel, args: &[Arg<'_>], groups: usize, push: &[u32]| -> Result<()> {
             k.launch(
                 dev,
@@ -389,24 +403,14 @@ impl ShortlistHead {
                     self.vocab.div_ceil(HAMMING_TILE),
                     &[v, d / 32, HAMMING_TILE as u32],
                 )?,
+                // the ranking workgroups, then one for the k-th distance
                 2 => launch(
-                    &PLAN,
-                    &[
-                        S(&self.hist),
-                        S(&self.dist),
-                        S(&self.scores),
-                        S(&self.cluster_offsets),
-                        S(&self.plan),
-                    ],
-                    1,
-                    &[
-                        v,
-                        d,
-                        self.near as u32,
-                        c,
-                        self.clusters.next_power_of_two() as u32,
-                    ],
+                    &RANK,
+                    &[S(&self.hist), S(&self.scores), S(&self.plan)],
+                    rank_groups + 1,
+                    &[d, near, c, ranks, rank_groups as u32],
                 )?,
+                // one workgroup a ranked cluster, then one a block of rows
                 3 => launch(
                     &MARK,
                     &[
@@ -414,9 +418,11 @@ impl ShortlistHead {
                         S(&self.cluster_offsets),
                         S(&self.cluster_ids),
                         S(&self.firstpos),
+                        S(&self.dist),
+                        S(&self.tiecnt),
                     ],
-                    self.ranks,
-                    &[c],
+                    self.ranks + blocks,
+                    &[ranks, v, tie_block],
                 )?,
                 4 => launch(
                     &COUNT,
@@ -428,7 +434,7 @@ impl ShortlistHead {
                         S(&self.cnt),
                     ],
                     self.ranks,
-                    &[c],
+                    &[ranks],
                 )?,
                 5 => launch(
                     &CUT,
@@ -439,15 +445,19 @@ impl ShortlistHead {
                         S(&self.firstpos),
                         S(&self.cnt),
                         S(succ),
+                        S(&self.dist),
+                        S(&self.tiecnt),
                     ],
                     1,
                     &[
-                        c,
-                        self.ranks as u32,
+                        ranks,
                         context,
                         v,
                         self.succ_width as u32,
                         prev,
+                        near,
+                        tie_block,
+                        blocks as u32,
                     ],
                 )?,
                 6 => launch(
