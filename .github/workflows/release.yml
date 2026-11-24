@@ -28,9 +28,10 @@
 #     pip falls back to it on any platform without a wheel, so build.rs's
 #     error message is a user-facing string, not a developer note.
 #
-# Publishing uses PyPI trusted publishing (OIDC): no token is stored in
-# this repository. It needs a one-time publisher entry on pypi.org naming
-# this repository, `release.yml` and the `pypi` environment.
+# Publishing uses the PYPI_API_TOKEN repository secret. To move to PyPI
+# trusted publishing (OIDC, no stored token) later: add a publisher entry on
+# pypi.org naming this repository, `release.yml` and the `pypi` environment,
+# then drop the `password:` line below and the secret.
 
 name: release
 
@@ -162,7 +163,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write          # trusted publishing: no API token to leak
+      contents: read
     steps:
       - uses: actions/checkout@v4
       # a version on PyPI can never be re-uploaded, so a tag that disagrees
@@ -177,6 +178,7 @@ jobs:
       - run: ls -la dist
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: dist
           # a re-run must not fail on files already uploaded
           skip-existing: true
