@@ -2,8 +2,10 @@
 #extension GL_GOOGLE_include_directive : require
 // Block-sparse attention backward, part 1 of 2: dK and dV. One workgroup
 // per (batch, head, 32-key tile); it walks the query tiles that touch it
-// (the transposed tile list, ascending), 16 query rows at a time so its
-// shared tiles fit in 64 KiB, and recomputes from the forward's lse:
+// (the transposed tile list, ascending), 8 query rows at a time so its
+// shared tiles fit in 48 KiB, the most NVIDIA's Vulkan driver allows a
+// workgroup (43,456 bytes; at 16 rows it was 53,888, and the T4
+// faulted), and recomputes from the forward's lse:
 //   P  = exp(q.k * scale - lse)          (0 where masked)
 //   dS = P * (dO.v - Drow),  Drow = rowsum(dO * O)
 //   dV += P^T dO,  dK += scale * dS^T Q
@@ -14,7 +16,7 @@ layout(local_size_x = 256) in;
 #include "g2-common.glsl"
 
 #define T 32
-#define U 16
+#define U 8
 #define MAX_D 128
 #define FULL 0x40000000u
 
