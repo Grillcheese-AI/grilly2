@@ -18,6 +18,8 @@ pub mod graph;
 mod kernel;
 pub mod ops;
 pub mod rng;
+#[cfg(test)]
+mod shared_memory;
 mod tensor;
 
 pub use device::{Buffer, Caps, Device, MemClass, SubmitStats};

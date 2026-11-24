@@ -9,6 +9,11 @@
 // Writes O and the log-sum-exp (natural log) per query row; a row with no
 // kept key gets O = 0 and lse = -inf, as torch's flex_attention does.
 // Layout: Q (B, H, L, D), K (B, H, S, D), V (B, H, S, Dv), contiguous.
+// Shared memory is 37,632 bytes: a key tile and a value tile are never
+// needed at once, so they take turns in KVs. Separate, the three tiles
+// came to 54,144 bytes, past the 48 KiB NVIDIA's Vulkan driver allows
+// a workgroup, and the T4 faulted (VK_ERROR_DEVICE_LOST) on the first
+// prefill.
 
 layout(local_size_x = 256) in;
 #include "g2-common.glsl"
@@ -31,8 +36,7 @@ layout(push_constant) uniform P {
 } p;
 
 shared float Qs[T][MAX_D + 1];  // +1: rows start in different banks
-shared float Ks[T][MAX_D + 1];
-shared float Vs[T][MAX_D + 1];
+shared float KVs[T][MAX_D + 1];  // this tile's keys, then its values
 shared float Ps[T][T + 1];
 shared float m_s[T];
 shared float l_s[T];
@@ -71,11 +75,7 @@ void main() {
         uint k0 = kt * T;
         for (uint i = tid; i < T * p.D; i += 256u) {
             uint r = i / p.D, d = i % p.D;
-            Ks[r][d] = k0 + r < p.S ? Kd[k_base + (k0 + r) * p.D + d] : 0.0;
-        }
-        for (uint i = tid; i < T * p.Dv; i += 256u) {
-            uint r = i / p.Dv, d = i % p.Dv;
-            Vs[r][d] = k0 + r < p.S ? Vd[v_base + (k0 + r) * p.Dv + d] : 0.0;
+            KVs[r][d] = k0 + r < p.S ? Kd[k_base + (k0 + r) * p.D + d] : 0.0;
         }
         barrier();
         // scores of the tile, -inf where masked
@@ -86,12 +86,16 @@ void main() {
             float score = NEG_INF;
             if (keep) {
                 float dot = 0.0;
-                for (uint d = 0u; d < p.D; ++d) dot = fma(Qs[r][d], Ks[c][d], dot);
+                for (uint d = 0u; d < p.D; ++d) dot = fma(Qs[r][d], KVs[c][d], dot);
                 score = dot * p.scale;
             }
             Ps[r][c] = score;
         }
-        barrier();
+        barrier();  // the keys are consumed: the values take their place
+        for (uint i = tid; i < T * p.Dv; i += 256u) {
+            uint r = i / p.Dv, d = i % p.Dv;
+            KVs[r][d] = k0 + r < p.S ? Vd[v_base + (k0 + r) * p.Dv + d] : 0.0;
+        }
         // online softmax, one thread per row, columns in order
         if (tid < T) {
             float m_old = m_s[tid], mx = m_old;
@@ -117,10 +121,10 @@ void main() {
             if (j >= per || i >= T * p.Dv) break;
             uint r = i / p.Dv, d = i % p.Dv;
             float a = acc[j] * alpha_s[r];
-            for (uint c = 0u; c < T; ++c) a = fma(Ps[r][c], Vs[c][d], a);
+            for (uint c = 0u; c < T; ++c) a = fma(Ps[r][c], KVs[c][d], a);
             acc[j] = a;
         }
-        barrier();  // before the next tile overwrites Ks, Vs, Ps
+        barrier();  // before the next tile overwrites KVs and Ps
     }
 
     for (uint j = 0u; j < 16u; ++j) {

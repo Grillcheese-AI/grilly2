@@ -471,8 +471,11 @@ int32_t gc_load_shader_dir(gc_ctx* ctx, const char* dir, uint32_t* loaded) {
         uint32_t count = 0;
         for (const auto& entry : fs::directory_iterator(path)) {
             if (entry.path().extension() != ".spv") continue;
-            ctx->cache.registerSPIRVFile(entry.path().stem().string(),
-                                         entry.path().string());
+            // loaded now, not registered for later: the lazy register skips
+            // a name already loaded, and the baked kernels load first, so a
+            // file here could add a kernel but never replace one
+            ctx->cache.loadSPIRVFile(entry.path().stem().string(),
+                                     entry.path().string());
             ++count;
         }
         if (loaded) *loaded = count;
