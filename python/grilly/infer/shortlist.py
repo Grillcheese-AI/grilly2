@@ -21,6 +21,9 @@ and reads back 16 bytes::
                          cluster_offsets, successors, near=2048, context=8192)
     token = head.argmax(hidden[-1], prev=last_token)
 
+A model's ``generate`` uses it as ``model.shortlist = head`` for greedy
+decoding of one row (:mod:`grilly.infer.generation` says when).
+
 Building the clusters is the caller's business; this is the machinery that
 runs a route once it exists. ``ranks`` bounds how many clusters are scanned;
 a state whose first ``ranks`` clusters hold fewer than ``context`` distinct
@@ -78,6 +81,10 @@ class ShortlistHead:
             int(near), int(context), int(ranks),
         )
         self.last: Optional[Choice] = None
+        #: tokens ``argmax`` has picked, and how many of them on a short
+        #: context list (``last.short``); set them to 0 to start a count
+        self.picks = 0
+        self.short_picks = 0
 
     @property
     def shape(self):
@@ -91,6 +98,8 @@ class ShortlistHead:
         """The next token for state ``x`` (dim elements) after ``prev``."""
         x = _require_tensor("x", x)
         self.last = Choice(*self._head.argmax(x._t, None if prev is None else int(prev)))
+        self.picks += 1
+        self.short_picks += self.last.short
         return self.last.token
 
     def union(self, x, prev: Optional[int] = None):
