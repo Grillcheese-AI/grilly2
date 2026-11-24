@@ -1,7 +1,7 @@
 # Submission: batching, its costs, and the fence timeout
 
-Measurements behind CLAUDE.md §11's premise that batching tiny submits is
-the win for a decode loop. All on the RX 6750 XT.
+Measurements behind the premise that batching tiny submits is the win for
+a decode loop. All on the RX 6750 XT.
 
 ## The fence timeout's root cause (fb9d1cf)
 
@@ -113,7 +113,7 @@ all landing at their own dispatch. Those tests take a lock: the counters
 they read are the device's, and cargo runs a binary's tests in parallel
 threads, which is how the first version of them failed.
 
-## What this says for §11
+## What this says for the decode loop
 
 The premise holds: batching tiny submits is the win, and the GPU side of it
 is cheap. The limit is host-side, so the levers, in order of payoff:

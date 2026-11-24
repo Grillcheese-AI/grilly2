@@ -1,6 +1,6 @@
-//! Loading safetensors files, from Rust with no Python in the path (CLAUDE.md
-//! §11: the machinery must work without any adapter). Files are written
-//! with the `safetensors` crate itself.
+//! Loading safetensors files, from Rust with no Python in the path (the
+//! machinery must work without any adapter). Files are written with the
+//! `safetensors` crate itself.
 //!
 //! Tolerance: bit-exact throughout. Loading copies or widens; bf16 and f16
 //! widen to float32 exactly, so there is no rounding to absorb. f16 is

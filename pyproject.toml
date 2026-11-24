@@ -44,8 +44,8 @@ Issues = "https://github.com/Grillcheese-AI/grilly2/issues"
 [project.optional-dependencies]
 # the reference the op tests compare against; never needed to *use* grilly
 test = ["pytest", "torch"]
-# `from grilly.huggingface import AutoTokenizer` needs a real tokenizer.
-# CLAUDE.md §11: depend on it, do not write one.
+# `from grilly.huggingface import AutoTokenizer` needs a real tokenizer,
+# and grilly depends on Hugging Face's rather than writing its own.
 huggingface = ["tokenizers", "safetensors"]
 
 [project.scripts]

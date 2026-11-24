@@ -1,4 +1,4 @@
-//! A key/value cache that stays on the GPU (CLAUDE.md §11, step 5).
+//! A key/value cache that stays on the GPU (docs/inference.md).
 //!
 //! v1's cache (`cpp/src/ops/kv_cache.cpp`) is not used. Its append and
 //! decode take and return host arrays: every call uploads, runs a kernel,

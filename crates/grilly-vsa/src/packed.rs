@@ -1,8 +1,8 @@
 //! Packed binary hypervectors: `dim` bits held 32 to a word.
 //!
 //! The other VSA algebra, and **not** a variant of the block codes in
-//! [`crate::block_code`] (CLAUDE.md §8.3). Here a hypervector is a bit
-//! string, 32x smaller than one float per dimension, and the algebra is:
+//! [`crate::block_code`]. Here a hypervector is a bit string, 32x smaller
+//! than one float per dimension, and the algebra is:
 //!
 //! - bind — XOR, its own inverse, so unbinding is binding again. That is
 //!   `bitwise_xor` on the packed words; there is no kernel here for it,

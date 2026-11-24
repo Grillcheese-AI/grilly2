@@ -1,7 +1,8 @@
 """Buffers freed while a batch is recording are reused by later commands in
-the same batch (the shim's batch-local free list; CLAUDE.md §11, the root
+the same batch (the shim's batch-local free list, the fix for the root
 cause of the fence timeout: without it a batch's footprint was the sum of
-all its intermediates and paged to system RAM).
+all its intermediates and paged to system RAM; docs/submission.md has the
+measurements).
 
 What makes that safe is ownership, not ordering: a buffer reaches the free
 list only when the Rust `Buffer` owning it is dropped (the only call site of

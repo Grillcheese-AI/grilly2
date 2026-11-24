@@ -5,7 +5,7 @@ and indices, and that is the point. grilly2 defines a total order for
 sorting (descending puts NaN first, ties keep their original position),
 and the small-k kernel has to give the same answer the bitonic sort gives,
 not merely a similar one. A faster route to a different answer would be a
-second dispatch path (CLAUDE.md §5) wearing a speedup as a disguise.
+second dispatch path wearing a speedup as a disguise.
 
 Why it exists: the bitonic path costs ``log2(n)*(log2(n)+1)/2`` dispatches
 whatever k is — 108 for ``topk(8)`` over 16384 — because it sorts the whole

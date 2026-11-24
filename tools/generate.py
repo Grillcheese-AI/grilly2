@@ -1,4 +1,4 @@
-"""The CLAUDE.md §11 acceptance run: load a small open-weights model from
+"""The inference acceptance run: load a small open-weights model from
 safetensors, quantize it, generate sampled text on the GPU, and report
 tokens/sec and peak VRAM.
 
@@ -16,8 +16,8 @@ The whole run is `grilly.huggingface`, which is `transformers`' own calls:
 Nothing is downloaded: the repository must already be in the local Hugging
 Face cache, or --model must name a directory holding `config.json`,
 `generation_config.json`, `model.safetensors` and `tokenizer.json`. The
-machinery underneath does not need the adapter (CLAUDE.md §11); what that
-looks like without it is `tests/python/test_huggingface.py`'s last test.
+machinery underneath does not need the adapter; what that looks like
+without it is `tests/python/test_huggingface.py`'s last test.
 
 Llama and Qwen2 configs load; the chat prompt is whatever the tokenizer's
 own template renders.

@@ -13,7 +13,7 @@ Tolerances:
   ``rms(a) * rms(b)``, so that is where the rounding can reach. Derived, not
   picked: the measured error sits at 43% of it, and the factor of 2 is the
   only slack. The worst ratio is printed, which is what says an op
-  regressed (CLAUDE.md §9(b)).
+  regressed (case (b) in docs/testing.md).
 - **recovery: ranked first, by a margin.** Not a number on the similarity,
   which depends on d and on how much is bundled in.
 """

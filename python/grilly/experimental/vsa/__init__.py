@@ -2,7 +2,7 @@
 
 v1 kept four algebras here. They are all in ``grilly.vsa`` now, each in its
 own namespace, and they are still four different algebras rather than four
-spellings of one (CLAUDE.md §8.3):
+spellings of one, so a capability check for one never gates another:
 
 | v1 | grilly2 |
 |---|---|

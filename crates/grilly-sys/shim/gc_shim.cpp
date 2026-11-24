@@ -70,7 +70,7 @@ struct gc_ctx {
     // v1's BufferPool mid-batch: its release() destroys a buffer when a
     // bucket is full, which would free one the unsubmitted command buffer
     // still uses. Without this, a batch's footprint was the sum of all its
-    // intermediates (CLAUDE.md §11: 20 GB and 12x slower at S=4096).
+    // intermediates (docs/submission.md: 20 GB and 12x slower at S=4096).
     std::unordered_map<size_t, std::vector<grilly::GrillyBuffer>> batchFree;
     uint64_t batchReuses = 0;
 

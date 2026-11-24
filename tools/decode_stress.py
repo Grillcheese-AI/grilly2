@@ -1,4 +1,4 @@
-"""Decode-shaped submission stress (CLAUDE.md §11).
+"""Decode-shaped submission stress (results in docs/submission.md).
 
 A decode loop is thousands of tiny submits. This runs a decode-like step
 (an F.linear projection (1, D) -> (1, D) as nn.Linear does it, elementwise

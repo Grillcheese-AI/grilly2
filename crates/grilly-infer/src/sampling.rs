@@ -1,4 +1,4 @@
-//! Next-token sampling on the GPU (CLAUDE.md §11, step 3). The logits never
+//! Next-token sampling on the GPU (docs/inference.md). The logits never
 //! leave the device: one kernel (g2-sample) applies Hugging Face's
 //! processors in `generate()`'s order and draws the token, and only one
 //! uniform number per row goes the other way, drawn on the host from

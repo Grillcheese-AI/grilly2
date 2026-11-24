@@ -1,4 +1,4 @@
-//! safetensors checkpoints, loaded onto the GPU (CLAUDE.md §11, step 1).
+//! safetensors checkpoints, loaded onto the GPU (docs/inference.md).
 //!
 //! The file is memory-mapped, and its header is parsed and validated
 //! (offsets, sizes, overlaps) by Hugging Face's `safetensors` crate. Each

@@ -1,4 +1,4 @@
-"""Decode-shaped submission stress, as a regression guard (CLAUDE.md §11).
+"""Decode-shaped submission stress, as a regression guard (docs/submission.md).
 
 A decode loop is thousands of tiny submits. Growth over such a run means
 pooling or recycling is wrong: descriptor pools allocated per submit,

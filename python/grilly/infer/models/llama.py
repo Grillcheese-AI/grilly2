@@ -1,7 +1,7 @@
 """A Llama-family decoder: Llama, Qwen2 and models built the same way
 (RMSNorm, rotary position embeddings, grouped-query attention, a SwiGLU
 MLP). It is the machinery's own model, so a safetensors checkpoint loads
-and generates with no model-zoo adapter installed (CLAUDE.md §11).
+and generates with no model-zoo adapter installed.
 
 The parameter names are Hugging Face's (``model.layers.0.self_attn.q_proj``
 ...), so a checkpoint of this family loads with

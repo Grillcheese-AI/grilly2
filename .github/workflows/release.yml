@@ -50,7 +50,7 @@ env:
 
 jobs:
   windows:
-    # the headline platform: CLAUDE.md §2's position is consumer AMD and
+    # the headline platform: the project exists for consumer AMD and
     # Intel cards under Windows, which is precisely where torch will not train
     name: wheel (windows x64)
     runs-on: windows-latest

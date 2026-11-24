@@ -13,7 +13,7 @@ majority's tie rule.
 
 This is **not** the block-code algebra (``test_vsa.py``). Different dtype,
 different bind, different similarity baseline — 0.5 here means "unrelated",
-where a block code's is 1/l (CLAUDE.md §8.3).
+where a block code's is 1/l.
 """
 
 from __future__ import annotations
@@ -116,8 +116,8 @@ def test_a_dim_that_is_not_a_multiple_of_32_is_refused():
 
 
 def test_the_two_algebras_do_not_accept_each_others_vectors():
-    """v1 let a capability check for one gate the other, which is where the
-    confusion started (CLAUDE.md §8.3). They must not silently interoperate."""
+    """v1 let a capability check for one algebra gate the other, which is
+    where the confusion started. They must not silently interoperate."""
     from grilly import vsa
 
     block = vsa.random_discrete(8, 32)

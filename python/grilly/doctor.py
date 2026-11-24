@@ -1,12 +1,12 @@
 """`python -m grilly.doctor` — why grilly does or does not work here.
 
-This exists because of CLAUDE.md §8's first trap, which cost this project
-hours: *a backend reading of "numpy" does not mean there is no Vulkan tier.*
-It usually means the package is not importable from the interpreter being
-tested in. That mistake is cheap to make and expensive to debug, and a user
-who hits it has no way at all to tell the two apart. So the rule here is to
-report **which interpreter, which install, which device**, before reporting
-any verdict.
+This exists because of a trap that cost this project hours: *a backend
+reading of "numpy" does not mean there is no Vulkan tier.* It usually
+means the package is not importable from the interpreter being tested in.
+That mistake is cheap to make and expensive to debug, and a user who hits
+it has no way at all to tell the two apart. So the rule here is to report
+**which interpreter, which install, which device**, before reporting any
+verdict.
 
 Everything it prints is something a bug report needs and a user cannot
 easily get. It never raises: a diagnostic that crashes on a broken install

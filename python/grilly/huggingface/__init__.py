@@ -10,11 +10,11 @@
                                         add_generation_prompt=True, return_tensors="pt")
     print(tokenizer.decode(model.generate(ids, max_new_tokens=128)[0]))
 
-**This package is an adapter and nothing else** (CLAUDE.md §11). It reads
-``config.json``, finds a repository's files, and hands them to
-``grilly.infer``; every mechanism it uses — the models, safetensors
-loading, quantization, the KV cache, sampling, ``generate`` — lives there
-and works with this package uninstalled. ``tests/python/test_huggingface.py``
+**This package is an adapter and nothing else.** It reads ``config.json``,
+finds a repository's files, and hands them to ``grilly.infer``; every
+mechanism it uses — the models, safetensors loading, quantization, the KV
+cache, sampling, ``generate`` — lives there and works with this package
+uninstalled (docs/huggingface.md). ``tests/python/test_huggingface.py``
 holds that line: one test loads a checkpoint and generates with
 ``grilly.huggingface`` absent from ``sys.modules``.
 

@@ -6,8 +6,9 @@
 //! bit for bit eager's. With reuse (a node feeding several ops) or
 //! broadcasting, eager sums contributions and reduces broadcast dims in a
 //! different order than the fused kernel may: those are held to rtol 1e-7
-//! (CLAUDE.md §9 case (a): reassociation is all that bound absorbs). The one
-//! chain below measured bit-exact (0 ulp on dx, dw and db, RX 6750 XT).
+//! (case (a) in docs/testing.md: reassociation is all that bound absorbs).
+//! The one chain below measured bit-exact (0 ulp on dx, dw and db,
+//! RX 6750 XT).
 
 use grilly_core::fusion::Graph;
 use grilly_core::generic::{Binary, Unary};

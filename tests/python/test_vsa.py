@@ -2,9 +2,9 @@
 
 Block codes are ``(..., k, l)`` float32 with **one hot position per block**
 (k = 80, l = 128 downstream). Feeding dense Gaussians to these operations
-produces numbers that look like a semantics bug and are not (CLAUDE.md
-§8.2), so the discrete tests build codes the way the algebra defines them
-and the continuous tests say so in their names.
+produces numbers that look like a semantics bug and are not, so the
+discrete tests build codes the way the algebra defines them and the
+continuous tests say so in their names.
 
 Tolerances, and what each one is for:
 
@@ -15,9 +15,9 @@ Tolerances, and what each one is for:
 - **against v1's ``BlockCodeOps``: one ulp of 1.0** (``float32`` eps,
   1.1920929e-07). v1's Python does the same convolution through an FFT
   pair, so where this port writes an exact 1.0 the FFT writes the nearest
-  float to it. CLAUDE.md §7 records 1.19e-07 for v1's bridge against the
-  same reference; that is this number to three figures, and the measured
-  difference here is exactly it. Anything larger would be a real
+  float to it. v1's measured figure for its bridge against the same
+  reference is 1.19e-07; that is this number to three figures, and the
+  measured difference here is exactly it. Anything larger would be a real
   disagreement, so the bound is the ulp and not a round number near it.
 - **continuous codes: 4 * l * eps.** l products summed in float32, against
   the same convolution in float64. The worst measured ratio is printed.
@@ -101,10 +101,10 @@ def test_unbinding_recovers_either_factor_exactly():
 
 
 def test_binding_agrees_with_v1s_block_code_ops():
-    """The agreement CLAUDE.md §7 records for v1's bridge, 1.19e-07: one
-    ulp of the 1.0 this port writes exactly, which is what an FFT round
-    trip costs. Not a semantic difference, and not a free tolerance —
-    two ulp would mean the convolution disagreed somewhere."""
+    """v1's measured agreement for its bridge, 1.19e-07: one ulp of the 1.0
+    this port writes exactly, which is what an FFT round trip costs. Not a
+    semantic difference, and not a free tolerance — two ulp would mean the
+    convolution disagreed somewhere."""
     ops = v1_block_ops()
     ulp = float(np.finfo(np.float32).eps)
     a, _ = one_hot(32, 5)
@@ -184,9 +184,9 @@ def test_discretize_and_flat_round_trip():
 
 @pytest.mark.parametrize("batch, required", [(64, 1.74), (512, 1.83)])
 def test_batched_binding_beats_v1s_python_by_at_least_v1s_bridge_did(batch, required):
-    """CLAUDE.md §7's measured speedups for v1's bridge over v1's Python, at
-    the batch sizes they were quoted at. The GPU win is batch-only, so the
-    batch size belongs beside every number here (§8.5)."""
+    """v1's measured speedups for its bridge over v1's Python, at the batch
+    sizes they were quoted at. The GPU win is batch-only, so the batch size
+    belongs beside every number here."""
     ops = v1_block_ops()
     a, _ = one_hot(batch, 16)
     b, _ = one_hot(batch, 17)

@@ -1,7 +1,7 @@
 [package]
 name = "grilly-infer"
 version = "0.1.0"
-description = "Inference machinery for grilly2: weight loading, and later quantization, GPU sampling and the decode loop (CLAUDE.md §11)"
+description = "Inference machinery for grilly2: weight loading, and later quantization, GPU sampling and the decode loop"
 edition.workspace = true
 license.workspace = true
 

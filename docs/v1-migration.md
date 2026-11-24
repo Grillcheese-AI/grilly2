@@ -10,14 +10,16 @@ everything about how it is treated:
 | | what it is | what happens to it |
 |---|---|---|
 | **A — a domain library** | something the torch API has no name for: the VSA algebras, spiking neurons, plasticity rules, place and time cells, capsules, CVL | **ported.** Rewritten on grilly2's kernels, under its own name. The v1 path keeps working as a deprecated alias with v1's exact signature — numpy in and numpy out where v1 took numpy — and one `DeprecationWarning` naming the new path |
-| **B — v1's parallel framework** | v1's own autograd, its own `nn` layers and optimizers, `VulkanTensor`, `torch_api`, and the raw bridge ops beneath them | **replaced, not reimplemented.** The torch API *is* the replacement; that is the entire point of the rewrite (CLAUDE.md §1). The v1 name raises `NotImplementedError` naming what to use instead |
+| **B — v1's parallel framework** | v1's own autograd, its own `nn` layers and optimizers, `VulkanTensor`, `torch_api`, and the raw bridge ops beneath them | **replaced, not reimplemented.** The torch API *is* the replacement; that is the entire point of the rewrite. The v1 name raises `NotImplementedError` naming what to use instead |
 
 A **B** name raises `NotImplementedError`, never `AttributeError`, and
 never returns `None`. That is deliberate: `AttributeError` is what
 `hasattr` swallows, and a capability check that quietly answers "no" is
 exactly how v1's own `_detect_backend` ended up reporting a GPU tier it
-never used (CLAUDE.md §8.3, §8.4). A migration that fails loudly is a
-migration; one that falls through silently is a regression nobody notices.
+never used: it gated the whole tier on a `hasattr` check for one algebra's
+op, and v1's bridge returns `None` to mean "declined, fall through" rather
+than raising. A migration that fails loudly is a migration; one that falls
+through silently is a regression nobody notices.
 
 ## Who actually depends on v1
 
@@ -89,7 +91,7 @@ None of these are reimplemented. Each raises, naming the replacement.
 | `backend._bridge` ops that torch already names: `linear`, `gelu`, `relu`, `silu`, `tanh`, `softmax`, `layernorm`, `rmsnorm`, `conv2d`, `maxpool2d`, `attention_*`, `flash_attention2`, `rope`, `cross_entropy_*`, `adam_update`, `adamw_update`, `tensor_*`, `kv_cache_*` (~50 names) | `grilly.nn`, `grilly.nn.functional`, `grilly.optim`, `grilly.infer.cache` |
 | `backend.jit` | `grilly.compile` |
 | `backend.amp` | not available — grilly is float32 only so far, and will say so rather than pretend |
-| `backend.buffer_pool`, `backend.shader_registry`, `backend.vma_wrapper` | grilly's own allocator and dispatch spine. No op names a `.spv` file (CLAUDE.md §5) |
+| `backend.buffer_pool`, `backend.shader_registry`, `backend.vma_wrapper` | grilly's own allocator and dispatch spine. No op names a `.spv` file |
 | `nn.lora`, `nn.multimodal`, `nn.routing`, `nn.hippocampal`, `nn.selective_momentum`, `nn.projection_heads` | ordinary `grilly.nn` modules — these are model code, not framework, and belong in the repo that uses them |
 
 ### Not migrated at all
@@ -98,8 +100,7 @@ None of these are reimplemented. Each raises, naming the replacement.
 `experimental/resident_train`, `experimental/snn_event_driven`,
 `grilly_datasets`, `experimental_datasets`, `tokenizer_impl` — v1's own
 scaffolding. grilly2 depends on Hugging Face `tokenizers` rather than
-carrying one (CLAUDE.md §11), and datasets are not a tensor framework's
-job.
+carrying one, and datasets are not a tensor framework's job.
 
 ## The plan for the rest, and what needs deciding
 

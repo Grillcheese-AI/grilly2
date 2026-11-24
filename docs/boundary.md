@@ -1,7 +1,8 @@
 # The GPU boundary
 
-The answer to CLAUDE.md §11: what `grilly-core` needs from v1's C++ Vulkan layer,
-how wide that surface is, and which language sits on the other side of it.
+This document answers three questions: what `grilly-core` needs from v1's C++
+Vulkan layer, how wide that surface is, and which language sits on the other
+side of it.
 
 **Decision (owner, 2026-09-18): Rust core, with the shim written against v1's
 Vulkan primitives (level A below).**
@@ -31,8 +32,8 @@ A `Linear` forward re-uploads its weights on every call and nothing stays reside
 between ops. Fine for one-shot inference; unusable for training.
 
 **D must not cross.** `TapeContext` is a second autograd with its own forward op
-set — the second dispatch route §5 forbids. Autograd is what grilly2 rewrites; the
-tape lives in Rust.
+set — a second route to the GPU beside the one dispatch path. Autograd is what
+grilly2 rewrites; the tape lives in Rust.
 
 **B is the right shape but has two defects** that cannot be fixed without editing
 v1: `dispatch` binds every buffer whole at offset 0 (no tensor views), and
@@ -59,7 +60,8 @@ So the shim is built on **A**, lives in this repository
    Ownership is one-directional: Rust owns handles and releases them on drop;
    C++ owns the memory.
 
-Narrow and mostly opaque, so by §11's rule Rust stands.
+Narrow and mostly opaque, so Rust stands. A wide, stateful surface, with
+descriptor handles crossing constantly, would have made C++ the better call.
 
 ## v1 behaviour the shim deliberately does not use
 
@@ -81,17 +83,18 @@ Narrow and mostly opaque, so by §11's rule Rust stands.
 
 The per-op knowledge now inside `src/ops/*.cpp` — shader name, binding order,
 push-constant layout, grid, cooperative-matrix selection — is re-expressed once
-in grilly2's op registry. That registry is the single dispatch spine of §5, so
-this is work the project needs anyway, not a detour.
+in grilly2's op registry. That registry is the single dispatch spine (shader
+registry → pipeline cache → bind → submit) that every op goes through, so this
+is work the project needs anyway, not a detour.
 
 ## Found during the analysis, not yet resolved
 
-- **§7 baseline.** `backend/_bridge.py` calls `dev.blockcode_bind`, but that name
-  exists nowhere in v1's C++ sources, in its git history (`git log -S`), or in the
-  compiled `grilly_core` extension; any exception falls through silently to a
-  numpy loop. Either the 1.83× measurement came from a different build or it
-  measured the fallback. Must be settled before §7 is used as a regression
-  baseline.
+- **v1's block-code baseline.** `backend/_bridge.py` calls `dev.blockcode_bind`,
+  but that name exists nowhere in v1's C++ sources, in its git history
+  (`git log -S`), or in the compiled `grilly_core` extension; any exception falls
+  through silently to a numpy loop. Either the 1.83× measurement came from a
+  different build or it measured the fallback. Must be settled before v1's
+  measured block-code numbers are used as a regression baseline.
 - **Milestone-1 coverage.** v1 has no `GRU` (minGRU only). The `t_*` tensor ops
   are CPU Eigen code, not GPU. No `gather`, `cat`, `stack` or `bmm` is bound in
   the torch-tier binding files.
@@ -137,12 +140,13 @@ What it changed:
 - VulkanMemoryAllocator is a submodule at
   `crates/grilly-sys/third_party/VulkanMemoryAllocator` (v3.4.0, pinned;
   v1 carried 3.4.0-development), or `VMA_INCLUDE_DIR`. It is not vendored —
-  CLAUDE.md §9's rule stands, and a submodule is how it stands.
+  the rule against copying dependencies into this repository stands, and a
+  submodule is how it stands.
 
 What it did not change: the shim's contract, the one dispatch path, or any
 measured number. 113 Rust tests and 1015 Python tests pass with no v1
 checkout present and no environment variable set.
 
-The §3 premise this all rested on — "the C++ Vulkan layer is finished, so
+The premise this all rested on — "the C++ Vulkan layer is finished, so
 linking it is free" — is now moot rather than tested. The layer is
 grilly2's, and an edit to it costs one `cargo build`.

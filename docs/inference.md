@@ -1,6 +1,6 @@
 # Inference (grilly-infer)
 
-CLAUDE.md §11 sets the build order:
+The build order:
 1. safetensors loading;
 2. int8 (and int4) weight-only quantization;
 3. GPU sampling;
@@ -662,7 +662,7 @@ cache.append(layer, keys, values)   # (batch, kv_heads, T, head_dim), written in
 out = cache.attend(layer, query)    # query (batch, heads, 1, head_dim)
 ```
 
-**Why not v1's cache.** §11 said to wire v1's nine KV-cache ops, not
+**Why not v1's cache.** The plan was to wire v1's nine KV-cache ops, not
 rebuild them. Reading `cpp/src/ops/kv_cache.cpp` showed three problems.
 - **Host round trips.** `kvCacheAppend` takes host arrays: it copies them,
   uploads, runs a GEMM for its low-rank compression, downloads the result
@@ -673,7 +673,7 @@ rebuild them. Reading `cpp/src/ops/kv_cache.cpp` showed three problems.
   keys, INT4/INT2 values.
 - **A second path to the GPU.** Its ops drive v1's pool and command batch
   directly. Exposing them through the shim would add a second path to the
-  GPU beside the dispatch spine, which §5 forbids.
+  GPU beside the dispatch spine, and every op goes through that one spine.
 
 On the owner's go-ahead (2026-09-19), the cache is built in grilly2 instead. v1 is
 unchanged. v1's eviction policies (H2O, a learned eviction head) could be

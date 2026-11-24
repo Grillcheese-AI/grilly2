@@ -4,7 +4,7 @@ weights.
 
 Tolerances:
 - logits: max |grilly - transformers| <= 1e-5 * max |logit|. That is case
-  (b) in CLAUDE.md §9: two layers of different float32 implementations
+  (b) in docs/testing.md: two layers of different float32 implementations
   (matmul order, softmax, RMSNorm's mean). Measured ~2e-7.
 - token sequences: equal. Greedy decoding picks the argmax, and the weights
   are drawn large enough that the models' top two logits are not within

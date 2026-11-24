@@ -16,8 +16,8 @@ running, and each is a test here:
    argument, so it is asserted rather than assumed.
 
 Tolerances. (3) is **bit-exact**: same kernels, same inputs, same order —
-CLAUDE.md §9 case (a), and nothing weaker is acceptable for a claim about
-determinism. (4) is *not* case (a) despite being one backend: the two
+case (a) in docs/testing.md, and nothing weaker is acceptable for a claim
+about determinism. (4) is *not* case (a) despite being one backend: the two
 sides are related by the distributive law rather than by reassociation, so
 they are different arithmetic and measure 1.4e-7 apart. It asserts against
 a float64 reference under a bound derived from the op instead, and prints
@@ -276,7 +276,7 @@ def test_the_population_forward_equals_n_materialised_forwards():
     relative, just past the case (a) bound, and tightening the assertion
     to 1e-7 would be asserting something untrue about float arithmetic.
 
-    So this does what CLAUDE.md §9 prefers instead: both sides are
+    So this does what docs/testing.md prefers instead: both sides are
     compared against a **float64 reference** under a bound derived from the
     op — a dot product of length ``din`` has error at most
     ``din * eps * (|x| @ |W'|)`` — and the worst measured ratio to that
@@ -455,8 +455,9 @@ def test_the_prompt_centred_shaping_is_a_scaled_centred_mean():
     in the score instead of in the rank.
 
     Bit-exact is not available: the two sides are the same sum in a
-    different order (float64 on the host either way), so this is CLAUDE.md
-    §9 case (a) composed-chain, ``rtol 1e-7``. It measures 4e-16.
+    different order (float64 on the host either way), so this is the
+    composed-chain half of case (a) in docs/testing.md, ``rtol 1e-7``. It
+    measures 4e-16.
     """
     from grilly.learning.es import _prompt_centred
 
@@ -552,9 +553,9 @@ def test_the_gradient_path_reproduces_step():
     reason to trust the composable path is that it is the same estimate
     with the multiply moved from inside the sum to outside it.
 
-    That move is the distributive law, not reassociation, so this is
-    CLAUDE.md §9 case (a) composed-chain rather than bit-exact:
-    ``rtol 1e-7``. It measures well inside that.
+    That move is the distributive law, not reassociation, so this is the
+    composed-chain half of case (a) in docs/testing.md rather than
+    bit-exact: ``rtol 1e-7``. It measures well inside that.
     """
     rng = np.random.default_rng(6)
     scores = list(rng.standard_normal(32))

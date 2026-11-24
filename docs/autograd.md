@@ -7,9 +7,9 @@ far does. One refinement while building: `record` and `SavedTensor::save` are
 fallible, because a saved-tensor hook may fail. Checkpoint is written in Python
 on top of the core's hooks, as torch's is.
 
-Autograd belongs in `grilly-core` (CLAUDE.md §4). This document fixes its
-structure before any code: the graph, the engine, grad mode, saved tensors,
-in-place safety, and gradient checkpointing (§6's first hard entry).
+Autograd belongs in `grilly-core`. This document fixes its structure before
+any code: the graph, the engine, grad mode, saved tensors, in-place safety,
+and gradient checkpointing.
 
 ## 1. What must work — measured, not guessed
 
@@ -23,7 +23,7 @@ From `cubbyllm/` and `tests/` at CubbyLLM df3ac55:
 | `torch.no_grad()` | 23 | eval, init, and in-place parameter edits |
 | `torch.is_grad_enabled()` | 2 | gates checkpointing |
 | `.detach()` | 4 | `x.detach().clone().requires_grad_(True)` |
-| `checkpoint(..., use_reentrant=False)` | 2 | both backbones; a test depends on it (§6) |
+| `checkpoint(..., use_reentrant=False)` | 2 | both backbones; a test depends on it |
 | `clip_grad_norm_` | 1 | training loop |
 | in-place ops (`mul_`, `zero_`, `add_`, `normal_`) | 6 | on parameters, under `no_grad` |
 
@@ -205,7 +205,7 @@ omission as `True` (with a warning), and CubbyLLM always passes `False`.
   `begin`/`end`). Its lifetime is a context rather than the tensors, it
   cannot hold two independent graphs, it has no place for saved-tensor
   hooks (so no non-reentrant checkpoint), and it carries its own forward ops,
-  the second dispatch route §5 forbids.
+  a second route to the GPU beside the one dispatch path every op takes.
 - **A global linear tape** (a Wengert list). Simple, but `backward()` on one
   loss would walk unrelated work, freeing the graph when tensors die is
   awkward, and nested recording for checkpoint needs graph structure anyway.
@@ -249,4 +249,4 @@ omission as `True` (with a warning), and CubbyLLM always passes `False`.
    gradients with and without checkpointing).
 
 Expected size: about 700–900 lines of Rust in `grilly-core`, which keeps the
-core inside §4's 3–5K budget (it is 519 lines today).
+core inside the 3–5K-line budget that keeps it thin (it is 519 lines today).

@@ -1,10 +1,10 @@
 """``AutoTokenizer``: Hugging Face's ``tokenizers`` plus the parts of
 ``transformers``' tokenizer that a chat prompt needs.
 
-grilly does not implement a tokenizer (CLAUDE.md §11). This wraps
-``tokenizers.Tokenizer`` — the Rust one, which is what transformers uses
-underneath for a fast tokenizer — and reads ``tokenizer_config.json`` for
-the special tokens and the chat template. Rendering a template needs
+grilly does not implement a tokenizer; it depends on Hugging Face's. This
+wraps ``tokenizers.Tokenizer`` — the Rust one, which is what transformers
+uses underneath for a fast tokenizer — and reads ``tokenizer_config.json``
+for the special tokens and the chat template. Rendering a template needs
 ``jinja2``, as it does in transformers.
 """
 

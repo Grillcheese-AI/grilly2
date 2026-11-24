@@ -1,7 +1,7 @@
 """``grilly.graphed`` (docs/capture.md): record a step's GPU commands once
 and replay them instead of running the Python again.
 
-Tolerance: **bit-exact**. This is case (a) of CLAUDE.md §9 at its strictest
+Tolerance: **bit-exact**. This is case (a) in docs/testing.md at its strictest
 — a replay issues the *same commands over the same buffers* as the capture,
 so not even the order of a summation differs. Anything but `==` here is a
 bug in the recording, not float32.

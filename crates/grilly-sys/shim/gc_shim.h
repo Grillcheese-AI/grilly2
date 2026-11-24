@@ -56,8 +56,8 @@ typedef struct gc_binding {
     uint64_t range;
 } gc_binding;
 
-/* Counters for diagnosing submission (CLAUDE.md §11): how often batches are
-   submitted, how long the host waits for them, and whether pools grow. */
+/* Counters for diagnosing submission (docs/submission.md): how often batches
+   are submitted, how long the host waits for them, and whether pools grow. */
 typedef struct gc_submit_stats {
     uint64_t submits;          /* batches submitted */
     uint64_t dispatches;       /* dispatches recorded, all batches */

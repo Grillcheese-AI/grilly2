@@ -22,7 +22,7 @@ aliases do it for you, with v1's numpy-in, numpy-out signatures.
 **This is not the packed-binary algebra.** ``grilly.vsa.packed`` holds that
 one — bits, XOR, Hamming — and the two are different algebras over
 different dtypes, not two implementations of one thing. Never let a
-capability check for one decide the other (CLAUDE.md §8.3).
+capability check for one decide the other.
 """
 
 from __future__ import annotations
@@ -196,6 +196,6 @@ def from_flat(v, k: _builtins.int) -> Tensor:
 # Four of them, and they are not four implementations of one thing: block
 # codes (here), bipolar ±1, packed bits, and holographic. They take
 # different dtypes and mean different things by "bind" and by "unrelated".
-# v1 let a capability check for one gate the other (CLAUDE.md §8.3).
+# v1 let a capability check for one gate the other.
 
 from . import bipolar, hashing, holographic, packed, resonator  # noqa: E402,F401

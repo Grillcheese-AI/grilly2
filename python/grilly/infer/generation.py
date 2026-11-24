@@ -1,5 +1,4 @@
-"""A decode loop with Hugging Face's ``generate()`` signature (CLAUDE.md
-§11, step 4)::
+"""A decode loop with Hugging Face's ``generate()`` signature::
 
     ids = model.generate(input_ids, max_new_tokens=50, do_sample=True,
                          temperature=0.7, top_k=20, top_p=0.8)

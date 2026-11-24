@@ -1,8 +1,8 @@
 """Deprecated: v1's ``grilly.experimental.cognitive``.
 
 A working memory, a world model, a simulator, an "understander" — model
-code, and grilly2 does not carry model code (CLAUDE.md §1). Build them as
-``grilly.nn`` modules in the repo that uses them.
+code, and grilly2 does not carry model code, any more than torch does.
+Build them as ``grilly.nn`` modules in the repo that uses them.
 
 The two helpers here that other repos actually import are
 ``cosine_similarity`` and ``batch_cosine_similarity``, and those are

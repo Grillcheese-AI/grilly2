@@ -17,7 +17,7 @@
 
 - **CubbyLLM calls none of these directly.** Its only grilly seam is `cubbyllm/ops/vsa.py` → block codes, now `grilly.vsa` in grilly2. Nothing below changes a CubbyLLM result.
 - **grilly v1's own users are exposed.** 26 broken or partial shaders are named in v1 production code. The ones I confirmed are actually dispatched: `flash-attention2` (v1's attention: `backend/attention.py`, `cpp/src/ops/attention.cpp`, the C++ autograd), `lora-forward/backward`, `loss-cross-entropy` (with label smoothing), `fused-mlp-gelu` / `fused-layernorm-linear`, and `moe-layer-grad-weight`.
-- **grilly2 already has most of the worth-keeping domain logic** at the API level (`grilly.vsa`, `grilly.snn`, `grilly.learning`, `grilly.cvl`). Its agent had already caught v1's STDP bug on the way. What's genuinely missing is short (see *Worth porting*).
+- **grilly2 already has most of the worth-keeping domain logic** at the API level (`grilly.vsa`, `grilly.snn`, `grilly.learning`, `grilly.cvl`). The port had already caught v1's STDP bug on the way. What's genuinely missing is short (see *Worth porting*).
 - **`experimental/` has no SPIR-V**, but `backend/experimental/vsa.py` dispatches `vsa-argmax-rows` from it, so that v1 path can't run as shipped.
 
 ## Verified high-severity bugs

@@ -15,7 +15,7 @@ Tolerances:
   (16 * ceil(ceil(k / 16) / 64) + 8) * 2^-24 * (scale * sum|x * q| + |bias|).
 - A quantized model against torch running torchao's weight-only math on the
   same int8 weights: rtol 1e-5, atol 1e-6, as for single forward passes in
-  test_nn.py. That is case (b) in CLAUDE.md §9: torch's embedding,
+  test_nn.py. That is case (b) in docs/testing.md: torch's embedding,
   layer_norm, GELU and matmuls are other implementations.
 - Gradients against torch: rtol 1e-5, atol 1e-6, for the same reason.
 """

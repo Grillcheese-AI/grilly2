@@ -1,4 +1,4 @@
-"""grilly's inference machinery (CLAUDE.md §11).
+"""grilly's inference machinery.
 
 - ``grilly.infer.safetensors`` loads checkpoints;
 - ``grilly.infer.quantization`` quantizes linear weights to int8;

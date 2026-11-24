@@ -1,8 +1,8 @@
 # grilly2
 
 The torch API on Vulkan, for the GPUs torch will not train on — consumer AMD and
-Intel cards, and Windows. Early work; see `CLAUDE.md` for the plan and
-`docs/boundary.md` for how the core talks to the GPU.
+Intel cards, and Windows. Early work; `docs/boundary.md` covers how the core
+talks to the GPU, and `docs/testing.md` how every op is checked.
 
 ## Installing
 

@@ -37,7 +37,7 @@ class ResonatorNetwork:
         self.max_iterations = max_iterations
         self.convergence_threshold = convergence_threshold
         # v1 took a backend object to route similarity through; grilly2 has
-        # one path to the GPU, so there is nothing to choose (CLAUDE.md §5)
+        # one dispatch path to the GPU, so there is nothing to choose
         self.vsa_backend = vsa_backend
         self._net = _resonator.ResonatorNetwork(
             {k: grilly.from_numpy(np.ascontiguousarray(v, dtype=np.float32))

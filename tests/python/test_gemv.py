@@ -1,7 +1,7 @@
 """``g2-gemv`` — `linear` for one or two rows, which is decode's shape.
 
 Reference: **float64**, under a bound derived from the op, with the worst
-ratio printed (CLAUDE.md §9's preferred form). A length-K dot product in
+ratio printed (the form docs/testing.md prefers). A length-K dot product in
 float32 has error at most ``K * eps * (|x| @ |W|)``, so that is the bound;
 a ratio to it is what says whether the kernel regressed, where a
 hand-picked epsilon would not.

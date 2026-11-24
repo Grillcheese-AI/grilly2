@@ -4,7 +4,8 @@ Every method keeps v1's signature — numpy in, numpy out, ``(..., k, l)``
 float32 — and runs on the GPU underneath, which v1's version did not: its
 ``BlockCodeOps`` was numpy through and through, and the Vulkan tier its
 callers detected was a separate, one-hot-only bridge that the algebra never
-actually went through (CLAUDE.md §8.3).
+actually went through: a capability check for one algebra was gating
+another.
 
 So a caller that does nothing but keep importing this gets the GPU. A
 caller that moves to ``grilly.vsa`` also stops paying for a numpy round

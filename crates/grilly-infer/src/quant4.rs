@@ -1,6 +1,5 @@
-//! int4 weight-only quantization (CLAUDE.md §11, step 2's "int4 if it can be
-//! done well"), with the numerics of torchao's `Int4WeightOnlyConfig` at its
-//! default group size of 128:
+//! int4 weight-only quantization (docs/inference.md), with the numerics of
+//! torchao's `Int4WeightOnlyConfig` at its default group size of 128:
 //!
 //! - `scale = (max - min) / 15` over each group of `group_size` values along
 //!   the row, at least float32 eps;

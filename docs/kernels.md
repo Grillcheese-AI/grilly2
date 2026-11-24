@@ -134,9 +134,9 @@ not match torch bit for bit, and one built only from + - * will.**
 
 Two consequences:
 
-- a grilly-against-torch test (CLAUDE.md §9 case (b)) over anything with a
-  divide in it cannot assert `0`, and the reason is this table rather than
-  "float32";
+- a grilly-against-torch test (case (b) in [testing.md](testing.md)) over
+  anything with a divide in it cannot assert `0`, and the reason is this
+  table rather than "float32";
 - a grilly-against-grilly test (case (a)) is unaffected — the same kernel
   on the same hardware gives the same answer every time, whatever that
   answer's last bit is. Capture and replay stay bit-exact.
