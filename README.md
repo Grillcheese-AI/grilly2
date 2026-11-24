@@ -30,6 +30,17 @@ It prints which interpreter, which install and which device, then runs a real
 kernel. Paste all of it into a bug report. It never raises — a diagnostic that
 crashes on a broken install has diagnosed nothing.
 
+### On Google Colab
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Grillcheese-AI/grilly2/blob/main/notebooks/colab.ipynb)
+
+`notebooks/colab.ipynb` runs grilly2 on a Colab NVIDIA GPU. Colab mounts the
+NVIDIA driver but does not register it with Vulkan, so `grilly-doctor` reports
+no device until two small JSON files are written; the notebook's first step
+writes them and says why. It goes on to install the LunarG SDK, compare a
+forward and backward pass against torch on CUDA, generate text with an int8
+model, and optionally build from source and run the test suites on the GPU.
+
 ## Building from source
 
 Only needed to work on grilly2 itself.

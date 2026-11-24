@@ -59,4 +59,5 @@ CI has no GPU. It runs both suites on Mesa's lavapipe, a software Vulkan
 driver. A few tests assert a precision that real GPUs have and Vulkan does
 not promise, so lavapipe skips those by name. Each skip comes with its
 reason in `.github/workflows/ci.yml`, and the same tests stay strict on
-hardware.
+hardware. `notebooks/colab.ipynb` runs the full suite on a Colab NVIDIA
+GPU, with nothing skipped.
