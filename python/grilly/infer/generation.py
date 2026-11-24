@@ -35,6 +35,18 @@ runs an equal-length batch the same way. Under sampling, dropping rows
 changes which random numbers each row draws, so it samples differently
 from the same seed without it; greedy decoding is unaffected.
 
+**A vocabulary shortlist** (grilly's own): a model with ``hidden()`` - its
+forward without the head - can carry a
+:class:`~grilly.infer.shortlist.ShortlistHead` built over its head's weight
+as ``model.shortlist``. Greedy decoding of one row with no repetition
+penalty and no processors then picks each token with it, scoring only the
+rows its route keeps, where the full head scores every row; the token is
+the full head's whenever that row is in the route's union. Anything else -
+sampling, a penalty, a processor, a batch, padding - runs the full head as
+before, and so does ``use_shortlist=False``. Rebuild the shortlist after
+changing the head's weight: it keeps the rows' sign bits from when it was
+built.
+
 The prompt runs once, then one token per step against a GPU KV cache.
 Sampling happens on the device (``grilly.infer.sampling``). Each step reads
 back only the sampled token ids, for stopping at EOS and for the streamer.
@@ -84,6 +96,10 @@ class GenerationConfig:
     #: grilly's own: drop finished rows from an equal-length batch too (a
     #: left-padded batch always drops them). Not a transformers field.
     compact_finished: bool = False
+    #: grilly's own: let ``model.shortlist`` pick greedy tokens when it can
+    #: (see the module docstring); False runs the full head. Not a
+    #: transformers field.
+    use_shortlist: bool = True
 
 
 _FIELDS = {f.name for f in fields(GenerationConfig)}
@@ -94,11 +110,19 @@ class GenerationMixin:
     ``forward(input_ids, past_key_values=None, logits_to_keep=0)`` and which
     has ``make_cache(batch_size, max_length)``. A model with
     ``supports_padding = True`` also takes ``make_cache(..., keep=mask)``,
-    returning a cache with ``select_rows``, and runs left-padded batches."""
+    returning a cache with ``select_rows``, and runs left-padded batches. A
+    model with ``hidden(input_ids, past_key_values=None, logits_to_keep=0)``
+    - the state its head reads, (batch, T, hidden) - can decode with a
+    ``shortlist``."""
 
     supports_padding = False
 
     generation_config: GenerationConfig | None = None
+
+    #: A :class:`~grilly.infer.shortlist.ShortlistHead` over the head's
+    #: weight, for greedy decoding to pick tokens with (the module
+    #: docstring says when); None runs the full head.
+    shortlist = None
 
     def generate(self, inputs=None, generation_config: GenerationConfig | None = None, logits_processor=None,
                  prefix_allowed_tokens_fn=None, streamer=None, **kwargs) -> Tensor:
@@ -143,6 +167,13 @@ class GenerationMixin:
             if streamer is not None:
                 streamer.end()
             return ids
+        head = self._shortlist_for(config, batch, padded, processors)
+        if head is not None:
+            with no_grad():
+                self._generate_with_shortlist(head, ids, rows[0], total, steps, eos, streamer)
+            if streamer is not None:
+                streamer.end()
+            return tensor(rows)
 
         with no_grad():
             if padded:
@@ -204,6 +235,36 @@ class GenerationMixin:
         if streamer is not None:
             streamer.end()
         return tensor(rows)
+
+    def _shortlist_for(self, config: GenerationConfig, batch: int, padded: bool, processors):
+        """``self.shortlist`` when this decode may use it: greedy, one row,
+        no padding, no repetition penalty and no processors. Otherwise
+        None, and the full head runs."""
+        head = self.shortlist
+        if head is None or not config.use_shortlist:
+            return None
+        if (config.do_sample or batch != 1 or padded or processors
+                or config.repetition_penalty not in (None, 1.0)):
+            return None
+        if not callable(getattr(self, "hidden", None)):
+            raise TypeError(f"{type(self).__name__} has a shortlist but no hidden() to give it the state")
+        return head
+
+    def _generate_with_shortlist(self, head, ids: Tensor, row: list, total: int, steps: int, eos: set,
+                                 streamer) -> None:
+        """Greedy decoding of one row with ``head`` picking each token from
+        the state the full head would read; the tokens go onto ``row``.
+        The route's successors are those of the token just fed in."""
+        cache = self.make_cache(1, total)
+        x = self.hidden(ids, past_key_values=cache, logits_to_keep=1)
+        for step in range(steps):
+            tok = head.argmax(x, prev=row[-1])
+            row.append(tok)
+            if streamer is not None:
+                streamer.put(tensor([tok]))
+            if tok in eos or step == steps - 1:
+                break
+            x = self.hidden(tensor([[tok]]), past_key_values=cache, logits_to_keep=1)
 
     def _select_rows(self, cache, index, undo: list) -> None:
         """Keep only batch rows ``index`` (int64) of everything that holds a
