@@ -34,12 +34,16 @@ crashes on a broken install has diagnosed nothing.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Grillcheese-AI/grilly2/blob/main/notebooks/colab.ipynb)
 
-`notebooks/colab.ipynb` runs grilly2 on a Colab NVIDIA GPU. Colab mounts the
-NVIDIA driver but does not register it with Vulkan, so `grilly-doctor` reports
-no device until two small JSON files are written; the notebook's first step
-writes them and says why. It goes on to install the LunarG SDK, compare a
-forward and backward pass against torch on CUDA, generate text with an int8
-model, and optionally build from source and run the test suites on the GPU.
+Open the notebook with the badge, pick a T4 GPU runtime, and run all. It sets up
+Vulkan on Colab's NVIDIA driver (which Colab mounts but does not register),
+checks grilly against torch on CUDA, and generates text with an int8 model. To
+try an unreleased branch, set `BUILD_FROM_SOURCE = True` and `GRILLY_REF` in its
+first cell; the build took 1.2 minutes on a T4 runtime.
+
+**On NVIDIA, 0.1.0 cannot run attention**: its flash-attention kernels need more
+shared memory than NVIDIA's driver allows. The source is fixed, so build from
+source until a newer release. `docs/colab.md` covers the settings, timings,
+what is known not to work on NVIDIA yet, and how to debug a failure.
 
 ## Building from source
 
@@ -83,7 +87,8 @@ torch on CPU, so they also need torch installed for `GRILLY_PYTHON`.
 CI (`.github/workflows/ci.yml`) has no GPU, so it builds both wheels and runs
 both suites on lavapipe, a software Vulkan driver. That checks the numbers,
 not the speed: timing, memory placement and the fence timeout still need real
-hardware. Releases (`release.yml`) build a Windows and a Linux
+hardware. The Colab notebook runs both suites on an NVIDIA GPU, with nothing
+skipped (`docs/colab.md`). Releases (`release.yml`) build a Windows and a Linux
 (`manylinux_2_34`) abi3 wheel and an sdist, and publish to PyPI on a `v*` tag.
 
 ## Python
