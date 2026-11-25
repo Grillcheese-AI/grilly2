@@ -1,8 +1,8 @@
 """Packed binary hypervectors: ``dim`` bits held 32 to an int32 word.
 
 The other VSA algebra, and **not** a variant of the block codes in
-``grilly.vsa`` (CLAUDE.md §8.3). Here a hypervector is a bit string, 32x
-smaller than one float per dimension:
+``grilly.vsa``. Here a hypervector is a bit string, 32x smaller than one
+float per dimension:
 
     from grilly.vsa import packed
 

@@ -3,7 +3,7 @@
 //! positions, with grouped-query attention.
 //!
 //! Tolerance: |got - ref| <= 1e-5 * |ref| + 1e-6 * max|v|. That is case (b)
-//! in CLAUDE.md §9, a float32 kernel against float64. Each score is a
+//! in docs/testing.md, a float32 kernel against float64. Each score is a
 //! float32 dot product of head_dim terms, the softmax uses a compensated
 //! sum, and the output is a compensated weighted sum, so the error is a
 //! few ulp of the terms involved. The worst ratio to the bound is printed.

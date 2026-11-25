@@ -28,7 +28,7 @@ fn launch_blocking() -> bool {
 }
 
 /// Submission counters (`Device::submit_stats`), for diagnosing throughput
-/// and pool growth: see CLAUDE.md §11 on the fence timeout.
+/// and pool growth: see docs/submission.md on the fence timeout.
 pub use sys::gc_submit_stats as SubmitStats;
 
 /// Memory class of a GPU buffer.

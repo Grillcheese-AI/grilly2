@@ -12,8 +12,8 @@
 //!
 //! **Tolerance.** The fused step is the same arithmetic in the same order
 //! as the composed one, so `grilly.snn`'s test asserts them bit-exact
-//! against each other (CLAUDE.md §9(a)): there is no reassociation here to
-//! excuse a difference.
+//! against each other (case (a) in docs/testing.md): there is no
+//! reassociation here to excuse a difference.
 //!
 //! `tau` is a push constant, so a **learnable** `tau` gets no gradient
 //! from this path. `ParametricLIFNode` keeps the composed ops for that

@@ -17,7 +17,7 @@ registered submodules, exposing the old names as properties so the shared
 forward still resolves them. The checkpoint therefore loads with LFM2's own
 parameter names and no remapping, which is the property
 ``grilly.infer.models`` keeps so a model runs without the Hugging Face
-adapter installed (CLAUDE.md §11).
+adapter installed.
 
 **The short conv, and why it is a decode step's friend.** Per block::
 
@@ -30,7 +30,7 @@ positions, so the state is a ``(batch, hidden, 3)`` buffer that shifts by
 one and takes the new column — **fixed size, written in place**, which is
 what ``docs/capture.md`` asks of anything inside a recorded step. There is
 no ``nn.Conv1d`` here and none is needed: a depthwise kernel of length L is
-L shifted multiplies and L-1 adds, on the one dispatch path (§5).
+L shifted multiplies and L-1 adds, on the one dispatch path.
 
 The computation follows ``transformers.models.lfm2.modeling_lfm2`` op for
 op, including the chunk order ``(B, C, x)`` and the decode form

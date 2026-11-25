@@ -66,7 +66,7 @@ def test_the_rest_are_within_the_measured_bound(name, bound):
 
 
 def test_a_divide_is_reproducible_even_though_it_is_not_exact():
-    """Case (a) of CLAUDE.md §9 is untouched by any of this: the same
+    """Case (a) in docs/testing.md is untouched by any of this: the same
     kernel on the same hardware gives the same answer every time, which is
     what capture and replay rest on."""
     rng = np.random.default_rng(2)

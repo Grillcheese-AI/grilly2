@@ -8,8 +8,9 @@ and BF16 and F16 widen to float32 exactly. So every value is compared bit for
 bit with torch's ``.float()`` of the reference tensor; every one of the 65,536
 bf16 and f16 bit patterns is checked. The one approximate comparison is a
 model's forward pass on loaded weights against torch's: rtol 1e-5, atol 1e-6,
-as for single forward passes in test_nn.py. That is case (b) in CLAUDE.md §9:
-torch implements embedding, layer_norm, GELU and two matmuls differently.
+as for single forward passes in test_nn.py. That is case (b) in
+docs/testing.md: torch implements embedding, layer_norm, GELU and two matmuls
+differently.
 """
 
 import os

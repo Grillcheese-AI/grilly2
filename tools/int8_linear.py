@@ -1,4 +1,4 @@
-"""int8 and int4 weight-only linears against float32 (CLAUDE.md §11, step 2).
+"""int8 and int4 weight-only linears against float32 (docs/inference.md).
 
 Two measurements, each separate:
 
@@ -9,7 +9,7 @@ Two measurements, each separate:
 2. Output error on Qwen2.5-0.5B's real weights, when it is in the local
    Hugging Face cache: ||int8 linear - float32 linear|| / ||float32 linear||
    for every linear weight, on random normal inputs. Real activations need
-   the decode loop (step 4).
+   the decode loop.
 
     python tools/int8_linear.py
 """

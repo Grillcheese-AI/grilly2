@@ -5,7 +5,8 @@ them were a second, private spelling of something the torch API already
 names — ``linear``, ``gelu``, ``softmax``, ``layernorm``, ``rope``,
 ``conv2d`` — and those are **not** reimplemented here. They raise, pointing
 at the torch name, because providing them again would rebuild the parallel
-framework the rewrite exists to remove (CLAUDE.md §1, §5).
+framework the rewrite exists to remove, and put a second route to the GPU
+beside the one dispatch path.
 
 What is here is the part that was never a torch op: the VSA algebras —
 sparse block codes, packed bits, bipolar ±1. They keep v1's exact
@@ -54,8 +55,9 @@ def is_available() -> bool:
 #
 # v1's bridge took vectors FLAT, (batch, num_blocks * block_size), with the
 # block shape passed alongside; grilly.vsa takes them as (..., k, l). The
-# reshape is the whole difference, and it is the trap in CLAUDE.md §8.2:
-# these are batches of ONE-HOT vectors, not dense ones.
+# reshape is the whole difference, and the trap is in what they hold: these
+# are batches of ONE-HOT vectors, not dense ones, and dense input produces
+# garbage that looks exactly like a semantics bug.
 
 
 def _blocks_in(x, num_blocks: int, block_size: int):
@@ -165,7 +167,7 @@ def hamming_topk(query, cache, dim, k=10):
 # functions do not take (`_core.vsa_bind(dev, a, b)` against a two-argument
 # binding), and `_core.vsa_unbind` does not exist at all. Every call raised
 # inside the try, was swallowed, and came back None — v1's "declined, fall
-# through" signal, permanently on (CLAUDE.md §8.4).
+# through" signal, permanently on.
 #
 # So these now work where they never did, which cannot break a caller: one
 # that handled None still handles a value.
@@ -371,8 +373,8 @@ _STDP = (
 # int8 weight bytes and only changes the arithmetic, which is not the
 # bottleneck, so W8A8 cannot make a decode matmul faster here.
 #
-# Adding it anyway would put a second route to the GPU beside a path that
-# is already near the hardware limit (CLAUDE.md 5).
+# Adding it anyway would put a second route to the GPU beside the one
+# dispatch path, which is already near the hardware limit.
 
 _MOQE = (
     "grilly.infer.quantization.Int8WeightOnlyConfig, through grilly.nn.Linear. v1's "

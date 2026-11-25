@@ -17,11 +17,11 @@ consumer AMD card under Windows.
 
 ## What it is, and what it is not
 
-CLAUDE.md §11 draws the line: **the machinery** — models, safetensors
+The line runs between two things. **The machinery** — models, safetensors
 loading, quantization, the KV cache, samplers, `generate` — is
 `grilly.infer`, and **the adapter** is this package: `config.json` parsing,
-file resolution, `from_pretrained`, a tokenizer wrapper. The adapter must
-be deletable.
+file resolution, `from_pretrained`, a tokenizer wrapper. The machinery must
+not depend on the adapter, and the adapter must be deletable.
 
 `tests/python/test_huggingface.py::test_the_machinery_works_without_the_adapter`
 is that line as a test. It starts a fresh interpreter, builds a model from
@@ -84,7 +84,7 @@ Per conv block:
 
 There is no `nn.Conv1d` in grilly and none is needed: a depthwise kernel of
 length L is L shifted multiplies and L-1 adds, which stays on the one
-dispatch path (CLAUDE.md §5). At one token it collapses to a weighted sum
+dispatch path. At one token it collapses to a weighted sum
 over a three-column state that shifts in place — fixed size, written in
 place, so a decode loop over it is recordable (`docs/capture.md`).
 

@@ -1,4 +1,4 @@
-//! int8 weight-only quantization (CLAUDE.md §11, step 2), with the numerics
+//! int8 weight-only quantization (docs/inference.md), with the numerics
 //! of torchao's `Int8WeightOnlyConfig` at its default per-row granularity:
 //!
 //! - `scale = max|w| / 127.5` per output row, at least float32 eps;

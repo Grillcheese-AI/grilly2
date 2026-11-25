@@ -7,8 +7,8 @@
 //! change with the length, nothing downstream would have noticed.
 //!
 //! Tolerance: **bit-exact**. A replay issues the same commands over the same
-//! buffers as the capture, and the reference here is the same ops run
-//! eagerly on a second cache, in the same order (CLAUDE.md §9(a)). `==`.
+//! buffers as the capture, and the reference here is the same ops run eagerly
+//! on a second cache, in the same order (case (a) in docs/testing.md). `==`.
 //!
 //! Its own binary, and its tests serialised, because capture is a property
 //! of the device, which is one process-wide singleton: anything running in

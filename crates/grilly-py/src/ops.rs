@@ -579,7 +579,7 @@ fn flash_tiles(py: Python<'_>, mask: &PyTensor) -> PyResult<Vec<PyTensor>> {
         .map_err(err)
 }
 
-/// Submission counters of the default device (CLAUDE.md §11), as a dict.
+/// Submission counters of the default device (docs/submission.md), as a dict.
 #[pyfunction]
 fn submit_stats(py: Python<'_>) -> PyResult<Bound<'_, pyo3::types::PyDict>> {
     let s = grilly_core::Device::default_device()

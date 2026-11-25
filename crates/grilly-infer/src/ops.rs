@@ -1,7 +1,7 @@
 //! Fused kernels for a decoder's step, each matching the ops it replaces
-//! bit for bit (CLAUDE.md §9 case (a)): the rotary embedding and SwiGLU.
-//! They read projections in their own `(batch, T, row)` layout, so no
-//! transpose or slice copy is made to feed them.
+//! bit for bit (case (a) in docs/testing.md): the rotary embedding and
+//! SwiGLU. They read projections in their own `(batch, T, row)` layout, so
+//! no transpose or slice copy is made to feed them.
 
 use grilly_core::{require_float, Arg, Error, Kernel, Result, Tensor};
 

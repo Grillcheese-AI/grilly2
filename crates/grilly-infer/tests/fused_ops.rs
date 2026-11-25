@@ -1,7 +1,7 @@
 //! The decoder step's fused kernels, from Rust.
 //!
 //! Tolerance: bit-exact where the kernel does the same arithmetic as the ops
-//! it replaces (CLAUDE.md §9 case (a)).
+//! it replaces (case (a) in docs/testing.md).
 //! - rotary: `x * cos + rotate_half(x) * sin` is two multiplies and an add,
 //!   in that order, `precise` in the shader, so it equals the same float32
 //!   arithmetic on the host exactly;

@@ -1,4 +1,4 @@
-//! Inference machinery for grilly2 (CLAUDE.md §11): weight loading, int8
+//! Inference machinery for grilly2 (docs/inference.md): weight loading, int8
 //! and int4 weight-only quantization, GPU sampling, a GPU-resident KV cache
 //! and the decode loop. It depends on `grilly-core` alone, so it is usable
 //! without any model-zoo adapter.

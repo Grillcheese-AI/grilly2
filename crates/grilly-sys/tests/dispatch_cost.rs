@@ -1,6 +1,6 @@
-//! Where the GPU time of a dispatch goes inside one batch (CLAUDE.md §11:
-//! a decode loop is many tiny dispatches). Drives the shim directly so each
-//! factor can be varied alone:
+//! Where the GPU time of a dispatch goes inside one batch (a decode loop is
+//! many tiny dispatches; see docs/submission.md). Drives the shim directly
+//! so each factor can be varied alone:
 //!
 //!   barrier   gc_barrier before every dispatch (what grilly_core records),
 //!             or none (valid here only because the dispatches are

@@ -8,14 +8,14 @@ There are two kinds of v1 name, and they are treated differently on
 purpose:
 
 - **ported** — a domain library that grilly2 kept and rewrote on its own
-  kernels: the VSA algebras, and the rest of §4's list as each lands. The
-  alias keeps v1's signature exactly, numpy in and numpy out where v1 took
-  numpy, and warns once;
+  kernels: the VSA algebras, and the other domain modules, such as SNN, as
+  each lands. The alias keeps v1's signature exactly, numpy in and numpy
+  out where v1 took numpy, and warns once;
 - **replaced** — v1's parallel framework: its own autograd, its own nn
   layers and optimizers, `VulkanTensor`, `torch_api`, and the raw bridge
   ops underneath them. grilly2 does not reimplement these, because the
-  torch API is the replacement and that is the entire point of the rewrite
-  (CLAUDE.md §1). These **raise**, naming what to use instead.
+  torch API is the replacement and that is the entire point of the
+  rewrite. These **raise**, naming what to use instead.
 
 A replaced name raises `NotImplementedError`, not `AttributeError`,
 deliberately: `AttributeError` is what `hasattr` swallows, and a capability
@@ -46,7 +46,7 @@ def replaced(old: str, instead: str):
     """Raise for a v1 name grilly2 deliberately does not provide."""
     raise NotImplementedError(
         f"{old} is grilly v1's parallel framework, which grilly2 replaced with the torch API "
-        f"rather than reimplementing (CLAUDE.md §1). Use {instead}. This raises rather than "
+        f"rather than reimplementing. Use {instead}. This raises rather than "
         f"returning None or missing quietly, so a capability check cannot mistake it for absence."
     )
 

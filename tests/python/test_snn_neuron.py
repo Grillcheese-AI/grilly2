@@ -299,9 +299,9 @@ class _Composed(LIFNode):
 ])
 def test_the_fused_step_is_bit_exact_against_the_composed_one(
         tau, decay_input, v_reset, detach_reset, surrogate_fn):
-    """CLAUDE.md §9(a) at its strictest: the kernel is the same arithmetic
-    in the same order as the expression it replaces, so there is no
-    reassociation to excuse a difference. `==`, not allclose."""
+    """Case (a) in docs/testing.md at its strictest: the kernel is the same
+    arithmetic in the same order as the expression it replaces, so there is
+    no reassociation to excuse a difference. `==`, not allclose."""
     kwargs = dict(tau=tau, decay_input=decay_input, v_reset=v_reset, detach_reset=detach_reset)
     if surrogate_fn is not None:
         kwargs["surrogate_function"] = surrogate_fn

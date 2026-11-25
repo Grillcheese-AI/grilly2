@@ -1,7 +1,7 @@
 """The decoder step's fused kernels, against the ops they replace.
 
-Tolerance (CLAUDE.md §9 case (a): grilly against grilly, same kernels, and
-for these three the same arithmetic in the same order):
+Tolerance (case (a) in docs/testing.md: grilly against grilly, same
+kernels, and for these three the same arithmetic in the same order):
 - ``_C.swiglu`` vs ``F.silu(gate) * up``: **bit-exact**. The kernel calls
   the same sigmoid and multiply functions, in that order.
 - ``_C.rope`` vs ``x * cos + rotate_half(x) * sin``: **bit-exact**. Two
@@ -23,8 +23,8 @@ conditioning (measured: 8e-8 at the first norm becomes 1e-4 at the logits
 of a random 3-layer model), so any such number would be a property of the
 weights, not of the kernels. Both paths are compared against a float64
 reference of the same model instead, and the fused path must be no worse
-than the composed one — a ratio, as §9 asks for. Greedy token ids must be
-identical, which is the property a user sees.
+than the composed one — a ratio, as docs/testing.md asks for. Greedy token
+ids must be identical, which is the property a user sees.
 """
 
 import numpy as np

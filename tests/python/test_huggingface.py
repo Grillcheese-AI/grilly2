@@ -6,9 +6,9 @@ is installed, its own parsers are the reference: the config grilly builds
 must agree field for field with ``transformers.AutoConfig``, and the chat
 template must render the same string as transformers' tokenizer.
 
-The last test is the one CLAUDE.md §11 asks for: a checkpoint loads and
-generates with ``grilly.huggingface`` never imported. The adapter must be
-deletable.
+The last test guards the boundary: a checkpoint loads and generates with
+``grilly.huggingface`` never imported. The machinery must not depend on
+the adapter, and the adapter must be deletable.
 """
 
 import json
@@ -251,9 +251,10 @@ def test_chat_template_renders_as_transformers_does(tmp_path):
 
 
 def test_the_machinery_works_without_the_adapter(tmp_path):
-    """CLAUDE.md §11: someone can load a safetensors file and generate tokens
-    with grilly.huggingface uninstalled. Run in a fresh interpreter, which
-    asserts the module was never imported."""
+    """Someone can load a safetensors file and generate tokens with
+    grilly.huggingface uninstalled: the machinery must not depend on the
+    adapter. Run in a fresh interpreter, which asserts the module was never
+    imported."""
     path = write_model(tmp_path / "m")
     script = f"""
 import sys

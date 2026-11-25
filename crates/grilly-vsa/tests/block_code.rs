@@ -6,11 +6,11 @@
 //!   term, 1.0, so the result is an exact one-hot whatever order the zeros
 //!   are added in. This is what v1's `blockcode_bind` produced by finding
 //!   the hot positions, so the port is `==` against that rule, not near it.
-//!   CLAUDE.md §8.2: the inputs are (n, k, l) batches of ONE-HOT vectors,
-//!   and dense random ones are a different test, below.
+//!   The inputs are (n, k, l) batches of ONE-HOT vectors, and dense random
+//!   ones are a different test, below.
 //! - **continuous codes: a float64 reference.** `|got - ref| <=
 //!   4 * l * eps * max|a| * max|b|`, l products summed in float32, and the worst
-//!   measured ratio to that bound is printed. Case (b) of CLAUDE.md §9.
+//!   measured ratio to that bound is printed. Case (b) in docs/testing.md.
 
 use grilly_core::{Device, Tensor};
 use grilly_vsa::{bind, unbind};

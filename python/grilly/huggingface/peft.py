@@ -2,7 +2,7 @@
 
 An adapter over the adapter — this reads peft's file layout and hands the
 factors to :mod:`grilly.infer.lora`, which is where the arithmetic lives
-and works with this package uninstalled (CLAUDE.md §11).
+and works with this package uninstalled.
 
 peft names a wrapped weight ``base_model.model.<path>.lora_A.weight``. The
 prefix is peft's own wrapper chain and carries no information, so it is

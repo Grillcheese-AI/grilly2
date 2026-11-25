@@ -1,7 +1,7 @@
 [package]
 name = "grilly-snn"
 version = "0.1.0"
-description = "Spiking neural networks on the GPU: the integrate-and-fire timestep, fused (CLAUDE.md §4)"
+description = "Spiking neural networks on the GPU: the integrate-and-fire timestep, fused"
 edition.workspace = true
 license.workspace = true
 

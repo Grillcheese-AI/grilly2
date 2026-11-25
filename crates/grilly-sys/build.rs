@@ -79,6 +79,18 @@ fn main() {
     };
     let lib = sdk_dir(&sdk, &["Lib", "lib", "lib64"], shaderc);
     println!("cargo:rustc-link-search=native={}", lib.display());
+    // SDK 1.4.363 moved the loader out of lib/ into lib/VulkanLoader/lib/.
+    // Without that directory the link falls back to the system's
+    // libvulkan.so, which only a -dev package installs (Colab has none).
+    let loader_dir = lib.join("VulkanLoader").join("lib");
+    let loader_file = if windows {
+        "vulkan-1.lib"
+    } else {
+        "libvulkan.so"
+    };
+    if loader_dir.join(loader_file).exists() {
+        println!("cargo:rustc-link-search=native={}", loader_dir.display());
+    }
     println!("cargo:rustc-link-lib=dylib={loader}");
     println!("cargo:rustc-link-lib=static=shaderc_combined");
 }

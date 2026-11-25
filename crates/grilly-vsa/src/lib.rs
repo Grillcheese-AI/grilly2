@@ -1,7 +1,7 @@
 //! Vector-symbolic architectures on the GPU.
 //!
 //! Two algebras live here, and they are **not** two implementations of one
-//! thing (CLAUDE.md §8.3):
+//! thing:
 //!
 //! - [`block_code`] — IBM NVSA sparse block codes. Float32, `(..., k, l)`:
 //!   k blocks of l, each block one-hot (discrete) or a distribution over

@@ -2,9 +2,9 @@
 
 v1 reached the GPU through this: ``_bridge`` for the raw ops, and a
 ``Vulkan*`` class per domain above it. grilly2 has one dispatch path and
-the torch API on top of it (CLAUDE.md §5), so the classes are gone and
-``_bridge`` is kept only for the parts that were never torch ops — the VSA
-algebras. See docs/v1-migration.md.
+the torch API on top of it, so the classes are gone and ``_bridge`` is
+kept only for the parts that were never torch ops — the VSA algebras. See
+docs/v1-migration.md.
 """
 
 from __future__ import annotations
@@ -23,11 +23,11 @@ _REPLACED = {
     "VulkanTensorOps": "grilly's tensor methods",
     "VulkanMemory": "grilly's allocator — there is nothing to drive by hand",
     "VulkanFNN": "grilly.nn.Linear and grilly.nn.Sequential",
-    "VulkanSNN": "not ported yet (CLAUDE.md §4: grilly-snn)",
-    "SNNCompute": "not ported yet (CLAUDE.md §4: grilly-snn)",
+    "VulkanSNN": "not ported yet (grilly-snn)",
+    "SNNCompute": "not ported yet (grilly-snn)",
     "VulkanVSA": "grilly.vsa.packed — the bipolar/packed algebra",
-    "CapsuleMemory": "not ported yet (CLAUDE.md §4)",
-    "CapsuleTransformerConfig": "not ported yet (CLAUDE.md §4)",
+    "CapsuleMemory": "not ported yet",
+    "CapsuleTransformerConfig": "not ported yet",
     "amp": "grilly does not have autocast yet; float32 only",
     "jit": "grilly.compile",
     "buffer_pool": "grilly's allocator — there is nothing to drive by hand",

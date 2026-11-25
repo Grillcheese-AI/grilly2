@@ -3,9 +3,9 @@
 Tolerance: **bit-exact**. Quantizing a weight after loading it and
 quantizing it while loading it run the same kernel on the same float32
 values, so every int8 value and every scale must match bit for bit
-(CLAUDE.md §9 case (a)). The point of the exercise is memory, not numbers,
-so the peak is asserted too, from the shim's own high-water mark of
-persistent bytes rather than from a claim in a comment.
+(case (a) in docs/testing.md). The point of the exercise is memory, not
+numbers, so the peak is asserted too, from the shim's own high-water mark
+of persistent bytes rather than from a claim in a comment.
 """
 
 import numpy as np

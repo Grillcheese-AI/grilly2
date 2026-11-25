@@ -7,7 +7,7 @@ Tolerances:
   crates/grilly-infer/tests/kv_cache.rs. That is a float32 kernel against
   float64: head_dim-term dot products, then compensated sums.
 - against torch's float32 SDPA: rtol 1e-5, atol 1e-6 * max|v|. That is case
-  (b) in CLAUDE.md §9: torch sums in another order.
+  (b) in docs/testing.md: torch sums in another order.
 """
 
 import gc

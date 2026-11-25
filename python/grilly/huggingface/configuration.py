@@ -3,7 +3,7 @@ class that runs it.
 
 This is the only place that knows Hugging Face's field names. The models in
 ``grilly.infer.models`` take a config object and nothing else, so a model
-can be built without this package (CLAUDE.md §11).
+can be built without this package.
 """
 
 from __future__ import annotations

@@ -45,7 +45,7 @@ The computation follows CubbyLLM's own torch code op for op (its
 The parameter names are this file's, not CubbyLLM's pickle layout: a
 checkpoint is exported to safetensors under these names on the CubbyLLM
 side, so this model loads with ``load_state_dict(load_file(path),
-assign=True)`` and nothing of CubbyLLM installed (CLAUDE.md §11).
+assign=True)`` and nothing of CubbyLLM installed.
 
 Not yet: left-padded batches (the recurrence and the context mean would
 have to skip the padding), several new tokens against a non-empty state

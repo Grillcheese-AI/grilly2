@@ -1,8 +1,8 @@
 # The torch surface Hugging Face uses
 
-**Status: measurement only.** It feeds the `grilly-huggingface` plan (CLAUDE.md
-§4), which is proposed after the current task list, per the owner. ONNX is
-out of grilly2's plan.
+**Status: measurement only.** It feeds the `grilly-huggingface` plan, which
+is proposed after the current task list, per the owner. ONNX is out of
+grilly2's plan.
 
 ## How this was measured
 
@@ -17,10 +17,10 @@ appear there, and still have to exist for modules to import.
 
 Versions: transformers 5.5.1, safetensors 0.7.0, accelerate 1.15.0.
 
-A first pass by a delegated agent reported far fewer resolving names (33
-of 208 for the model set). That pass ran where grilly did not resolve:
-CLAUDE.md trap 1. The numbers below are from a rerun and were
-spot-checked. `torch.cat`, `torch.einsum`, `torch.no_grad` and
+A first pass reported far fewer resolving names (33 of 208 for the model
+set). That pass ran in an interpreter where grilly was not importable, so
+it measured the environment, not grilly. The numbers below are from a
+rerun and were spot-checked. `torch.cat`, `torch.einsum`, `torch.no_grad` and
 `torch.utils.checkpoint.checkpoint` all resolve.
 
 ## Results (2026-09-19)
@@ -105,5 +105,5 @@ infrastructure:
   bfloat16. grilly computes in float32, so loading needs those dtypes at
   least as storage with conversion. Which half-precision support grilly2
   offers is a decision for the owner.
-- **accelerate is mostly out of scope** for a single-GPU backend (CLAUDE.md
-  §2: "Scope is not shortfall").
+- **accelerate is mostly out of scope** for a single-GPU backend, and
+  scope is not shortfall.

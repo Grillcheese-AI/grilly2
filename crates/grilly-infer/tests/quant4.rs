@@ -3,7 +3,7 @@
 //! Tolerances:
 //! - the levels, scales and zero points are **bit-exact** against the same
 //!   formula evaluated here: the divisions are correctly rounded on the GPU
-//!   (`div_rn`), as they are on the host (CLAUDE.md §9 case (a));
+//!   (`div_rn`), as they are on the host (case (a) in docs/testing.md);
 //! - `dequantize` is bit-exact for the same reason: `q * scale + min` is one
 //!   fused multiply-add on both sides;
 //! - `linear` is measured against a **float64** evaluation of
